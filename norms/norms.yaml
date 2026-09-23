@@ -1,0 +1,159 @@
+# Нормы снижения платы за коммунальные услуги ненадлежащего качества
+# и (или) с перерывами, превышающими допустимую продолжительность.
+#
+# Первоисточник: Приложение № 1 к Правилам предоставления коммунальных услуг
+# собственникам и пользователям помещений в МКД и жилых домов,
+# утв. Постановлением Правительства РФ от 06.05.2011 № 354.
+#
+# Это «переменная часть» продукта: при переносе в другой регион или при
+# изменении правил меняется этот файл, а код расчёта остаётся прежним.
+# Каждое значение привязано к пункту документа и дате проверки.
+
+schema_version: 1
+source:
+  title: "Приложение № 1 к Правилам, утв. ПП РФ от 06.05.2011 № 354"
+  edition: "ред. от 19.12.2025 (КонсультантПлюс)"
+  checked_at: "2026-09-22"
+  rules_url: "https://www.consultant.ru/document/cons_doc_LAW_114247/"
+  recalculation_items: "п. 98, 101 Правил (раздел IX)"
+  fixation_items: "п. 105–113 Правил (раздел X)"
+
+services:
+  hot_water_off:
+    title: "Горячее водоснабжение"
+    genitive: "горячей воды"
+    button: "Нет горячей воды"
+    item: "п. 4 Приложения № 1"
+    url: "https://www.consultant.ru/document/cons_doc_LAW_114247/ffebcb4aeb7857996e07739ff465b72194318553/"
+    kind: interruption
+    interruption:
+      monthly_hours: 8
+      single_hours: 4
+      single_hours_note: "24 ч подряд при аварии на тупиковой магистрали"
+      rate_percent: 0.15
+      unit_hours: 1
+    planned_outage_note: >-
+      Плановые ремонтные отключения горячей воды (летние) проводятся по СанПиН.
+      По п. 98–99 Правил плата при них снижается только на объём непредоставленной
+      услуги; при наличии счётчика вы и так не платите за неизрасходованную воду.
+
+  hot_water_temp:
+    title: "Горячее водоснабжение (температура)"
+    genitive: "горячей воды"
+    button: "Вода еле тёплая"
+    item: "п. 5 Приложения № 1"
+    url: "https://www.consultant.ru/document/cons_doc_LAW_114247/ffebcb4aeb7857996e07739ff465b72194318553/"
+    kind: hot_water_temperature
+    temperature:
+      norm_c: 60
+      day_tolerance_c: 3
+      night_tolerance_c: 5
+      night_from_hour: 0
+      night_to_hour: 5
+      step_c: 3
+      rate_percent_per_step_hour: 0.1
+      cold_tariff_below_c: 40
+    measure_hint: "Измерьте температуру в точке водоразбора (кран) после слива воды в течение не более 3 минут."
+
+  heating_temp:
+    title: "Отопление (температура в квартире)"
+    genitive: "отопления"
+    button: "Холодно в квартире"
+    item: "п. 15 Приложения № 1"
+    url: "https://www.consultant.ru/document/cons_doc_LAW_114247/38f223113cabebcdfa928503d5524f19d8309589/"
+    kind: heating_temperature
+    temperature:
+      norm_c: 18
+      corner_norm_c: 20
+      # В районах с температурой наиболее холодной пятидневки −31 °C и ниже
+      # норма выше. В MVP не используется: регион указывается вручную позже.
+      cold_region_norm_c: 20
+      cold_region_corner_norm_c: 22
+      night_drop_c: 3
+      night_from_hour: 0
+      night_to_hour: 5
+      rate_percent_per_degree_hour: 0.15
+    measure_hint: "Измерьте температуру в жилой комнате: в центре комнаты, примерно в 1 м от пола, вдали от окон и батарей."
+
+  heating_off:
+    title: "Отопление"
+    genitive: "отопления"
+    button: "Нет отопления"
+    item: "п. 15 Приложения № 1"
+    url: "https://www.consultant.ru/document/cons_doc_LAW_114247/38f223113cabebcdfa928503d5524f19d8309589/"
+    kind: interruption
+    interruption:
+      monthly_hours: 24
+      single_hours: 16
+      single_hours_note: "16 ч при температуре в квартире от +12 °C до нормы; 8 ч — от +10 до +12 °C; 4 ч — от +8 до +10 °C"
+      rate_percent: 0.15
+      unit_hours: 1
+
+  cold_water_off:
+    title: "Холодное водоснабжение"
+    genitive: "холодной воды"
+    button: "Нет холодной воды"
+    item: "п. 1 Приложения № 1"
+    url: "https://www.consultant.ru/document/cons_doc_LAW_114247/1cdba5e589d1c8b2bbbbbc48c348d60211a93d50/"
+    kind: interruption
+    interruption:
+      monthly_hours: 8
+      single_hours: 4
+      rate_percent: 0.15
+      unit_hours: 1
+
+  electricity_off:
+    title: "Электроснабжение"
+    genitive: "электроэнергии"
+    button: "Нет света"
+    item: "п. 9 Приложения № 1"
+    url: "https://www.consultant.ru/document/cons_doc_LAW_114247/40033c283166de1f163f769bdb51232795c05336/"
+    kind: interruption
+    interruption:
+      # Зависит от числа независимых источников питания дома.
+      variants:
+        two_sources: 2
+        one_source: 24
+      default_variant: one_source
+      rate_percent: 0.15
+      unit_hours: 1
+
+  gas_off:
+    title: "Газоснабжение"
+    genitive: "газа"
+    button: "Нет газа"
+    item: "п. 10 Приложения № 1"
+    url: "https://www.consultant.ru/document/cons_doc_LAW_114247/a89edbbf3112b7d644b4535eb871923504ecaf43/"
+    kind: interruption
+    interruption:
+      monthly_hours: 4
+      rate_percent: 0.15
+      unit_hours: 1
+
+  sewerage_off:
+    title: "Водоотведение"
+    genitive: "водоотведения (канализации)"
+    button: "Засор канализации"
+    item: "п. 8 Приложения № 1"
+    url: "https://www.consultant.ru/document/cons_doc_LAW_114247/e7e2bf71a6bbcc95b41bd0d1eaa94be371c57c8c/"
+    kind: interruption
+    interruption:
+      monthly_hours: 8
+      single_hours: 4
+      rate_percent: 0.15
+      unit_hours: 1
+
+  waste_off:
+    title: "Обращение с ТКО (вывоз мусора)"
+    genitive: "вывоза мусора"
+    button: "Не вывозят мусор"
+    item: "п. 17 Приложения № 1"
+    url: "https://www.consultant.ru/document/cons_doc_LAW_114247/03d663952dce02f58fbdbec6844ac743d3b5a765/"
+    kind: interruption
+    executor_hint: "Исполнитель по этой услуге — обычно региональный оператор по обращению с ТКО (смотрите получателя в квитанции)."
+    interruption:
+      monthly_hours: 72
+      single_hours: 48
+      single_hours_note: "48 ч при среднесуточной температуре +5 °C и ниже, 24 ч — выше +5 °C"
+      rate_percent: 3.3
+      unit_hours: 24

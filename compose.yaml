@@ -1,0 +1,36 @@
+# Локальный запуск всего одной командой:   docker compose up -d --build
+# На сервере с HTTPS (webhook + мини-приложение):   docker compose --profile https up -d --build
+services:
+  app:
+    build: .
+    image: vernem-bot:1.0.0
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      PORT: "3000"
+      DB_PATH: /app/data/vernem.db
+    ports:
+      - "${HOST_PORT:-3000}:3000"
+    volumes:
+      - vernem-data:/app/data
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2.11.4-alpine
+    profiles: ["https"]
+    depends_on:
+      - app
+    environment:
+      DOMAIN: ${DOMAIN:-}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    restart: unless-stopped
+
+volumes:
+  vernem-data:
+  caddy-data:

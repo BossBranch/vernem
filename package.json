@@ -1,0 +1,34 @@
+{
+  "name": "vernem-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "«Вернём» — бот в MAX: фиксация отключений коммунальных услуг, расчёт снижения платы по ПП РФ № 354 и заявление на перерасчёт",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node --disable-warning=ExperimentalWarning dist/src/index.js",
+    "setup": "node -e \"const fs=require('fs');if(fs.existsSync('.env'))console.log('.env уже есть');else{fs.copyFileSync('.env.example','.env');console.log('Создан .env — впишите MAX_BOT_TOKEN')}\"",
+    "dev": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning src/index.ts",
+    "demo": "node --disable-warning=ExperimentalWarning src/sim/demo-server.ts",
+    "sim": "node --disable-warning=ExperimentalWarning src/sim/cli.ts",
+    "seed:demo": "node --disable-warning=ExperimentalWarning src/sim/seed-demo.ts",
+    "test": "node --disable-warning=ExperimentalWarning --test \"test/**/*.test.ts\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@maxhub/max-bot-api": "0.3.1",
+    "express": "5.2.1",
+    "pdfkit": "0.20.2",
+    "yaml": "2.9.1"
+  },
+  "devDependencies": {
+    "@types/express": "5.0.6",
+    "@types/node": "22.20.4",
+    "@types/pdfkit": "0.17.6",
+    "typescript": "5.9.3"
+  }
+}

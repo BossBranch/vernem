@@ -1,0 +1,6 @@
+# Единые переводы строк (LF) на Windows, macOS и Linux: иначе Docker и Caddy могут споткнуться о CRLF.
+* text=auto eol=lf
+*.ttf binary
+*.pdf binary
+*.png binary
+*.db binary
