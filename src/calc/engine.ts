@@ -99,7 +99,7 @@ export function calcInterruption(norm: ServiceNorm, intervals: Interval[], tz: s
     }
     if (singleLimitExceeded) {
       lines.push(
-        `Единовременный перерыв ${formatDuration(maxSingle)} превысил допустимую продолжительность ${n.single_hours} ч.`,
+        `Кроме того, один перерыв длился ${formatDuration(maxSingle)} — дольше допустимых ${n.single_hours} ч подряд. На сумму это не влияет, но это ещё одно нарушение.`,
       );
     }
     months.push({ month, percent, lines, totalHours: round2(total), excessHours: round2(excess), singleLimitExceeded });

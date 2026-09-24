@@ -65,7 +65,8 @@ export type HouseInfo = {
 };
 
 /** Адрес в списке «Мои адреса»: у одного человека их может быть несколько. */
-export type UserHouse = House & { entrance: string | null; notify: number };
+/** Адрес в списке жителя: подъезд, уведомления, квартира и лицевой счёт — у каждого адреса свои. */
+export type UserHouse = House & { entrance: string | null; notify: number; flat: string | null; account: string | null };
 
 export type Incident = {
   id: number;
@@ -91,6 +92,9 @@ export type Claim = {
   executorInn?: string;
   executorType?: ExecutorType;
   createdAt?: string;
+  /** Когда житель подал заявление исполнителю и под каким входящим номером. */
+  submittedAt?: string;
+  incomingNumber?: string;
 };
 
 export type Participant = {
@@ -310,6 +314,8 @@ const ADDED_COLUMNS: [table: string, column: string, ddl: string][] = [
   ['houses', 'city', 'TEXT'],
   ['houses', 'city_norm', 'TEXT'],
   ['acts', 'chair_signed', 'INTEGER'],
+  ['user_houses', 'flat', 'TEXT'],
+  ['user_houses', 'account', 'TEXT'],
 ];
 
 /**
@@ -317,6 +323,32 @@ const ADDED_COLUMNS: [table: string, column: string, ddl: string][] = [
  * «ул. Примерная, д. 5, корп. 1» и «Примерная 5к1» → «примерная5к1».
  * В следующей версии заменяется привязкой к ФИАС/ГАР.
  */
+/** «кв. 15», «квартира 15» — номер квартиры, а не часть адреса дома. */
+const FLAT_RE = /(?<![а-яa-z])(?:квартира|кв)\.?\s*№?\s*(\d+[а-яa-z]?)/giu;
+
+/** Квартира, если житель вписал её в строку адреса. */
+export function flatFromAddress(address: string): string | null {
+  const m = new RegExp(FLAT_RE.source, 'iu').exec(address);
+  return m ? m[1].toUpperCase() : null;
+}
+
+/** Адрес дома для записи: без квартиры, названия с заглавной буквы («ленина 5» → «Ленина 5»). */
+export function tidyStreet(address: string): string {
+  const ABBR = new Set(['ул', 'д', 'к', 'корп', 'стр', 'пр', 'пр-т', 'просп', 'пер', 'ш', 'б-р', 'бульв', 'наб', 'пл', 'пр-д', 'мкр', 'лит', 'литера', 'дом', 'улица', 'проспект', 'переулок', 'шоссе', 'бульвар', 'набережная', 'площадь', 'проезд', 'корпус', 'строение', 'микрорайон', 'им', 'имени', 'на', 'и']);
+  return address
+    .replace(new RegExp(FLAT_RE.source, 'giu'), ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/[\s,]+$/, '')
+    .trim()
+    .split(' ')
+    .map((w) => {
+      const bare = w.toLowerCase().replace(/[.,]/g, '');
+      if (ABBR.has(bare) || !/^[а-яё]/.test(w)) return w;
+      return w[0].toUpperCase() + w.slice(1);
+    })
+    .join(' ');
+}
+
 export function normalizeAddress(address: string): string {
   const W = '[а-яa-z0-9-]';
   const word = (list: string) => new RegExp(`(?<!${W})(?:${list})(?!${W})\\.?`, 'gu');
@@ -324,6 +356,7 @@ export function normalizeAddress(address: string): string {
     .toLowerCase()
     .replace(/ё/g, 'е')
     .replace(/[,;]/g, ' ')
+    .replace(FLAT_RE, ' ')
     .replace(word('корпус|корп|к'), ' к')
     .replace(word('строение|стр'), ' с')
     .replace(word('улица|ул|проспект|просп|пр-т|пр|переулок|пер|бульвар|бульв|б-р|шоссе|ш|площадь|пл|набережная|наб|проезд|пр-д|дом|д'), ' ')
@@ -380,6 +413,13 @@ export class Db {
     this.db.exec(SCHEMA_V2);
     // Второй проход: колонки таблиц, которые появились только в SCHEMA_V2 (например, acts).
     this.migrate();
+    // Квартира и лицевой счёт раньше были одни на жителя. У кого один адрес — переносим к нему,
+    // у кого несколько — не угадываем (иначе чужая квартира попала бы в заявление по другому дому).
+    this.db.exec(`UPDATE user_houses SET flat = (SELECT flat FROM users WHERE users.id = user_houses.user_id),
+      account = (SELECT account FROM users WHERE users.id = user_houses.user_id)
+      WHERE flat IS NULL AND account IS NULL
+        AND (SELECT COUNT(*) FROM user_houses u2 WHERE u2.user_id = user_houses.user_id) = 1
+        AND (SELECT save_personal FROM users WHERE users.id = user_houses.user_id) = 1`);
   }
 
   private migrate() {
@@ -463,7 +503,7 @@ export class Db {
   }
 
   upsertHouse(address: string, tz: string, demo = 0, city: string | null = null): House {
-    const street = address.trim();
+    const street = demo ? address.trim() : tidyStreet(address);
     const cityNorm = city ? normalizeCity(city) : null;
     const norm = cityNorm ? `${cityNorm}|${normalizeAddress(street)}` : normalizeAddress(street);
     const full = city ? `${city}, ${street}` : street;
@@ -510,13 +550,13 @@ export class Db {
 
   listUserHouses(userId: number): UserHouse[] {
     return this.db
-      .prepare('SELECT h.*, uh.entrance AS entrance, uh.notify AS notify FROM user_houses uh JOIN houses h ON h.id = uh.house_id WHERE uh.user_id = ? ORDER BY uh.created_at, h.id')
+      .prepare('SELECT h.*, uh.entrance AS entrance, uh.notify AS notify, uh.flat AS flat, uh.account AS account FROM user_houses uh JOIN houses h ON h.id = uh.house_id WHERE uh.user_id = ? ORDER BY uh.created_at, h.id')
       .all(userId) as UserHouse[];
   }
 
   getUserHouse(userId: number, houseId: number): UserHouse | undefined {
     return this.db
-      .prepare('SELECT h.*, uh.entrance AS entrance, uh.notify AS notify FROM user_houses uh JOIN houses h ON h.id = uh.house_id WHERE uh.user_id = ? AND uh.house_id = ?')
+      .prepare('SELECT h.*, uh.entrance AS entrance, uh.notify AS notify, uh.flat AS flat, uh.account AS account FROM user_houses uh JOIN houses h ON h.id = uh.house_id WHERE uh.user_id = ? AND uh.house_id = ?')
       .get(userId, houseId) as UserHouse | undefined;
   }
 
@@ -526,9 +566,31 @@ export class Db {
     this.db.prepare('UPDATE users SET house_id = ? WHERE id = ?').run(houseId, userId);
   }
 
-  setUserHouse(userId: number, houseId: number, fields: { entrance?: string | null; notify?: number }) {
-    if (fields.entrance !== undefined) this.db.prepare('UPDATE user_houses SET entrance = ? WHERE user_id = ? AND house_id = ?').run(fields.entrance, userId, houseId);
-    if (fields.notify !== undefined) this.db.prepare('UPDATE user_houses SET notify = ? WHERE user_id = ? AND house_id = ?').run(fields.notify, userId, houseId);
+  setUserHouse(userId: number, houseId: number, fields: { entrance?: string | null; notify?: number; flat?: string | null; account?: string | null }) {
+    for (const key of ['entrance', 'notify', 'flat', 'account'] as const) {
+      if (fields[key] !== undefined) this.db.prepare(`UPDATE user_houses SET ${key} = ? WHERE user_id = ? AND house_id = ?`).run(fields[key] ?? null, userId, houseId);
+    }
+  }
+
+  /**
+   * Личные данные для документов по конкретному дому: ФИО общее, квартира и лицевой счёт — у адреса
+   * (у жителя может быть своя квартира и квартира родителей). Только если житель разрешил их хранить.
+   */
+  personFor(userId: number, houseId: number): { fio: string | null; flat: string | null; account: string | null } {
+    const u = this.getUser(userId);
+    if (!u?.save_personal) return { fio: null, flat: null, account: null };
+    const uh = this.getUserHouse(userId, houseId);
+    return { fio: u.fio, flat: uh?.flat ?? null, account: uh?.account ?? null };
+  }
+
+  savePerson(userId: number, houseId: number, p: { fio?: string | null; flat?: string | null; account?: string | null }) {
+    this.updateUser(userId, { fio: p.fio ?? null, save_personal: 1 });
+    if (this.getUserHouse(userId, houseId)) this.setUserHouse(userId, houseId, { flat: p.flat ?? null, account: p.account ?? null });
+  }
+
+  forgetPerson(userId: number) {
+    this.updateUser(userId, { fio: null, flat: null, account: null, save_personal: 0 });
+    this.db.prepare('UPDATE user_houses SET flat = NULL, account = NULL WHERE user_id = ?').run(userId);
   }
 
   removeUserHouse(userId: number, houseId: number) {
@@ -607,6 +669,12 @@ export class Db {
     this.db.prepare('UPDATE incidents SET ended_at = ? WHERE id = ? AND ended_at IS NULL').run(endedAt, id);
   }
 
+  /** Житель, сообщивший первым, исправил время — время отключения для акта меняется вместе с ним. */
+  setIncidentTimes(id: number, startedAt: string, endedAt?: string | null) {
+    this.db.prepare('UPDATE incidents SET started_at = ? WHERE id = ?').run(startedAt, id);
+    if (endedAt !== undefined) this.db.prepare('UPDATE incidents SET ended_at = ? WHERE id = ?').run(endedAt, id);
+  }
+
   /** «Ещё не починили»: снова открыть отключение, если его закрыли по ошибке. */
   reopenIncident(id: number) {
     this.db.prepare('UPDATE incidents SET ended_at = NULL WHERE id = ?').run(id);
@@ -678,6 +746,10 @@ export class Db {
     return this.db.prepare('SELECT * FROM readings WHERE participant_id = ? ORDER BY at').all(participantId) as Reading[];
   }
 
+  deleteReading(participantId: number, readingId: number): boolean {
+    return this.db.prepare('DELETE FROM readings WHERE id = ? AND participant_id = ?').run(readingId, participantId).changes > 0;
+  }
+
   // ---------- напоминания ----------
 
   schedule(kind: ReminderKind, participantId: number, userId: number, dueAt: Date) {
@@ -729,8 +801,10 @@ export class Db {
 
   // ---------- акты (п. 110(1)) ----------
 
-  createAct(incidentId: number, initiatorUserId: number, reason: ActReason): Act {
-    this.db.prepare('INSERT INTO acts (code, incident_id, initiator_user_id, reason) VALUES (?, ?, ?, ?)').run(newCode(), incidentId, initiatorUserId, reason);
+  createAct(incidentId: number, initiatorUserId: number, reason: ActReason, at: Date = new Date()): Act {
+    this.db
+      .prepare('INSERT INTO acts (code, incident_id, initiator_user_id, reason, created_at) VALUES (?, ?, ?, ?, ?)')
+      .run(newCode(), incidentId, initiatorUserId, reason, at.toISOString());
     return this.getActByIncident(incidentId)!;
   }
 
@@ -762,6 +836,11 @@ export class Db {
     this.db
       .prepare('INSERT INTO act_signers (act_id, user_id, role, fio, flat, confirmed_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(act_id, user_id) DO NOTHING')
       .run(actId, userId, role, fio, flat, at.toISOString());
+  }
+
+  /** Житель исправил свои ФИО или квартиру в акте, пока его не подписали на бумаге. */
+  updateSigner(actId: number, userId: number, fio: string, flat: string | null) {
+    this.db.prepare('UPDATE act_signers SET fio = ?, flat = ? WHERE act_id = ? AND user_id = ?').run(fio, flat, actId, userId);
   }
 
   listSigners(actId: number): ActSigner[] {

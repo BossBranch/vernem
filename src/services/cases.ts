@@ -1,5 +1,8 @@
 import { calculate, refundAmount } from '../calc/engine.ts';
-import type { CalcInput, CalcResult } from '../calc/engine.ts';
+import type { CalcInput, CalcResult, Interval, MonthCalc } from '../calc/engine.ts';
+import { fmtPercent } from '../calc/format.ts';
+import { allowedMonthlyHours } from '../calc/norms.ts';
+import { formatShort, monthKey } from '../calc/time.ts';
 import type { Norms } from '../calc/norms.ts';
 import { buildClaim, claimToText } from '../docs/claim.ts';
 import type { ClaimDoc, ClaimInput } from '../docs/claim.ts';
@@ -31,8 +34,59 @@ export function calcInputFor(db: Db, norms: Norms, c: CaseBundle, now: Date): Ca
   return { kind: 'hot_water_temperature', readings, end };
 }
 
+/**
+ * Прошлые отключения той же услуги у того же жителя по тому же дому. Лимит перерыва — на месяц суммарно
+ * (Приложение № 1), поэтому второе отключение в месяце считается вместе с первым.
+ */
+function earlierOutages(db: Db, c: CaseBundle): Interval[] {
+  const own = new Date(c.p.started_at).getTime();
+  return db
+    .listUserParticipants(c.p.user_id)
+    .filter((o) => o.id !== c.p.id && o.ended_at)
+    .filter((o) => {
+      const t = new Date(o.started_at).getTime();
+      return t < own || (t === own && o.id < c.p.id);
+    })
+    .filter((o) => {
+      const inc = db.getIncident(o.incident_id);
+      return !!inc && inc.service_key === c.incident.service_key && inc.house_id === c.incident.house_id;
+    })
+    .map((o) => ({ start: new Date(o.started_at), end: new Date(o.ended_at!) }));
+}
+
 export function calcFor(db: Db, norms: Norms, c: CaseBundle, now: Date): CalcResult {
-  return calculate(norms.services[c.incident.service_key], calcInputFor(db, norms, c, now), c.house.tz);
+  const norm = norms.services[c.incident.service_key];
+  const input = calcInputFor(db, norms, c, now);
+  const own = calculate(norm, input, c.house.tz);
+  if (input.kind !== 'interruption' || !norm.interruption) return own;
+  const earlier = earlierOutages(db, c);
+  if (!earlier.length) return own;
+  // Считаем месяц целиком (прошлые + это отключение) и вычитаем то, что положено по прошлым:
+  // так деньги за один и тот же месяц не посчитаются дважды.
+  const prev = calculate(norm, { ...input, intervals: earlier }, c.house.tz);
+  const all = calculate(norm, { ...input, intervals: [...earlier, ...input.intervals] }, c.house.tz);
+  const allowed = allowedMonthlyHours(norm.interruption, c.incident.variant);
+  const months: MonthCalc[] = own.months.map((m) => {
+    const before = prev.months.find((x) => x.month === m.month);
+    const total = all.months.find((x) => x.month === m.month);
+    if (!before || !total) return m;
+    const percent = Math.max(0, Math.round((total.percent - before.percent) * 100) / 100);
+    const dates = earlier
+      .filter((iv) => monthKey(iv.start, c.house.tz) <= m.month && monthKey(iv.end, c.house.tz) >= m.month)
+      .map((iv) => `${formatShort(iv.start, c.house.tz)}–${formatShort(iv.end, c.house.tz)}`);
+    return {
+      ...total,
+      percent,
+      lines: [
+        `Лимит ${allowed} ч — на весь месяц, поэтому считаю вместе с прошлыми отключениями: ${dates.join(', ')}.`,
+        ...total.lines,
+        before.percent > 0
+          ? `Из них ${fmtPercent(before.percent)} уже положены по прошлому отключению — по этому: ${fmtPercent(percent)}.`
+          : `По прошлому отключению снижения не было — всё это по этому отключению: ${fmtPercent(percent)}.`,
+      ],
+    };
+  });
+  return { ...own, months };
 }
 
 export function billsOf(p: Participant): Record<string, number> {
@@ -51,8 +105,23 @@ export function claimOf(p: Participant): Claim {
   }
 }
 
+/** Меньше часа «холодной» горячей воды — копейки; заявление ради этого не делаем. */
+export const MIN_COLD_TARIFF_HOURS = 1;
+
 export function hasMoney(calc: CalcResult): boolean {
-  return calc.months.some((m) => m.percent > 0 || (m.coldTariffHours ?? 0) > 0);
+  return calc.months.some((m) => m.percent > 0 || (m.coldTariffHours ?? 0) >= MIN_COLD_TARIFF_HOURS);
+}
+
+/** Плата за месяц, которую житель уже вписывал в другом деле по той же услуге и дому. */
+function billHints(db: Db, c: CaseBundle): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const o of db.listUserParticipants(c.p.user_id)) {
+    if (o.id === c.p.id) continue;
+    const inc = db.getIncident(o.incident_id);
+    if (!inc || inc.service_key !== c.incident.service_key || inc.house_id !== c.incident.house_id) continue;
+    for (const [month, bill] of Object.entries(billsOf(o))) if (!(month in out)) out[month] = bill;
+  }
+  return out;
 }
 
 export function estimate(calc: CalcResult, bills: Record<string, number>): { sum: number; complete: boolean } {
@@ -136,14 +205,15 @@ export type CaseSummary = {
   role: string;
   neighbours: number;
   demo: boolean;
-  months: { month: string; percent: number; lines: string[]; bill: number | null; coldTariffHours: number }[];
+  months: { month: string; percent: number; lines: string[]; bill: number | null; billHint: number | null; coldTariffHours: number }[];
+  serviceButton: string;
   basis: string;
   basisUrl: string;
   estimate: number;
   estimateComplete: boolean;
   refundAmount: number | null;
   claim: Claim;
-  readings: { at: string; tempC: number }[];
+  readings: { id: number; at: string; tempC: number }[];
   cardMid: string | null;
   /** mine — житель вписан в акт или начал его; initiator — может отметить «подписан». */
   act: { status: Act['status']; residents: number; chair: boolean; mine: boolean; initiator: boolean } | null;
@@ -156,6 +226,7 @@ export function summarize(db: Db, norms: Norms, c: CaseBundle, now: Date): CaseS
   const calc = calcFor(db, norms, c, now);
   const bills = billsOf(c.p);
   const est = estimate(calc, bills);
+  const hints = billHints(db, c);
   return {
     id: c.p.id,
     service: c.incident.service_key,
@@ -177,15 +248,17 @@ export function summarize(db: Db, norms: Norms, c: CaseBundle, now: Date): CaseS
       percent: m.percent,
       lines: m.lines,
       bill: bills[m.month] ?? null,
+      billHint: hints[m.month] ?? null,
       coldTariffHours: m.coldTariffHours ?? 0,
     })),
+    serviceButton: norm.button,
     basis: norm.item,
     basisUrl: norm.url,
     estimate: est.sum,
     estimateComplete: est.complete,
     refundAmount: c.p.refund_amount,
     claim: claimOf(c.p),
-    readings: db.listReadings(c.p.id).map((r) => ({ at: r.at, tempC: r.temp_c })),
+    readings: db.listReadings(c.p.id).map((r) => ({ id: r.id, at: r.at, tempC: r.temp_c })),
     cardMid: c.p.last_card_mid,
     act: actSummary(db, c.incident.id, c.p.user_id),
     photos: db.listPhotos(c.p.id).length,

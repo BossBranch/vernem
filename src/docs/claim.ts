@@ -8,7 +8,7 @@ import { refundAmount } from '../calc/engine.ts';
 import type { Norms, ServiceNorm } from '../calc/norms.ts';
 import { allowedMonthlyHours } from '../calc/norms.ts';
 import { fmtNum, fmtPercent, fmtRub } from '../calc/format.ts';
-import { formatDate, formatDateTime, formatDuration, hoursBetween, monthTitle } from '../calc/time.ts';
+import { formatDate, formatDateTime, formatDuration, hoursBetween, monthPrepositional, monthTitle } from '../calc/time.ts';
 import type { Act, ActSigner, Claim, House, Incident, Participant, Photo, Reading } from '../db/db.ts';
 
 /**
@@ -73,6 +73,19 @@ export const RECEIPT_BLOCK = [
   'Дата: «___» ____________ 20___ г.    Вх. № __________',
 ];
 
+/** Адрес дома для документа: «г. Кинешма, Ленина 5». */
+export function docAddress(house: House): string {
+  if (!house.city) return house.address;
+  const street = house.address.startsWith(`${house.city}, `) ? house.address.slice(house.city.length + 2) : house.address;
+  return `г. ${house.city}, ${street}`;
+}
+
+/** Имя файла по делу: чтобы заявления по разным отключениям не превращались в «(1)», «(2)». */
+export function docFileName(kind: string, serviceButton: string, date: Date, tz: string): string {
+  const what = serviceButton.toLowerCase().replace(/[^а-яёa-z0-9]+/gi, '_').replace(/^_|_$/g, '');
+  return `${kind}_${what}_${formatDate(date, tz)}.pdf`;
+}
+
 export type ClaimInput = {
   norms: Norms;
   incident: Incident;
@@ -102,7 +115,7 @@ export function evidenceExtras(input: Pick<ClaimInput, 'participant' | 'act' | '
     // Число подписей не пишем: соседи могли расписаться на бумаге, не заходя в бот.
     const chair = act.act.chair_signed === 1 || act.signers.some((s) => s.role === 'chair');
     facts.push(
-      `Нарушение подтверждено актом, составленным потребителями без участия исполнителя (п. 110(1) Правил), от ${formatDate(new Date(act.act.signed_at ?? act.act.created_at), house.tz)}: подписан потребителями${chair ? ' и председателем совета многоквартирного дома' : ''}.`,
+      `Нарушение подтверждено актом от ${formatDate(new Date(act.act.created_at), house.tz)}, составленным и подписанным потребителями${chair ? ' и председателем совета многоквартирного дома' : ''} без участия исполнителя (п. 110(1) Правил).`,
     );
     attachments.push('Копия акта о нарушении качества коммунальной услуги (п. 110(1) Правил).');
   }
@@ -123,13 +136,16 @@ export function buildClaim(input: ClaimInput): ClaimDoc {
   const start = new Date(p.started_at);
   const end = p.ended_at ? new Date(p.ended_at) : now;
   const fio = claim.fio?.trim() || BLANK;
+  // Дата документа — когда житель его впервые получил, а не каждый раз «сегодня».
+  const issued = claim.createdAt ? new Date(claim.createdAt) : now;
 
+  // «Заявитель: ФИО» — без склонения фамилии, которое легко сделать с ошибкой.
   const from = [
-    `от ${fio}`,
-    `адрес: ${house.address}, кв. ${claim.flat?.trim() || '______'}`,
+    `Заявитель: ${fio}`,
+    `адрес: ${docAddress(house)}, кв. ${claim.flat?.trim() || '______'}`,
     // В Москве и области лицевой счёт в ЕПД называется «код плательщика».
-    `лицевой счёт (код плательщика): ${claim.account?.trim() || BLANK}`,
-    `телефон, e-mail для связи: ${BLANK}`,
+    `л/с (код плательщика): ${claim.account?.trim() || '______________'}`,
+    `телефон, e-mail: ${BLANK}`,
   ];
 
   const facts: string[] = [];
@@ -138,33 +154,36 @@ export function buildClaim(input: ClaimInput): ClaimDoc {
       `С ${formatDateTime(start, tz)} по ${formatDateTime(end, tz)} (${formatDuration(hoursBetween(start, end))}) коммунальная услуга «${serviceName}» не предоставлялась (перерыв в предоставлении).`,
     );
   } else if (calc.kind === 'heating_temperature') {
+    const t = norm.temperature as { norm_c: number; corner_norm_c: number };
+    const normC = p.corner ? t.corner_norm_c : t.norm_c;
     facts.push(
       `С ${formatDateTime(start, tz)} по ${formatDateTime(end, tz)} температура воздуха в жилом помещении${p.corner ? ' (угловая комната)' : ''} была ниже нормативной. Результаты измерений:`,
     );
-    for (const r of readings) facts.push(`— ${formatDateTime(new Date(r.at), tz)}: +${fmtNum(r.temp_c, 1)} °C`);
+    for (const r of readings) facts.push(`— ${formatDateTime(new Date(r.at), tz)}: +${fmtNum(r.temp_c, 1)} °C${r.temp_c >= normC ? ' (в пределах нормы)' : ''}`);
   } else {
+    const t = norm.temperature as { norm_c: number; day_tolerance_c: number };
     facts.push(
       `С ${formatDateTime(start, tz)} по ${formatDateTime(end, tz)} температура горячей воды в точке водоразбора была ниже нормативной. Результаты измерений:`,
     );
-    for (const r of readings) facts.push(`— ${formatDateTime(new Date(r.at), tz)}: +${fmtNum(r.temp_c, 1)} °C`);
+    // Замер в норме тоже пишем — честно помечаем, что в этот момент вода была нормальной.
+    for (const r of readings) facts.push(`— ${formatDateTime(new Date(r.at), tz)}: +${fmtNum(r.temp_c, 1)} °C${r.temp_c >= t.norm_c - t.day_tolerance_c ? ' (в пределах нормы)' : ''}`);
   }
 
   const adsNumber = p.own_ads_number || incident.ads_number;
   // Сосед мог дозвониться сам, даже если первый житель сообщил без номера.
   const evidence = p.own_ads_number && incident.evidence === 'self' ? 'ads' : incident.evidence;
+  // Время регистрации пишем, только если оно известно: для номера первого жителя это начало отключения
+  // (по п. 111 Правил нарушение и считается с момента сообщения). Время звонка соседа не спрашивали — не выдумываем.
+  const regAt = p.own_ads_number ? '' : ` ${formatDateTime(new Date(incident.started_at), tz)}`;
   if (evidence === 'ads' && adsNumber) {
     const whose = p.own_ads_number ? '' : p.role === 'neighbour' ? ' (сообщение другого жителя дома о том же нарушении)' : '';
-    facts.push(
-      `Нарушение зафиксировано: сообщение в аварийно-диспетчерскую службу зарегистрировано под № ${adsNumber} ${formatDateTime(new Date(incident.started_at), tz)}${whose} (п. 105–106 Правил).`,
-    );
+    facts.push(`Нарушение зафиксировано: сообщение в аварийно-диспетчерскую службу зарегистрировано под № ${adsNumber}${regAt}${whose} (п. 105–106 Правил).`);
   } else if (evidence === 'written' && adsNumber) {
-    facts.push(`О нарушении исполнителю сообщено письменно: обращение № ${adsNumber} от ${formatDateTime(new Date(incident.started_at), tz)} (п. 105 Правил).`);
+    facts.push(`О нарушении исполнителю сообщено письменно: обращение № ${adsNumber}${regAt ? ` от${regAt}` : ''} (п. 105 Правил).`);
   } else if (input.act?.act.status === 'signed') {
     facts.push('Сообщить о нарушении в аварийно-диспетчерскую службу не удалось. Время начала нарушения указано в акте (п. 111 Правил).');
   } else {
-    facts.push(
-      'Сообщить о нарушении в аварийно-диспетчерскую службу не удалось. Время начала и окончания нарушения указаны потребителем (п. 111–113 Правил); акт о нарушении прилагается при наличии.',
-    );
+    facts.push('Сообщить о нарушении в аварийно-диспетчерскую службу не удалось. Время начала и окончания нарушения указаны потребителем (п. 111–113 Правил).');
   }
   const extras = evidenceExtras(input);
   facts.push(...extras.facts);
@@ -197,9 +216,9 @@ export function buildClaim(input: ClaimInput): ClaimDoc {
         `произвести перерасчёт (снизить размер платы) за коммунальную услугу «${serviceName}» за ${monthTitle(m.month)} на ${fmtPercent(m.percent)}${bill ? ` (ориентировочно ${fmtRub(sum)})` : ''};`,
       );
     }
-    if (m.coldTariffHours && m.coldTariffHours > 0) {
+    if (m.coldTariffHours && m.coldTariffHours >= 1) {
       requests.push(
-        `за ${formatDuration(m.coldTariffHours)} в ${monthTitle(m.month)}, когда температура горячей воды была ниже +40 °C, произвести оплату горячей воды по тарифу за холодную воду;`,
+        `за ${formatDuration(m.coldTariffHours)} ${monthPrepositional(m.month)}, когда температура горячей воды была ниже +40 °C, произвести оплату горячей воды по тарифу за холодную воду;`,
       );
     }
   }
@@ -215,11 +234,11 @@ export function buildClaim(input: ClaimInput): ClaimDoc {
     calc: calcLines,
     requests: requests.map((r, i) => `${i + 1}. ${r[0].toUpperCase()}${r.slice(1)}`),
     note: `Расчёт ориентировочный и выполнен по данным потребителя; итоговый размер снижения платы определяет исполнитель (${norms.source.recalculation_items}). Нормы: ${norms.source.title}, ${norms.source.edition}.`,
-    signature: `Дата: ${formatDate(now, tz)}        Подпись: __________ / ${claim.fio?.trim() || BLANK}`,
+    signature: `Дата: ${formatDate(issued, tz)}        Подпись: __________ / ${claim.fio?.trim() || BLANK}`,
     total: Math.round(total * 100) / 100,
     attachments: extras.attachments.length ? extras.attachments : undefined,
     receipt: RECEIPT_BLOCK,
-    fileName: 'Заявление_на_перерасчёт.pdf',
+    fileName: docFileName('Заявление', norm.button, issued, tz),
   };
 }
 

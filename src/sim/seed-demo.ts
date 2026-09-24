@@ -11,6 +11,11 @@ const H = 3_600_000;
 const h = new Harness({ dbPath, start: new Date(Date.now() - 40 * 24 * H) });
 h.out.onSend = () => {};
 
+// 0. Демо-адрес в «Мои адреса» с квартирой: квартира и лицевой счёт хранятся у адреса.
+const demoHouse = h.db.upsertHouse('ДЕМО: ул. Примерная, 5', 'Europe/Moscow', 1);
+h.db.addUserHouse(userId, demoHouse.id);
+h.db.setUserHouse(userId, demoHouse.id, { entrance: '2', flat: '42' });
+
 // 1. Горячая вода 40 дней назад: заявление подано, перерасчёт пришёл.
 await h.start(userId);
 await h.press(userId, 'Демо');
@@ -41,10 +46,7 @@ await h.press(userId, 'Пропустить');
 await h.advance(5 * 24 * H - 2 * H);
 await h.press(userId, 'Демо');
 
-// 4. Демо-адрес в «Мои адреса» с заполненной карточкой дома (все названия помечены как демо).
-const demoHouse = h.db.upsertHouse('ДЕМО: ул. Примерная, 5', 'Europe/Moscow', 1);
-h.db.addUserHouse(userId, demoHouse.id);
-h.db.setUserHouse(userId, demoHouse.id, { entrance: '2' });
+// 4. Карточка демо-дома заполнена (все названия помечены как демо).
 h.db.setHouseInfo(demoHouse.id, {
   ukName: 'ООО «УК Пример» (демо)',
   ukInn: '7700000000',

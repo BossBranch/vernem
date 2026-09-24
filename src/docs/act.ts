@@ -8,6 +8,7 @@ import { fmtNum } from '../calc/format.ts';
 import { formatDateTime } from '../calc/time.ts';
 import type { Act, ActSigner, House, Incident, Reading } from '../db/db.ts';
 import type { ClaimDoc } from './claim.ts';
+import { docAddress, docFileName } from './claim.ts';
 
 export type ActDocInput = {
   norms: Norms;
@@ -29,7 +30,7 @@ export const ACT_REASON: Record<Act['reason'], string> = {
 };
 
 export function buildActDoc(input: ActDocInput): ClaimDoc {
-  const { norms, incident, house, act, signers, readings, now } = input;
+  const { norms, incident, house, act, signers, readings } = input;
   const norm = norms.services[incident.service_key];
   const tz = house.tz;
   const serviceName = norm.title.replace(/\s*\(.*\)$/, '');
@@ -37,7 +38,7 @@ export function buildActDoc(input: ActDocInput): ClaimDoc {
   const what = norm.kind === 'interruption' ? 'коммунальная услуга не предоставляется' : `${norm.kind === 'heating_temperature' ? 'температура воздуха в жилых помещениях' : 'температура горячей воды'} ниже нормативной`;
 
   const facts = [
-    `Адрес: ${house.address}${incident.entrance ? `, подъезд ${incident.entrance}` : ''}.`,
+    `Адрес: ${docAddress(house)}${incident.entrance ? `, подъезд ${incident.entrance}` : ''}.`,
     `Коммунальная услуга: «${serviceName}».`,
     `Нарушение: ${what} с ${formatDateTime(start, tz)}${incident.ended_at ? ` по ${formatDateTime(new Date(incident.ended_at), tz)}` : ' — на момент составления акта не устранено'}.`,
   ];
@@ -57,7 +58,7 @@ export function buildActDoc(input: ActDocInput): ClaimDoc {
     );
     facts.push('Средство измерения (термометр, модель): ______________________');
   }
-  if (incident.ads_number) facts.push(`Сообщение о нарушении: № ${incident.ads_number} от ${formatDateTime(start, tz)}.`);
+  if (incident.ads_number) facts.push(`Сообщение о нарушении исполнителю: № ${incident.ads_number} от ${formatDateTime(start, tz)}.`);
   facts.push(ACT_REASON[act.reason]);
 
   const signLines = signers.map(
@@ -88,8 +89,9 @@ export function buildActDoc(input: ActDocInput): ClaimDoc {
     requests: [],
     note:
       'Акт имеет силу после собственноручных подписей. Копию акта каждый подписавший прикладывает к своему заявлению о перерасчёте; один экземпляр передаётся исполнителю.',
-    signature: `Дата и время составления: ${formatDateTime(now, tz)}`,
+    // Дата составления — когда акт создали: копия, скачанная позже, совпадает с подписанной бумагой.
+    signature: `Дата и время составления: ${formatDateTime(new Date(act.created_at), tz)}`,
     total: 0,
-    fileName: 'Акт_о_нарушении.pdf',
+    fileName: docFileName('Акт', norm.button, new Date(act.created_at), tz),
   };
 }

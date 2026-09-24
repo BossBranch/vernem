@@ -73,14 +73,16 @@ export async function createAct(bot: Vernem, userId: number, pid: number, reason
   if (!c || (reason !== 'no_ads' && reason !== 'no_inspection')) return bot.stale(userId);
   const existing = bot.db.getActByIncident(c.incident.id);
   if (existing) return showAct(bot, userId, existing.id);
-  const act = bot.db.createAct(c.incident.id, userId, reason);
+  const act = bot.db.createAct(c.incident.id, userId, reason, bot.now());
   bot.db.track(userId, 'act_started', { incident: c.incident.id });
   return askSigner(bot, userId, act.id);
 }
 
 /** ФИО и квартира подписанта: подставляем сохранённые или спрашиваем. */
 function askSigner(bot: Vernem, userId: number, actId: number) {
-  const u = bot.db.getUser(userId)!;
+  const ctx = load(bot, actId);
+  // Квартира — по дому этого акта, а не «последняя введённая» по другому адресу.
+  const u = ctx ? bot.db.personFor(userId, ctx.house.id) : { fio: null, flat: null };
   if (u.fio && u.flat) {
     return bot.send(userId, {
       text: `Вписать в акт: ${clean(u.fio)}, кв. ${clean(u.flat)}?`,
@@ -119,7 +121,7 @@ async function confirmSigner(bot: Vernem, userId: number, actId: number, fio: st
   bot.db.addSigner(actId, userId, 'resident', fio, flat, bot.now());
   bot.db.track(userId, 'act_resident', { act: actId });
   const u = bot.db.getUser(userId)!;
-  if (u.save_personal) bot.db.updateUser(userId, { fio, flat: flat ?? u.flat });
+  if (u.save_personal) bot.db.savePerson(userId, ctx.house.id, { fio, flat, account: bot.db.personFor(userId, ctx.house.id).account });
   const fresh = load(bot, actId)!;
   const n = fresh.signers.length;
 
@@ -222,11 +224,13 @@ export async function actFromApp(bot: Vernem, userId: number, pid: number, fio: 
   if (!act) {
     // Позвонили, но на замер никто не пришёл, — иначе не дозвонились.
     const reason: ActReason = c.incident.evidence === 'self' && c.p.inspection !== 'no_show' ? 'no_ads' : 'no_inspection';
-    act = bot.db.createAct(c.incident.id, userId, reason);
+    act = bot.db.createAct(c.incident.id, userId, reason, bot.now());
     bot.db.track(userId, 'act_started', { incident: c.incident.id, via: 'app' });
   }
   const ctx = load(bot, act.id)!;
   if (open(ctx) && !ctx.signers.some((s) => s.user_id === userId)) await confirmSigner(bot, userId, act.id, fio, flat);
+  // Уже в акте — житель исправляет свои ФИО или квартиру, пока акт не подписан на бумаге.
+  else if (open(ctx)) bot.db.updateSigner(act.id, userId, fio, flat);
   return act.id;
 }
 
@@ -297,7 +301,8 @@ export async function onActButton(bot: Vernem, userId: number, action: string, a
     case 'rs':
       return createAct(bot, userId, id, b as ActReason);
     case 'me': {
-      const u = bot.db.getUser(userId)!;
+      const ctx = load(bot, id);
+      const u = ctx ? bot.db.personFor(userId, ctx.house.id) : { fio: null, flat: null };
       return u.fio ? confirmSigner(bot, userId, id, u.fio, u.flat) : askFio(bot, userId, id);
     }
     case 'data':

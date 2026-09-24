@@ -19,12 +19,12 @@ const STATS_DAYS = 90;
 /** Данные для документов: личные данные берём из заявления, а если житель их не сохранял в случае — из профиля. */
 function inputFor(bot: Vernem, c: CaseBundle): ClaimInput {
   const input = claimInputFor(bot.db, bot.norms, c, bot.now());
-  const u = bot.db.getUser(c.p.user_id);
+  const u = bot.db.personFor(c.p.user_id, c.house.id);
   input.claim = {
     ...input.claim,
-    fio: input.claim.fio ?? u?.fio ?? undefined,
-    flat: input.claim.flat ?? u?.flat ?? undefined,
-    account: input.claim.account ?? u?.account ?? undefined,
+    fio: input.claim.fio ?? u.fio ?? undefined,
+    flat: input.claim.flat ?? u.flat ?? undefined,
+    account: input.claim.account ?? u.account ?? undefined,
   };
   return input;
 }

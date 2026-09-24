@@ -8,7 +8,7 @@
 import { refundAmount } from '../calc/engine.ts';
 import { fmtRub } from '../calc/format.ts';
 import { formatDate } from '../calc/time.ts';
-import { buildClaim, evidenceExtras, executorLine } from './claim.ts';
+import { buildClaim, docAddress, docFileName, evidenceExtras, executorLine } from './claim.ts';
 import type { ClaimDoc, ClaimInput } from './claim.ts';
 
 const BLANK = '____________________';
@@ -48,7 +48,8 @@ function money(input: ClaimInput, opts: EscalationOpts) {
 function common(input: ClaimInput, opts: EscalationOpts) {
   const base = buildClaim(input);
   const extras = evidenceExtras(input);
-  const created = input.claim.createdAt ? formatDate(new Date(input.claim.createdAt), input.house.tz) : null;
+  const submitted = input.claim.submittedAt ? formatDate(new Date(input.claim.submittedAt), input.house.tz) : '«___» ____________ 20___ г.';
+  const incoming = input.claim.incomingNumber ? `, входящий № ${input.claim.incomingNumber}` : ', входящий № ________';
   const m = money(input, opts);
   const outcome =
     opts.refund && opts.refund > 0
@@ -56,7 +57,8 @@ function common(input: ClaimInput, opts: EscalationOpts) {
       : 'В платёжном документе за последующий расчётный период перерасчёт не отражён.';
   const facts = [
     ...base.facts,
-    `Я обратился(ась) к исполнителю с заявлением о перерасчёте${created ? ` (подготовлено ${created})` : ''}. ${outcome}`,
+    // Без «обратился(ась)»: нейтральная формулировка подходит любому заявителю.
+    `Заявление о перерасчёте подано исполнителю ${submitted}${incoming}. ${outcome}`,
   ];
   const attachments = [
     'Копия заявления о перерасчёте и подтверждение его направления исполнителю.',
@@ -105,7 +107,7 @@ export function buildFineDemand(input: ClaimInput, opts: EscalationOpts): ClaimD
     note: 'Суммы рассчитаны ориентировочно по данным потребителя и Приложению № 1 к Правилам.',
     signature: base.signature,
     total: m.fine ?? 0,
-    fileName: 'Требование_о_штрафе.pdf',
+    fileName: docFileName('Требование', input.norms.services[input.incident.service_key].button, new Date(), input.house.tz),
   };
 }
 
@@ -120,7 +122,7 @@ export function buildGjiComplaint(input: ClaimInput, opts: EscalationOpts): Clai
         ]
       : [];
   return {
-    to: ['В Государственную жилищную инспекцию', `${BLANK} (субъект РФ)`],
+    to: ['В Государственную жилищную инспекцию', input.house.city ? `(по месту нахождения дома: ${docAddress(input.house)})` : `${BLANK} (субъект РФ)`],
     from: base.from,
     heading: 'ЖАЛОБА',
     title: 'Жалоба на неисполнение обязанности по перерасчёту платы за коммунальную услугу ненадлежащего качества',
@@ -139,10 +141,10 @@ export function buildGjiComplaint(input: ClaimInput, opts: EscalationOpts): Clai
     attachments,
     note: mass.length
       ? 'Сведения о других домах — обезличенная статистика сервиса «Вернём»: учитываются только нарушения, подтверждённые номером АДС, письменным обращением или подписанным актом.'
-      : 'Суммы рассчитаны ориентировочно по данным потребителя и Приложению № 1 к Правилам.',
+      : '',
     signature: base.signature,
     total: 0,
-    fileName: 'Жалоба_в_ГЖИ.pdf',
+    fileName: docFileName('Жалоба_в_ГЖИ', input.norms.services[input.incident.service_key].button, new Date(), input.house.tz),
   };
 }
 

@@ -115,6 +115,13 @@ export function monthTitle(month: string): string {
   return `${MONTHS_NOM[m - 1]} ${y}`;
 }
 
+const MONTHS_GEN = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
+
+/** «2026-10» → «октября» */
+export function monthGenitive(month: string): string {
+  return MONTHS_GEN[Number(month.split('-')[1]) - 1];
+}
+
 /** «2026-09» → «в сентябре 2026» */
 export function monthPrepositional(month: string): string {
   const [y, m] = month.split('-').map(Number);

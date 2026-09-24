@@ -17,7 +17,8 @@ import { claimToPdf } from '../docs/pdf.ts';
 import { parseReceiptQr } from '../receipt/qr.ts';
 import { signLink, validateInitData, verifyLink } from './auth.ts';
 import { SERVICE_ORDER } from '../calc/norms.ts';
-import { CITIES, resolveCity } from '../calc/cities.ts';
+import { CITIES, resolveCity, suggestCity } from '../calc/cities.ts';
+import { flatFromAddress } from '../db/db.ts';
 import { parseRubles } from '../calc/format.ts';
 
 export type WebDeps = {
@@ -50,7 +51,18 @@ function checkAll(errors: Record<string, string>) {
   if (keys.length) throw new HttpError(400, keys.length === 1 ? errors[keys[0]] : 'Проверьте отмеченные поля', errors);
 }
 
-const PHONE_ERROR = 'Телефон — цифрами, например +7 495 123-45-67 или 112';
+// Неразрывные пробелы и дефисы: номер в подсказке не рвётся на две строки.
+const PHONE_ERROR = 'Телефон — цифрами, например +7\u00a0495\u00a0123\u201145\u201167 или 112';
+const TEMP_ERROR = 'Температура — число, например 16 или 15,5';
+const TEMP_RANGE = 'Проверьте число: температура бывает от −30 до +99 °C';
+/** Температура из поля формы: null — поле пустое; иначе число или ошибка у поля. */
+function tempOf(v: unknown, field: string): number | null {
+  if (v === undefined || v === null || v === '') return null;
+  const t = Number(String(v).replace(',', '.').trim());
+  if (!Number.isFinite(t)) throw fieldError(field, TEMP_ERROR);
+  if (t < -30 || t > 99) throw fieldError(field, TEMP_RANGE);
+  return t;
+}
 const isPhone = (v: string) => !/[^\d\s+()\-.]/.test(v) && v.replace(/\D/g, '').length >= 3;
 const ENTRANCE_ERROR = 'Номер подъезда — цифрами, например 2 или 2А';
 const entranceOf = (v: unknown): string | null | undefined => {
@@ -152,6 +164,8 @@ export function createApp(deps: WebDeps) {
       address: h.address,
       city: h.city,
       entrance: h.entrance,
+      flat: h.flat,
+      account: h.account,
       notify: !!h.notify,
       info: db.houseInfo(h),
       members: db.countHouseMembers(h.id),
@@ -181,6 +195,15 @@ export function createApp(deps: WebDeps) {
 
   // ---------- мои адреса и дома ----------
 
+  /** Проверка города: из справочника, похож на город из справочника («Масква» → Москва) или новый. */
+  api.get('/cities/check', (req: AuthedRequest, res) => {
+    const q = typeof req.query.q === 'string' ? req.query.q.slice(0, 60) : '';
+    const known = resolveCity(q, cfg.defaultTz);
+    const inList = !!known && CITIES.some((c) => c.name === known.name);
+    const suggestion = inList ? null : suggestCity(q);
+    res.json({ name: known?.name ?? null, inList, suggestion: suggestion?.name ?? null });
+  });
+
   api.get('/houses/search', (req: AuthedRequest, res) => {
     const q = typeof req.query.q === 'string' ? req.query.q.slice(0, 100) : '';
     const city = typeof req.query.city === 'string' ? resolveCity(req.query.city, cfg.defaultTz) : null;
@@ -203,16 +226,20 @@ export function createApp(deps: WebDeps) {
       houseId = h.id;
     } else {
       const address = str(b.address, 200);
-      if (!address || address.length < 3 || !/\d/.test(address)) throw new HttpError(400, 'Нужны улица и номер дома');
+      if (!address || address.length < 3 || !/\d/.test(address)) throw fieldError('q', 'Нужны улица и номер дома, например «Садовая 10»');
       const city = resolveCity(str(b.city, 60) ?? '', cfg.defaultTz);
       if (!city) throw new HttpError(400, 'Укажите город');
       houseId = db.upsertHouse(address, city.tz, 0, city.name).id;
     }
-    const already = !!db.getUserHouse(req.userId!, houseId);
+    // Квартира — не часть дома: из «Садовая 10 кв 15» дом «Садовая 10», квартира 15.
+    const flat = str(b.flat, 10) ?? (typeof b.address === 'string' ? flatFromAddress(b.address) : null);
+    const before = db.getUserHouse(req.userId!, houseId);
     db.addUserHouse(req.userId!, houseId);
+    const entranceChanged = !!before && !!entrance && before.entrance !== entrance;
     if (entrance) db.setUserHouse(req.userId!, houseId, { entrance });
+    if (flat) db.setUserHouse(req.userId!, houseId, { flat });
     db.track(req.userId!, 'house_set', { house: houseId, via: 'app' });
-    res.json({ house: houseJson(req.userId!, houseId), already });
+    res.json({ house: houseJson(req.userId!, houseId), already: !!before, entranceChanged });
   });
 
   api.patch('/me/houses/:id', (req: AuthedRequest, res) => {
@@ -221,6 +248,8 @@ export function createApp(deps: WebDeps) {
     const b = req.body ?? {};
     const entrance = entranceOf(b.entrance);
     if (entrance !== undefined) db.setUserHouse(req.userId!, id, { entrance });
+    if (b.flat !== undefined) db.setUserHouse(req.userId!, id, { flat: b.flat === null ? null : (str(b.flat, 10) ?? null) });
+    if (b.account !== undefined) db.setUserHouse(req.userId!, id, { account: b.account === null ? null : (str(b.account, 40) ?? null) });
     if (typeof b.notify === 'boolean') db.setUserHouse(req.userId!, id, { notify: b.notify ? 1 : 0 });
     res.json({ house: houseJson(req.userId!, id) });
   });
@@ -281,22 +310,23 @@ export function createApp(deps: WebDeps) {
       const startedAt = b.startedAt ? new Date(b.startedAt) : new Date();
       if (Number.isNaN(startedAt.getTime())) throw fieldError('started', 'Укажите дату и время');
       if (startedAt.getTime() > Date.now() + 5 * 60_000) throw fieldError('started', 'Это время ещё не наступило');
-      if (Date.now() - startedAt.getTime() > 92 * 24 * 3_600_000) throw fieldError('started', 'Это было больше трёх месяцев назад');
-      const temp = b.temp === undefined || b.temp === null || b.temp === '' ? undefined : Number(String(b.temp).replace(',', '.'));
-      if (temp !== undefined && (!Number.isFinite(temp) || temp < -30 || temp > 99)) throw fieldError('temp', 'Температура — число, например 16 или 15,5');
-      if (evidence !== 'self' && !str(b.number, 40)) throw fieldError('number', 'Впишите номер заявки или выберите «Не дозвонился»');
+      if (Date.now() - startedAt.getTime() > 366 * 24 * 3_600_000) throw fieldError('started', 'Это было больше года назад — такое проще решать через жилищную инспекцию');
+      const temp = tempOf(b.temp, 'temp') ?? undefined;
+      if (evidence !== 'self' && !str(b.number, 60)) {
+        throw fieldError('number', evidence === 'written' ? 'Впишите номер обращения — он есть в «Госуслугах Дом» или ГИС ЖКХ' : 'Впишите номер заявки или выберите «Не дозвонились»');
+      }
       const r = await bot.reportFromApp(req.userId!, {
         houseId: b.houseId,
         service: b.service,
         evidence,
-        number: evidence === 'self' ? null : (str(b.number, 40) ?? null),
+        number: evidence === 'self' ? null : (str(b.number, 60) ?? null),
         startedAt,
         temp,
         corner: !!b.corner,
         variant: b.variant === 'two_sources' || b.variant === 'one_source' ? b.variant : undefined,
         planned: !!b.planned,
       });
-      if ('error' in r) throw new HttpError(422, r.error, /температур|норма/.test(r.error) ? { temp: r.error } : undefined);
+      if ('error' in r) throw new HttpError(422, r.error, /°C/.test(r.error) ? { temp: r.error } : undefined);
       res.json({ caseId: r.pid, outcome: r.outcome, numberSaved: !!r.numberSaved, neighbours: r.neighbours ?? 0, botConnected: !!cfg.token });
     } catch (e) {
       next(e);
@@ -342,10 +372,13 @@ export function createApp(deps: WebDeps) {
     const act = db.getActByIncident(c.incident.id);
     const signer = act ? db.listSigners(act.id).find((x) => x.user_id === c.p.user_id) : undefined;
     const u = db.getUser(c.p.user_id);
-    const saved = u?.save_personal && u.fio ? { fio: u.fio, flat: u.flat, account: u.account } : null;
+    const person = db.personFor(c.p.user_id, c.house.id);
+    const saved = person.fio || person.flat ? person : null;
     const personHint = signer ? { fio: signer.fio, flat: signer.flat ?? saved?.flat ?? null, account: saved?.account ?? null } : saved;
     const houseContacts = { ukName: info.ukName ?? null, ukEmail: info.ukEmail ?? null, ukAddress: info.ukAddress ?? null, adsPhone: info.adsPhone ?? null };
-    res.json({ case: s, claimText, executorHint, personHint, houseContacts, savedPersonal: !!u?.save_personal });
+    // Подписант акта — чтобы мини-приложение предупредило, если ФИО в заявлении не совпадают с актом.
+    const actSigner = signer ? { fio: signer.fio, flat: signer.flat, signed: act?.status === 'signed' } : null;
+    res.json({ case: s, claimText, executorHint, personHint, houseContacts, actSigner, savedPersonal: !!u?.save_personal });
   });
 
   api.put('/cases/:id/claim', (req: AuthedRequest, res) => {
@@ -381,10 +414,28 @@ export function createApp(deps: WebDeps) {
       db.updateParticipant(c.p.id, { bills: JSON.stringify(bills) });
     }
     // «Запомнить мои данные» — ФИО, квартира и лицевой счёт подставятся в следующие заявления.
-    if (b.remember === true) db.updateUser(req.userId!, { fio: claim.fio ?? null, flat: claim.flat ?? null, account: claim.account ?? null, save_personal: 1 });
-    if (b.remember === false && db.getUser(req.userId!)?.save_personal) db.updateUser(req.userId!, { fio: null, flat: null, account: null, save_personal: 0 });
+    if (b.remember === true) db.savePerson(req.userId!, c.house.id, claim);
+    if (b.remember === false && db.getUser(req.userId!)?.save_personal) db.forgetPerson(req.userId!);
+    // Акт ещё не подписан — житель в нём должен называться так же, как в заявлении.
+    const act = db.getActByIncident(c.incident.id);
+    if (act && act.status !== 'signed' && claim.fio && claim.fio.split(' ').length >= 2 && db.listSigners(act.id).some((x) => x.user_id === req.userId)) {
+      db.updateSigner(act.id, req.userId!, claim.fio, claim.flat ?? null);
+    }
     const fresh = loadCase(db, c.p.id)!;
     res.json({ case: summarize(db, norms, fresh, new Date()), claimText: fresh.p.ended_at ? claimToText(claimDocFor(db, norms, fresh, new Date())) : null });
+  });
+
+  /** Житель подал заявление: дата и входящий номер попадут в требование и жалобы. */
+  api.post('/cases/:id/submitted', (req: AuthedRequest, res) => {
+    const c = ownCase(req);
+    const raw = str(req.body?.date, 20);
+    const date = raw ? new Date(raw) : null;
+    if (!date || Number.isNaN(date.getTime())) throw fieldError('submittedAt', 'Укажите дату подачи');
+    if (date.getTime() > Date.now() + 24 * 3_600_000) throw fieldError('submittedAt', 'Эта дата ещё не наступила');
+    if (date.getTime() < new Date(c.p.started_at).getTime() - 24 * 3_600_000) throw fieldError('submittedAt', 'Заявление не могли подать раньше отключения');
+    const claim = { ...claimOf(c.p), submittedAt: date.toISOString(), incomingNumber: str(req.body?.number, 40) };
+    db.updateParticipant(c.p.id, { claim: JSON.stringify(claim) });
+    res.json({ case: summarize(db, norms, loadCase(db, c.p.id)!, new Date()) });
   });
 
   api.post('/cases/:id/pdf-link', (req: AuthedRequest, res) => {
@@ -393,7 +444,7 @@ export function createApp(deps: WebDeps) {
     deps.bot()?.markClaimIssued(c.p.id);
     const path = `/files/claim/${c.p.id}.pdf`;
     const rel = signLink(path, cfg.linkSecret, 600);
-    res.json({ url: `${cfg.publicUrl ?? ''}${rel}`, fileName: 'Заявление_на_перерасчёт.pdf' });
+    res.json({ url: `${cfg.publicUrl ?? ''}${rel}`, fileName: claimDocFor(db, norms, loadCase(db, c.p.id)!, new Date()).fileName });
   });
 
   // ---------- акт с соседями (п. 110(1)) ----------
@@ -409,7 +460,7 @@ export function createApp(deps: WebDeps) {
       const flat = str(req.body?.flat, 10) ?? null;
       const actId = await actFromApp(bot, req.userId!, c.p.id, fio, flat);
       if (!actId) throw new HttpError(404, 'Случай не найден');
-      res.json({ url: `${cfg.publicUrl ?? ''}${signLink(`/files/act/${actId}.pdf`, cfg.linkSecret, 600)}`, fileName: 'Акт_о_нарушении.pdf' });
+      res.json({ url: `${cfg.publicUrl ?? ''}${signLink(`/files/act/${actId}.pdf`, cfg.linkSecret, 600)}`, fileName: actDocFor(db, norms, actId, new Date())?.fileName ?? 'Акт.pdf' });
     } catch (e) {
       next(e);
     }
@@ -463,12 +514,21 @@ export function createApp(deps: WebDeps) {
     const c = ownCase(req);
     const bot = deps.bot();
     if (!bot) throw new HttpError(503, 'Бот сейчас недоступен');
-    const temp = Number(String(req.body?.temp ?? '').replace(',', '.'));
-    if (req.body?.temp === '' || req.body?.temp === undefined || !Number.isFinite(temp) || temp < -30 || temp > 99) throw fieldError('newTemp', 'Температура — число, например 16 или 15,5');
+    const temp = tempOf(req.body?.temp, 'newTemp');
+    if (temp === null) throw fieldError('newTemp', 'Впишите, сколько градусов показал термометр');
     const at = req.body?.at ? new Date(req.body.at) : new Date();
     if (Number.isNaN(at.getTime())) throw fieldError('newTempAt', 'Укажите дату и время');
     const err = bot.addReadingFromApp(req.userId!, c.p.id, temp, at);
     if (err) throw new HttpError(422, err, { newTempAt: err });
+    const threshold = bot.normThreshold(c.incident.service_key, !!c.p.corner);
+    const note = threshold !== null && temp >= threshold ? `+${String(temp).replace('.', ',')} °C — это уже норма. Если так и осталось, отметьте «${c.incident.service_key === 'heating_temp' ? 'Стало тепло' : 'Вода горячая'}».` : null;
+    res.json({ case: summarize(db, norms, loadCase(db, c.p.id)!, new Date()), note });
+  });
+
+  api.delete('/cases/:id/readings/:rid', (req: AuthedRequest, res) => {
+    const c = ownCase(req);
+    if (c.p.status === 'refunded' || c.p.status === 'refused' || c.p.status === 'claim_ready') throw new HttpError(422, 'Заявление уже готово — замеры в нём не меняем');
+    if (!db.deleteReading(c.p.id, Number(req.params.rid))) throw new HttpError(404, 'Замер не найден');
     res.json({ case: summarize(db, norms, loadCase(db, c.p.id)!, new Date()) });
   });
 
@@ -478,13 +538,14 @@ export function createApp(deps: WebDeps) {
       const c = ownCase(req);
       const bot = deps.bot();
       if (!bot) throw new HttpError(503, 'Бот сейчас недоступен');
-      const refunded = req.body?.refunded === true;
+      const action = req.body?.action === 'undo' ? 'undo' : req.body?.refunded === true || req.body?.action === 'yes' ? 'yes' : 'no';
       let amount: number | null = null;
-      if (refunded && req.body?.amount !== undefined && req.body.amount !== '') {
+      if (action === 'yes' && req.body?.amount !== undefined && req.body.amount !== '') {
         amount = parseRubles(String(req.body.amount));
         if (amount === null) throw fieldError('refundAmount', 'Сумма — число, например 115 или 115,20');
+        if (amount > 1_000_000) throw fieldError('refundAmount', 'Проверьте сумму — это больше миллиона');
       }
-      const err = await bot.receiptFromApp(req.userId!, c.p.id, refunded, amount);
+      const err = await bot.receiptFromApp(req.userId!, c.p.id, action, amount);
       if (err) throw new HttpError(422, err);
       res.json({ case: summarize(db, norms, loadCase(db, c.p.id)!, new Date()) });
     } catch (e) {
@@ -498,6 +559,7 @@ export function createApp(deps: WebDeps) {
     const kind = String(req.body?.kind ?? '');
     if (!ESC_FILES[kind]) throw new HttpError(400, 'Неизвестный документ');
     if (!c.p.ended_at) throw new HttpError(409, 'Сначала отметьте, что починили');
+    if (c.p.status !== 'refused' && c.p.status !== 'refunded') throw new HttpError(409, 'Эти документы нужны, если перерасчёт не сделали — отметьте это, когда придёт квитанция');
     const path = `/files/esc/${c.p.id}-${kind}.pdf`;
     res.json({ url: `${cfg.publicUrl ?? ''}${signLink(path, cfg.linkSecret, 600)}`, fileName: ESC_FILES[kind] });
   });
@@ -560,9 +622,10 @@ export function createApp(deps: WebDeps) {
       const c = loadCase(db, Number(m[1]));
       const bot = deps.bot();
       if (!c || !c.p.ended_at || !bot) throw new HttpError(404, 'Документ не найден');
-      const pdf = await claimToPdf(escalationDocFor(bot, c, m[2] as EscalationKind));
+      const doc = escalationDocFor(bot, c, m[2] as EscalationKind);
+      const pdf = await claimToPdf(doc);
       res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(ESC_FILES[m[2]])}`);
+      res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(doc.fileName ?? ESC_FILES[m[2]])}`);
       res.setHeader('Cache-Control', 'no-store');
       res.send(pdf);
     } catch (e) {
@@ -581,7 +644,7 @@ export function createApp(deps: WebDeps) {
       if (!doc) throw new HttpError(404, 'Акт не найден');
       const pdf = await claimToPdf(doc);
       res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent('Акт_о_нарушении.pdf')}`);
+      res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(doc.fileName ?? 'Акт.pdf')}`);
       res.setHeader('Cache-Control', 'no-store');
       res.send(pdf);
     } catch (e) {
@@ -598,9 +661,10 @@ export function createApp(deps: WebDeps) {
       }
       const c = loadCase(db, Number(m[1]));
       if (!c || !c.p.ended_at) throw new HttpError(404, 'Заявление не найдено');
-      const pdf = await claimToPdf(claimDocFor(db, norms, c, new Date()));
+      const doc = claimDocFor(db, norms, c, new Date());
+      const pdf = await claimToPdf(doc);
       res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent('Заявление_на_перерасчёт.pdf')}`);
+      res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(doc.fileName ?? 'Заявление.pdf')}`);
       res.setHeader('Cache-Control', 'no-store');
       res.end(pdf);
     } catch (e) {

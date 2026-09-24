@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { Harness } from '../src/sim/harness.ts';
 import { fromLocal } from '../src/calc/time.ts';
-import { claimTextFor, loadCase } from '../src/services/cases.ts';
+import { calcFor, claimTextFor, loadCase } from '../src/services/cases.ts';
 import { buildActDoc } from '../src/docs/act.ts';
 
 const TZ = 'Europe/Moscow';
@@ -101,7 +101,9 @@ test('основной сценарий: фиксация → напоминан
   assert.match(doc, /ЗАЯВЛЕНИЕ О ПЕРЕРАСЧЁТЕ/);
   assert.match(doc, /№ 4512/);
   assert.match(doc, /п\. 4 Приложения № 1/);
-  assert.match(doc, /телефон, e-mail для связи/);
+  assert.match(doc, /телефон, e-mail/);
+  assert.match(doc, /Заявитель: /);
+  assert.match(doc, /адрес: г\. Москва, ул\. Примерная, д\. 5/);
   assert.match(doc, /Руководителю управляющей организации/);
   assert.match(doc, /Отметка о принятии/);
 
@@ -116,6 +118,35 @@ test('основной сценарий: фиксация → напоминан
 
   const funnel = h.db.funnel();
   for (const k of ['start', 'report_started', 'fixed', 'restored', 'calc_done', 'claim_created', 'refund_yes']) assert.equal(funnel[k], 1, k);
+  h.close();
+});
+
+test('два отключения в одном месяце: лимит общий, деньги не считаются дважды', async () => {
+  const h = new Harness({ start: START });
+  await reportHotWater(h, 1); // 20.09 08:10
+  await h.advance(3 * H);
+  await h.press(1, 'Да, восстановили');
+  await h.press(1, 'Только что'); // 22.09 15:00 → 54 ч 50 мин, превышение 46 ч → 6,9%
+  // Второе отключение того же дня недели позже: 23.09 08:00–13:00.
+  await h.advance(17 * H);
+  await h.start(1);
+  await h.press(1, 'Что-то сломалось');
+  await h.press(1, 'Нет горячей воды');
+  await h.press(1, 'Внезапно');
+  await h.press(1, 'Позвонил');
+  await h.text(1, '4600');
+  await h.press(1, 'Только что');
+  await h.advance(5 * H);
+  await h.press(1, 'Воду дали');
+  await h.press(1, 'Только что');
+  const [second, first] = h.db.listUserParticipants(1);
+  assert.equal(calcFor(h.db, h.bot.norms, loadCase(h.db, first.id)!, h.now()).months[0].percent, 6.9);
+  const m = calcFor(h.db, h.bot.norms, loadCase(h.db, second.id)!, h.now()).months[0];
+  // Вместе: 59 ч 50 мин, превышение 51 ч → 7,65%; из них 6,9% уже положены по первому → 0,75%.
+  assert.equal(m.percent, 0.75);
+  const text = m.lines.join(' ');
+  assert.match(text, /Лимит 8 ч — на весь месяц/);
+  assert.match(text, /Из них 6,9% уже положены по прошлому отключению — по этому: 0,75%/);
   h.close();
 });
 
@@ -585,7 +616,7 @@ test('акт без исполнителя: бот сам собирает со�
   await h.text(1, 'Иванов Иван Иванович');
   await h.text(1, '5');
   // PDF для подписи — сразу, не дожидаясь соседей в боте.
-  assert.ok(h.files(1, mark0).some((f) => f.name === 'Акт_о_нарушении.pdf'), 'акт сразу в PDF');
+  assert.ok(h.files(1, mark0).some((f) => f.name.startsWith('Акт_')), 'акт сразу в PDF');
   assert.match(textOf(h, 1), /Акт готов к подписи/);
   assert.match(textOf(h, 1), /Ещё отправил его 2 соседям/);
   assert.match(textOf(h, 2), /Соседи составляют акт/);
@@ -598,7 +629,7 @@ test('акт без исполнителя: бот сам собирает со�
   const act = h.db.getActByIncident(h.db.listUserParticipants(1)[0].incident_id)!;
   assert.equal(h.db.getAct(act.id)!.status, 'ready', 'двух жителей достаточно — председатель подписывает на бумаге');
   for (const u of [1, 2]) {
-    const pdf = h.files(u, mark).find((f) => f.name === 'Акт_о_нарушении.pdf');
+    const pdf = h.files(u, mark).find((f) => f.name.startsWith('Акт_'));
     assert.ok(pdf && readFileSync(pdf.path).subarray(0, 4).toString() === '%PDF', `акт получил житель ${u}`);
   }
 
@@ -612,8 +643,7 @@ test('акт без исполнителя: бот сам собирает со�
   await h.advance(1 * H);
   await finishWithClaim(h, 1);
   const doc = claimText(h, 1);
-  assert.match(doc, /подтверждено актом, составленным потребителями без участия исполнителя \(п\. 110\(1\) Правил\)/);
-  assert.match(doc, /подписан потребителями и председателем совета многоквартирного дома/);
+  assert.match(doc, /подтверждено актом от 22\.09\.2026, составленным и подписанным потребителями и председателем совета многоквартирного дома без участия исполнителя \(п\. 110\(1\) Правил\)/);
   assert.match(textOf(h, 1), /Акт указан в приложениях/);
 
   // Удаление данных стирает ФИО жителя из акта.
@@ -643,7 +673,7 @@ test('акт в одиночку: заявление без доказатель
   const mark = h.out.log.length;
   await h.text(1, 'Иванов Иван Иванович');
   await h.text(1, '5');
-  assert.ok(h.files(1, mark).some((f) => f.name === 'Акт_о_нарушении.pdf'));
+  assert.ok(h.files(1, mark).some((f) => f.name.startsWith('Акт_')));
   const incident = h.db.getIncident(h.db.listUserParticipants(1)[0].incident_id)!;
   const act = h.db.getActByIncident(incident.id)!;
   const actDoc = buildActDoc({ norms: h.bot.norms, incident, house: h.db.getHouse(incident.house_id)!, act, signers: h.db.listSigners(act.id), readings: [], now: h.now() });
@@ -653,7 +683,7 @@ test('акт в одиночку: заявление без доказатель
   await h.press(1, 'Акт подписан');
   await h.press(1, 'Да, без председателя');
   assert.equal(h.db.getAct(act.id)!.status, 'signed');
-  assert.match(claimText(h, 1), /подписан потребителями\./);
+  assert.match(claimText(h, 1), /подписанным потребителями без участия исполнителя/);
   h.close();
 });
 
@@ -715,13 +745,13 @@ test('перерасчёт не пришёл: штраф 50%, жалоба в Г
   let mark = h.out.log.length;
   await h.press(1, 'Требование о штрафе 50%');
   assert.match(textOf(h, 1, mark), /Штраф 50% ≈ 38,70 ₽/);
-  assert.ok(h.files(1, mark).some((f) => f.name === 'Требование_о_штрафе.pdf'));
+  assert.ok(h.files(1, mark).some((f) => f.name.startsWith('Требование_')));
 
   await h.press(1, 'Другие варианты');
   mark = h.out.log.length;
   await h.press(1, 'Жалоба в ГЖИ');
   assert.match(textOf(h, 1, mark), /нарушения этого исполнителя в 2 домах/);
-  assert.ok(h.files(1, mark).some((f) => f.name === 'Жалоба_в_ГЖИ.pdf'));
+  assert.ok(h.files(1, mark).some((f) => f.name.startsWith('Жалоба_в_ГЖИ_')));
 
   await h.press(1, 'Другие варианты');
   mark = h.out.log.length;
