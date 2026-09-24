@@ -52,6 +52,7 @@ import {
   hasMoney,
   loadCase,
   claimSnapshot,
+  snapshotChanged,
   relatedOverlap,
 } from '../services/cases.ts';
 import type { CaseBundle } from '../services/cases.ts';
@@ -404,15 +405,15 @@ export class Vernem {
   }
 
   /**
-   * Заявление уже выдавали, а расчёт или время с тех пор изменились (исправили время, добавили отключение
-   * за тот же месяц): это новое заявление — новая дата, прежняя отметка о подаче не относится к нему.
+   * Заявление уже выдавали, а расчёт, время или доказательства с тех пор изменились (исправили время, добавили
+   * отключение за тот же месяц, подписали акт): это новое заявление — новая дата, прежняя отметка о подаче не относится к нему.
    */
   refreshClaimIssue(pid: number): boolean {
     const c = loadCase(this.db, pid);
     if (!c || c.p.status === 'ended' || c.p.status === 'tracking' || c.p.status === 'closed') return false;
     const cl = claimOf(c.p);
     const snap = claimSnapshot(this.db, this.norms, c, this.now());
-    if (cl.issuedSnapshot === snap) return false;
+    if (cl.issuedSnapshot && !snapshotChanged(cl.issuedSnapshot, snap)) return false;
     const changed = !!cl.issuedSnapshot;
     const { submittedAt, incomingNumber, ...rest } = cl;
     const next = changed ? { ...rest, createdAt: this.now().toISOString(), issuedSnapshot: snap } : { ...cl, issuedSnapshot: snap };
@@ -442,7 +443,7 @@ export class Vernem {
     if (payload?.startsWith('j_')) return this.joinByCode(userId, payload.slice(2));
     if (payload?.startsWith('h_')) return joinHouseByCode(this, userId, payload.slice(2));
     if (payload?.startsWith('a_')) return onActLink(this, userId, payload.slice(2));
-    if (payload === 'demo' && this.cfg.demoMode) return this.startDemo(userId);
+    if (payload === 'demo' && this.cfg.demoMode) return this.askDemo(userId);
     return this.welcome(userId);
   }
 
@@ -643,7 +644,8 @@ export class Vernem {
       case 'act':
         return this.send(userId, { text: actTemplate(this.norms.services[a as ServiceKey]?.title ?? 'коммунальная услуга', this.addressOf(userId)) });
       case 'demo':
-        return this.cfg.demoMode ? this.startDemo(userId) : this.stale(userId);
+        if (!this.cfg.demoMode) return this.stale(userId);
+        return a === 'ads' || a === 'act' ? this.startDemo(userId, a) : this.askDemo(userId);
       case 'house':
         return showAddresses(this, userId);
       case 'hs':
@@ -816,7 +818,7 @@ export class Vernem {
     this.saveDraft(userId, 'draft', draft);
     const lines = [
       `📞 **Позвоните в аварийную службу**${phone ? `: ${phone}` : ' — телефон есть в квитанции'}.`,
-      'Скажите адрес и что случилось. **Запишите номер заявки** — это главное доказательство (п. 106 ПП № 354).',
+      'Скажите адрес и что случилось. **Запишите номер заявки** и кто её принял — диспетчер обязан назвать себя (п. 106 ПП № 354). Номер — главное доказательство.',
     ];
     if (norm.kind !== 'interruption') lines.push('Попросите прийти и замерить — по правилам не позднее чем через 2 часа.');
     if (norm.executor_hint) lines.push(norm.executor_hint);
@@ -1392,7 +1394,7 @@ export class Vernem {
       }
     }
     this.db.updateParticipant(pid, { claim: JSON.stringify(claim) });
-    const person = this.db.personFor(userId, c.house.id);
+    const person = this.claimPerson(userId, c);
     if (person.fio && person.flat) {
       return this.send(userId, {
         text: `Заявление от: ${clean(person.fio)}, кв. ${clean(person.flat)}${person.account ? `, л/с ${clean(person.account)}` : ''}?`,
@@ -1402,11 +1404,20 @@ export class Vernem {
     return this.askPersonal(userId, pid, 'await_fio');
   }
 
+  /** ФИО и квартира для заявления: сохранённые — или как в акте по этому отключению (они должны совпадать). */
+  private claimPerson(userId: number, c: CaseBundle) {
+    const person = this.db.personFor(userId, c.house.id);
+    if (person.fio) return person;
+    const act = this.db.getActByIncident(c.incident.id);
+    const signer = act ? this.db.listSigners(act.id).find((s) => s.user_id === userId) : undefined;
+    return signer ? { ...person, fio: signer.fio, flat: signer.flat ?? person.flat } : person;
+  }
+
   private async onPersonalChoice(userId: number, pid: number, choice: string) {
     const c = this.ownCase(userId, pid);
     if (!c) return this.stale(userId);
     if (choice === 'reuse') {
-      const u = this.db.personFor(userId, c.house.id);
+      const u = this.claimPerson(userId, c);
       const claim = { ...claimOf(c.p), fio: u.fio ?? undefined, flat: u.flat ?? undefined, account: u.account ?? undefined };
       this.db.updateParticipant(pid, { claim: JSON.stringify(claim) });
       return this.nextPersonal(userId, 'await_account', pid);
@@ -1662,26 +1673,48 @@ export class Vernem {
   // Демо: сценарий за 2 минуты для проверки жюри
   // =====================================================================
 
-  private async startDemo(userId: number) {
+  /** Два демо-случая: номер заявки есть — и номера нет (не дозвонились, доказываем актом). */
+  private askDemo(userId: number) {
+    return this.send(userId, {
+      text: [
+        '🧪 **Демо на тестовых данных.** Какой случай показать?',
+        '1. Дозвонились в аварийную службу — есть номер заявки.',
+        '2. Не дозвонились — номера нет. Доказательство — акт с соседями. Это самый сложный случай.',
+      ].join('\n'),
+      buttons: [[cb('📞 1. Есть номер заявки', 'demo:ads')], [cb('📵 2. Не дозвонились', 'demo:act')], [cb('⬅️ Меню', 'menu')]],
+    });
+  }
+
+  private async startDemo(userId: number, kind: 'ads' | 'act') {
     const now = this.now();
     // Демо-дом не попадает в «Мои адреса» и не меняет настоящий адрес жителя.
     const house = this.db.upsertHouse('ДЕМО: ул. Примерная, 5', this.cfg.defaultTz, 1);
-    const started = new Date(now.getTime() - 72 * MS_HOUR);
+    const ads = kind === 'ads';
+    const started = new Date(now.getTime() - (ads ? 72 : 50) * MS_HOUR);
     const demoNo = `ДЕМО-${4512 + this.db.listUserParticipants(userId).filter((p) => this.db.getIncident(p.incident_id)?.demo).length}`;
     const incident = this.db.createIncident({
       house_id: house.id,
-      service_key: 'hot_water_off',
+      // Разные услуги: два демо в одном месяце не складываются в один расчёт.
+      service_key: ads ? 'hot_water_off' : 'cold_water_off',
       reporter_user_id: userId,
       started_at: started.toISOString(),
-      ads_number: demoNo,
-      evidence: 'ads',
+      ads_number: ads ? demoNo : null,
+      evidence: ads ? 'ads' : 'self',
       variant: null,
       demo: 1,
     });
     const p = this.db.addParticipant({ incident_id: incident.id, user_id: userId, role: 'reporter', started_at: started.toISOString() });
-    this.db.track(userId, 'demo_started');
+    this.db.track(userId, 'demo_started', { kind });
     await this.send(userId, {
-      text: `🧪 **Демо** (данные тестовые). Три дня назад в доме отключили горячую воду, заявка ${demoNo}. Нажмите «Воду дали» → «Только что», введите 1200 — и дойдите до заявления.`,
+      text: ads
+        ? `🧪 **Демо 1: есть номер заявки** (данные тестовые). Три дня назад отключили горячую воду, вы дозвонились в аварийную службу — заявка ${demoNo}. Нажмите «Воду дали» → «Только что», введите 1200 — и дойдите до заявления.`
+        : [
+            '🧪 **Демо 2: номера заявки нет** (данные тестовые). Позавчера пропала холодная вода, в аварийную службу не дозвонились.',
+            'Без номера УК может сказать «не знаем, воды не было?». Доказательство — акт, который подписывают соседи (п. 110(1) ПП № 354).',
+            '1) «📄 Акт с соседями» — впишу вас, два соседа (демо) подтвердят сами.',
+            '2) «✅ Акт подписан».',
+            '3) «Воду дали» → впишите 600 — акт попадёт в заявление.',
+          ].join('\n'),
     });
     return this.sendTracking(userId, p.id, false);
   }

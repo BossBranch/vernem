@@ -18,6 +18,16 @@ import { ACT_VS_CLAIM, backRow, cb, clean } from './ui.ts';
 
 export const MIN_RESIDENTS = 2;
 
+/**
+ * Демо: два соседа подтверждают акт сами. Отрицательные id — не жители бота:
+ * сообщений им не шлём, в акт они попадают только по демо-отключению.
+ */
+const DEMO_SIGNERS: [number, string, string][] = [
+  [-1, 'Петрова Анна Сергеевна', '43'],
+  [-2, 'Сидоров Олег Иванович', '45'],
+];
+const isBotUser = (id: number) => id > 0;
+
 export const ACT_STATUS_TITLE: Record<Act['status'], string> = {
   collecting: 'ждёт подписей',
   chair: 'ждёт подписей',
@@ -128,9 +138,16 @@ async function confirmSigner(bot: Vernem, userId: number, actId: number, fio: st
   if (userId === ctx.act.initiator_user_id && n === 1) {
     // Акт — сразу: не ждём, пока соседи появятся в боте. Пустые строки — для подписей на бумаге.
     const sent = await inviteParticipants(bot, fresh);
+    const demo = !!fresh.incident.demo;
+    if (demo) {
+      for (const [id, dfio, dflat] of DEMO_SIGNERS) bot.db.addSigner(actId, id, 'resident', dfio, dflat, bot.now());
+      bot.db.setActStatus(actId, 'ready', bot.now());
+    }
     await bot.send(userId, {
       text: [
-        '📄 **Акт готов к подписи.** Распечатайте и попросите расписаться 2+ соседей и председателя совета дома.',
+        '📄 **Акт готов к подписи.** Распечатайте и попросите расписаться 2+ соседей и председателя совета дома (старшего по дому, если он есть).',
+        'Председателя нет или он отказался — подписывайте без него: при отметке «Акт подписан» выберите «без председателя».',
+        demo ? `🧪 Соседи (демо) ${DEMO_SIGNERS.map(([, f]) => shortName(f)).join(' и ')} подтвердили в боте — их имена уже в акте.` : '',
         sent ? `Ещё отправил его ${sent} ${sent === 1 ? 'соседу' : 'соседям'} в бот — кто подтвердит, того впишу сам.` : '',
       ]
         .filter(Boolean)
@@ -198,11 +215,11 @@ export async function inviteToAct(bot: Vernem, incidentId: number, userId: numbe
 async function finalize(bot: Vernem, actId: number) {
   const ctx = load(bot, actId)!;
   bot.db.track(ctx.act.initiator_user_id, 'act_ready', { act: actId });
-  const recipients = [...new Set([ctx.act.initiator_user_id, ...ctx.signers.map((s) => s.user_id)])];
+  const recipients = [...new Set([ctx.act.initiator_user_id, ...ctx.signers.map((s) => s.user_id)])].filter(isBotUser);
   for (const uid of recipients) {
     const initiator = uid === ctx.act.initiator_user_id;
     await bot.safeSend(uid, {
-      text: '📄 **Акт с именами соседей.** Распечатайте и подпишите вместе с председателем совета дома. Галочка в боте — не подпись.',
+      text: '📄 **Акт с именами соседей.** Распечатайте и подпишите вместе с председателем совета дома, если он есть. Галочка в боте — не подпись.',
     });
     await sendActPdf(bot, uid, actId);
     if (initiator) await bot.safeSend(uid, { text: 'Когда подпишут — отметьте:', buttons: [[cb('✅ Акт подписан', `ak:done:${actId}`)]] });
@@ -252,7 +269,7 @@ export async function markActSigned(bot: Vernem, userId: number, actId: number, 
   bot.db.setActStatus(actId, 'signed', bot.now());
   bot.db.track(userId, 'act_signed', { act: actId, chair });
   for (const s of ctx.signers) {
-    if (s.user_id !== userId) await bot.safeSend(s.user_id, { text: 'Акт подписан ✅ Он попадёт в заявления всех участников.' });
+    if (s.user_id !== userId && isBotUser(s.user_id)) await bot.safeSend(s.user_id, { text: 'Акт подписан ✅ Он попадёт в заявления всех участников.' });
   }
   return true;
 }
@@ -273,7 +290,7 @@ export async function showAct(bot: Vernem, userId: number, actId: number) {
       `✍️ **Акт: ${ACT_STATUS_TITLE[ctx.act.status]}**`,
       ...actSummaryLines(bot, ctx),
       ...ctx.signers.map((s, i) => `${i + 1}. ${shortName(s.fio)}${s.flat ? `, кв. ${s.flat}` : ''}`),
-      open(ctx) ? `Нужны подписи минимум ${MIN_RESIDENTS} жителей и председателя совета дома.` : '',
+      open(ctx) ? `Нужны подписи минимум ${MIN_RESIDENTS} жителей и председателя совета дома. Председателя нет — хватит подписей жителей.` : '',
     ]
       .filter(Boolean)
       .join('\n'),
@@ -342,7 +359,8 @@ export async function onActButton(bot: Vernem, userId: number, action: string, a
       const p = bot.db.getParticipantFor(ctx.incident.id, userId);
       return bot.send(userId, {
         text: `✅ Акт подписан — он попадёт в заявления всех участников. Сфотографируйте его: оригинал понадобится.${b === '1' ? '' : '\nБез подписи председателя акт слабее, но подписи жителей всё равно подтверждают нарушение.'}`,
-        buttons: [[cb('📷 Фото подписанного акта', p ? `phadd:${p.id}:act` : 'menu')], [cb('⬅️ Меню', 'menu')]],
+        // «К делу» — там кнопка «Починили»: после неё заявление с актом в приложениях.
+        buttons: [[cb('📷 Фото подписанного акта', p ? `phadd:${p.id}:act` : 'menu')], [p ? cb('⬅️ К делу', `cs:${p.id}`) : cb('⬅️ Меню', 'menu')]],
       });
     }
   }

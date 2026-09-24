@@ -128,6 +128,51 @@ export function evidenceExtras(input: Pick<ClaimInput, 'participant' | 'act' | '
   return { facts, attachments };
 }
 
+/**
+ * Как нарушение зафиксировано — по п. 105–106 Правил: куда сообщили, номер и время регистрации,
+ * кто принял сообщение. Время регистрации пишем, только если оно известно: для номера первого жителя
+ * это начало отключения (п. 111 Правил). Время звонка соседа не спрашивали — не выдумываем.
+ */
+export function adsFacts(input: Pick<ClaimInput, 'incident' | 'house' | 'participant' | 'claim' | 'act'>, serviceName: string): string[] {
+  const { incident, house, participant: p, claim } = input;
+  const regTime = formatDateTime(new Date(incident.started_at), house.tz);
+  const adsNumber = p.own_ads_number || incident.ads_number;
+  // Сосед мог дозвониться сам, даже если первый житель сообщил без номера.
+  const evidence = p.own_ads_number && incident.evidence === 'self' ? 'ads' : incident.evidence;
+  const waste = incident.service_key === 'waste_off';
+  const ads = waste ? 'диспетчерскую службу регионального оператора' : 'аварийно-диспетчерскую службу исполнителя';
+  const what = `о нарушении предоставления коммунальной услуги «${serviceName}»`;
+  const operator = claim.adsOperator?.trim();
+  const accepted = operator ? `, сообщение принял(а) ${operator}` : '';
+  // Первый житель позвонил ещё раз и получил новый номер — пишем оба, первый не теряем.
+  const repeat = p.role === 'reporter' && p.own_ads_number && incident.ads_number && p.own_ads_number !== incident.ads_number;
+  if (repeat) {
+    return [
+      `Я сообщил(а) ${what} в ${ads} (п. 105 Правил). Сообщение зарегистрировано под № ${incident.ads_number}, время регистрации — ${regTime}${accepted}; повторное сообщение зарегистрировано под № ${p.own_ads_number} (п. 106 Правил). С момента первого сообщения исчисляется период нарушения (п. 111 Правил).`,
+    ];
+  }
+  if (evidence === 'ads' && adsNumber && p.own_ads_number) {
+    return [`Я сообщил(а) ${what} в ${ads}; сообщение зарегистрировано под № ${adsNumber}${accepted} (п. 105–106 Правил).`];
+  }
+  if (evidence === 'ads' && adsNumber && p.role === 'neighbour') {
+    return [`О том же нарушении в ${ads} сообщил другой житель дома: сообщение зарегистрировано под № ${adsNumber}, время регистрации — ${regTime} (п. 105–106 Правил).`];
+  }
+  if (evidence === 'ads' && adsNumber) {
+    return [
+      `Я сообщил(а) ${what} в ${ads} (п. 105 Правил). Сообщение зарегистрировано под № ${adsNumber}, время регистрации — ${regTime}${accepted} (п. 106 Правил). С этого времени исчисляется период нарушения (п. 111 Правил).`,
+    ];
+  }
+  if (evidence === 'written' && adsNumber) {
+    return [`О нарушении исполнителю сообщено письменно: обращение № ${adsNumber}${p.own_ads_number ? '' : ` от ${regTime}`} (п. 105 Правил).`];
+  }
+  // Не дозвонились. Для УК — напоминаем о её обязанности отвечать на звонки (п. 13 Правил № 416):
+  // отсутствие номера — не вина жителя.
+  const toUk = !waste && (claim.executorType === 'uk' || !claim.executorType);
+  const failed = `Дозвониться в ${ads} не удалось${toUk ? ', хотя она обязана ответить на звонок не позднее чем через 5 минут (п. 13 Правил осуществления деятельности по управлению многоквартирными домами, утв. ПП РФ от 15.05.2013 № 416)' : ''}.`;
+  if (input.act?.act.status === 'signed') return [`${failed} Время начала нарушения указано в акте.`];
+  return [`${failed} Время начала и окончания нарушения указаны потребителем.`];
+}
+
 export function buildClaim(input: ClaimInput): ClaimDoc {
   const { norms, incident, house, participant: p, readings, calc, bills, claim, now } = input;
   const norm = norms.services[incident.service_key];
@@ -169,28 +214,7 @@ export function buildClaim(input: ClaimInput): ClaimDoc {
     for (const r of readings) facts.push(`— ${formatDateTime(new Date(r.at), tz)}: ${fmtTemp(r.temp_c)}${r.temp_c >= t.norm_c - t.day_tolerance_c ? ' (в пределах нормы)' : ''}`);
   }
 
-  const adsNumber = p.own_ads_number || incident.ads_number;
-  // Сосед мог дозвониться сам, даже если первый житель сообщил без номера.
-  const evidence = p.own_ads_number && incident.evidence === 'self' ? 'ads' : incident.evidence;
-  // Время регистрации пишем, только если оно известно: для номера первого жителя это начало отключения
-  // (по п. 111 Правил нарушение и считается с момента сообщения). Время звонка соседа не спрашивали — не выдумываем.
-  const regAt = p.own_ads_number ? '' : ` ${formatDateTime(new Date(incident.started_at), tz)}`;
-  // Первый житель позвонил ещё раз и получил новый номер — пишем оба, первый не теряем.
-  const repeat = p.role === 'reporter' && p.own_ads_number && incident.ads_number && p.own_ads_number !== incident.ads_number;
-  if (repeat) {
-    facts.push(
-      `Нарушение зафиксировано: сообщение в аварийно-диспетчерскую службу зарегистрировано под № ${incident.ads_number} ${formatDateTime(new Date(incident.started_at), tz)}; повторное сообщение — № ${p.own_ads_number} (п. 105–106 Правил).`,
-    );
-  } else if (evidence === 'ads' && adsNumber) {
-    const whose = p.own_ads_number ? '' : p.role === 'neighbour' ? ' (сообщение другого жителя дома о том же нарушении)' : '';
-    facts.push(`Нарушение зафиксировано: сообщение в аварийно-диспетчерскую службу зарегистрировано под № ${adsNumber}${regAt}${whose} (п. 105–106 Правил).`);
-  } else if (evidence === 'written' && adsNumber) {
-    facts.push(`О нарушении исполнителю сообщено письменно: обращение № ${adsNumber}${regAt ? ` от${regAt}` : ''} (п. 105 Правил).`);
-  } else if (input.act?.act.status === 'signed') {
-    facts.push('Сообщить о нарушении в аварийно-диспетчерскую службу не удалось. Время начала нарушения указано в акте (п. 111 Правил).');
-  } else {
-    facts.push('Сообщить о нарушении в аварийно-диспетчерскую службу не удалось. Время начала и окончания нарушения указаны потребителем (п. 111–113 Правил).');
-  }
+  facts.push(...adsFacts(input, serviceName));
   const extras = evidenceExtras(input);
   facts.push(...extras.facts);
 

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { Harness } from '../src/sim/harness.ts';
 import { fromLocal } from '../src/calc/time.ts';
-import { calcFor, claimTextFor, loadCase } from '../src/services/cases.ts';
+import { calcFor, claimTextFor, loadCase, summarize } from '../src/services/cases.ts';
 import { buildActDoc } from '../src/docs/act.ts';
 
 const TZ = 'Europe/Moscow';
@@ -100,6 +100,10 @@ test('основной сценарий: фиксация → напоминан
   const doc = claimText(h, 1);
   assert.match(doc, /ЗАЯВЛЕНИЕ О ПЕРЕРАСЧЁТЕ/);
   assert.match(doc, /№ 4512/);
+  assert.match(
+    doc,
+    /Я сообщил\(а\) о нарушении предоставления коммунальной услуги «Горячее водоснабжение» в аварийно-диспетчерскую службу исполнителя \(п\. 105 Правил\)\. Сообщение зарегистрировано под № 4512, время регистрации — 20\.09\.2026 08:10 \(п\. 106 Правил\)\. С этого времени исчисляется период нарушения \(п\. 111 Правил\)\./,
+  );
   assert.match(doc, /п\. 4 Приложения № 1/);
   assert.match(doc, /телефон, e-mail/);
   assert.match(doc, /Заявитель: /);
@@ -436,6 +440,9 @@ test('демо-режим: сценарий до заявления, насто�
   const houseBefore = h.db.getUser(1)!.house_id;
   await h.press(1, 'Меню');
   await h.press(1, 'Демо');
+  assert.match(h.last(1).text, /Какой случай показать/);
+  await h.press(1, 'Есть номер заявки');
+  assert.match(textOf(h, 1), /Демо 1: есть номер заявки/);
   await h.press(1, 'Воду дали');
   await h.press(1, 'Только что');
   await h.text(1, '1200');
@@ -521,8 +528,12 @@ async function finishWithClaim(h: Harness, user: number, opts: { executor?: stri
   await h.press(user, 'Только что');
   await h.text(user, '1200');
   await h.press(user, 'УК / ТСЖ');
-  await h.text(user, 'Иванов Иван Иванович');
-  await h.text(user, '42');
+  // Житель уже в акте — ФИО и квартиру бот берёт оттуда.
+  if (/Заявление от:/.test(h.last(user).text)) await h.press(user, '✅ Да');
+  else {
+    await h.text(user, 'Иванов Иван Иванович');
+    await h.text(user, '42');
+  }
   await h.press(user, 'Пропустить'); // лицевой счёт
   if (opts.executor) await h.text(user, opts.executor);
   else await h.press(user, 'Пропустить');
@@ -680,10 +691,56 @@ test('акт в одиночку: заявление без доказатель
   assert.equal(actDoc.calc.filter((l) => l.includes('______, кв.')).length, 3, 'три пустые строки для соседей');
   assert.ok(actDoc.calc.some((l) => l.includes('Председатель совета')));
 
+  const pid = h.db.listUserParticipants(1)[0].id;
+  assert.equal(summarize(h.db, h.bot.norms, loadCase(h.db, pid)!, h.now()).claimOutdated, false);
   await h.press(1, 'Акт подписан');
   await h.press(1, 'Да, без председателя');
   assert.equal(h.db.getAct(act.id)!.status, 'signed');
-  assert.match(claimText(h, 1), /подписанным потребителями без участия исполнителя/);
+  const doc = claimText(h, 1);
+  assert.match(doc, /подписанным потребителями без участия исполнителя/);
+  assert.match(doc, /Дозвониться в аварийно-диспетчерскую службу исполнителя не удалось, хотя она обязана ответить на звонок не позднее чем через 5 минут \(п\. 13 .*№ 416\)\. Время начала нарушения указано в акте\./);
+  // Заявление выдали до подписи акта — в нём акта нет: его надо скачать заново.
+  assert.equal(summarize(h.db, h.bot.norms, loadCase(h.db, pid)!, h.now()).claimOutdated, true, 'подписанный акт делает выданное заявление устаревшим');
+  h.close();
+});
+
+test('демо 2: не дозвонились — акт с двумя демо-соседями попадает в заявление', async () => {
+  const h = new Harness({ start: START });
+  await h.start(1);
+  await h.press(1, 'Демо');
+  await h.press(1, 'Не дозвонились');
+  assert.match(textOf(h, 1), /Демо 2: номера заявки нет/);
+  assert.match(textOf(h, 1), /без номера заявки/);
+  await h.press(1, 'Акт с соседями');
+  await h.text(1, 'Петров Пётр Петрович');
+  await h.text(1, '7');
+  assert.match(textOf(h, 1), /Соседи \(демо\) Петрова А\. С\. и Сидоров О\. И\. подтвердили/);
+  const incident = h.db.getIncident(h.db.listUserParticipants(1)[0].incident_id)!;
+  assert.equal(incident.service_key, 'cold_water_off', 'другая услуга, чем в демо 1: расчёты не складываются');
+  const act = h.db.getActByIncident(incident.id)!;
+  assert.equal(h.db.getAct(act.id)!.status, 'ready');
+  assert.deepEqual(h.db.listSigners(act.id).map((s) => s.flat), ['7', '43', '45']);
+
+  await h.press(1, 'Акт подписан');
+  await h.press(1, 'Да, и председатель');
+  // Демо-соседи — не жители бота: им ничего не отправляется.
+  assert.ok(!h.out.log.some((r) => r.to === 'user' && r.id < 0));
+  await h.press(1, 'К делу');
+  await h.press(1, 'Воду дали');
+  await h.press(1, 'Только что');
+  await h.text(1, '600');
+  await h.press(1, 'УК / ТСЖ');
+  // ФИО и квартира — как в акте: заново не спрашиваем.
+  assert.match(h.last(1).text, /Заявление от: Петров Пётр Петрович, кв\. 7\?/);
+  await h.press(1, '✅ Да');
+  await h.press(1, 'Пропустить');
+  await h.press(1, 'Пропустить');
+  await h.press(1, 'Не сохранять');
+  const doc = claimText(h, 1);
+  assert.match(doc, /ДЕМОНСТРАЦИОННЫЕ ДАННЫЕ/);
+  assert.match(doc, /Дозвониться в аварийно-диспетчерскую службу исполнителя не удалось/);
+  assert.match(doc, /подтверждено актом от .* и председателем совета многоквартирного дома без участия исполнителя \(п\. 110\(1\) Правил\)/);
+  assert.match(doc, /Копия акта о нарушении качества/);
   h.close();
 });
 

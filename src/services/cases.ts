@@ -2,7 +2,7 @@ import { calculate, coldTariffAmount, refundAmount } from '../calc/engine.ts';
 import type { CalcInput, CalcResult, Interval, MonthCalc } from '../calc/engine.ts';
 import { fmtPercent } from '../calc/format.ts';
 import { allowedMonthlyHours } from '../calc/norms.ts';
-import { formatShort, monthKey } from '../calc/time.ts';
+import { formatShort, monthKey, monthTitle } from '../calc/time.ts';
 import type { Norms } from '../calc/norms.ts';
 import { buildClaim, claimToText } from '../docs/claim.ts';
 import type { ClaimDoc, ClaimInput } from '../docs/claim.ts';
@@ -138,7 +138,10 @@ function withoutSummer(calc: CalcResult): CalcResult {
 /** Снимок расчёта в момент выдачи заявления: изменился — значит, выданное заявление устарело. */
 export function claimSnapshot(db: Db, norms: Norms, c: CaseBundle, now: Date): string {
   const calc = calcFor(db, norms, c, now);
-  return JSON.stringify({ s: c.p.started_at, e: c.p.ended_at, m: calc.months.map((m) => [m.month, m.percent]) });
+  // v — доказательства в тексте заявления: подписанный акт, проверка исполнителя, номер заявки.
+  const act = db.getActByIncident(c.incident.id);
+  const v = [act?.status === 'signed' ? 1 : 0, c.p.inspection ?? '', c.p.own_ads_number ?? c.incident.ads_number ?? ''].join('|');
+  return JSON.stringify({ s: c.p.started_at, e: c.p.ended_at, m: calc.months.map((m) => [m.month, m.percent]), v });
 }
 
 /** Меньше часа «холодной» горячей воды — копейки; заявление ради этого не делаем. */
@@ -262,7 +265,7 @@ export function statusTitle(status: ParticipantStatus, kind: string, service?: s
 export const STATUS_TITLE: Record<ParticipantStatus, string> = {
   tracking: 'Слежу за отключением',
   ended: 'Починили — осталось скачать заявление',
-  claim_ready: 'Заявление готово',
+  claim_ready: 'Заявление готово — осталось подать',
   refunded: 'Перерасчёт получен',
   refused: 'Перерасчёт не сделали',
   closed: 'Закрыт без перерасчёта',
@@ -280,6 +283,7 @@ export type CaseSummary = {
   status: ParticipantStatus;
   statusTitle: string;
   evidence: string;
+  ownNumber: boolean;
   adsNumber: string | null;
   role: string;
   neighbours: number;
@@ -303,10 +307,19 @@ export type CaseSummary = {
   extraFlats: { flat: string; account?: string; bills: Record<string, number>; estimate: number }[];
 };
 
+/** Снимок выданного заявления отличается от текущего. */
+export function snapshotChanged(issued: string, current: string): boolean {
+  const old = JSON.parse(issued);
+  const cur = JSON.parse(current);
+  // Заявления, выданные до версии 1.0.5, доказательства в снимке не хранят — сравниваем без них.
+  if (!('v' in old)) delete cur.v;
+  return JSON.stringify(old) !== JSON.stringify(cur);
+}
+
 function claimOutdated(db: Db, norms: Norms, c: CaseBundle, now: Date): boolean {
   const snap = claimOf(c.p).issuedSnapshot;
   if (!snap || !c.p.ended_at) return false;
-  return snap !== claimSnapshot(db, norms, c, now);
+  return snapshotChanged(snap, claimSnapshot(db, norms, c, now));
 }
 
 export function summarize(db: Db, norms: Norms, c: CaseBundle, now: Date): CaseSummary {
@@ -327,9 +340,15 @@ export function summarize(db: Db, norms: Norms, c: CaseBundle, now: Date): CaseS
     startedAt: c.p.started_at,
     endedAt: c.p.ended_at,
     status: c.p.status,
-    statusTitle: statusTitle(c.p.status, norm.kind, c.incident.service_key),
+    // Подали — дальше ждём квитанцию за месяц подачи: там должен появиться перерасчёт.
+    statusTitle:
+      c.p.status === 'claim_ready' && claim.submittedAt
+        ? `Подано — ждём квитанцию за ${monthTitle(monthKey(new Date(claim.submittedAt), c.house.tz))}`
+        : statusTitle(c.p.status, norm.kind, c.incident.service_key),
     kind: norm.kind,
     evidence: c.incident.evidence,
+    // Номер заявки получил сам житель — тогда он знает, кто её принял.
+    ownNumber: !!c.p.own_ads_number || (c.p.role === 'reporter' && c.incident.evidence === 'ads'),
     // Повторный звонок первого жителя — показываем оба номера, первый не теряем.
     adsNumber:
       c.p.role === 'reporter' && c.p.own_ads_number && c.incident.ads_number && c.p.own_ads_number !== c.incident.ads_number

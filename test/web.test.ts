@@ -41,6 +41,7 @@ async function withServer(fn: (base: string, h: Harness) => Promise<void>) {
 async function demoCase(h: Harness, user: number) {
   await h.start(user);
   await h.press(user, 'Демо');
+  await h.press(user, 'Есть номер заявки');
   await h.press(user, 'Воду дали');
   await h.press(user, 'Только что');
   await h.text(user, '1200');
@@ -492,11 +493,27 @@ test('отопление летом не считается', async () => {
   h.close();
 });
 
+test('кто принял заявку — в заявлении; после подачи статус «ждём квитанцию»; подать завтрашним днём нельзя', async () => {
+  await withServer(async (base, h) => {
+    const headers = { 'X-Max-Init-Data': initFor(51), 'Content-Type': 'application/json' };
+    const pid = await demoCase(h, 51);
+    const r = (await (await fetch(`${base}/api/cases/${pid}/claim`, { method: 'PUT', headers, body: JSON.stringify({ fio: 'Орлова Анна Петровна', adsOperator: 'Смирнова О. П.' }) })).json()) as any;
+    assert.equal(r.case.ownNumber, true);
+    assert.match(r.claimText, /время регистрации — [\d.]+ [\d:]+, сообщение принял\(а\) Смирнова О\. П\. \(п\. 106 Правил\)/);
+    await fetch(`${base}/api/cases/${pid}/pdf-link`, { method: 'POST', headers });
+    const day = (shift: number) => new Date(Date.now() + shift).toLocaleDateString('sv-SE', { timeZone: 'Europe/Moscow' });
+    const bad = await fetch(`${base}/api/cases/${pid}/submitted`, { method: 'POST', headers, body: JSON.stringify({ date: day(24 * 3_600_000) }) });
+    assert.equal(bad.status, 400, 'завтрашняя дата подачи — ошибка');
+    const ok = (await (await fetch(`${base}/api/cases/${pid}/submitted`, { method: 'POST', headers, body: JSON.stringify({ date: day(0) }) })).json()) as any;
+    assert.match(ok.case.statusTitle, /^Подано — ждём квитанцию за [а-я]+ \d{4}$/);
+  });
+});
+
 test('health и статика мини-приложения', async () => {
   await withServer(async (base) => {
     const health = (await (await fetch(`${base}/health`)).json()) as any;
     assert.equal(health.ok, true);
-    assert.equal(health.version, '1.0.4');
+    assert.equal(health.version, '1.0.5');
     const page = await fetch(`${base}/app/`);
     assert.equal(page.status, 200);
     const html = await page.text();

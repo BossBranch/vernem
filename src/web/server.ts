@@ -470,6 +470,8 @@ export function createApp(deps: WebDeps) {
       executor: str(b.executor, 200),
       executorInn: inn,
       executorType: b.executorType ?? claimOf(c.p).executorType,
+      // Кто принял заявку (п. 106 Правил) — необязательно; диспетчер мог назвать и табельный номер.
+      adsOperator: b.adsOperator !== undefined ? str(b.adsOperator, 80) : claimOf(c.p).adsOperator,
       coldTariff: Object.keys(coldTariff).length ? coldTariff : undefined,
     };
     db.updateParticipant(c.p.id, { claim: JSON.stringify(claim) });
@@ -527,7 +529,9 @@ export function createApp(deps: WebDeps) {
     const raw = str(req.body?.date, 20);
     const date = raw ? new Date(raw) : null;
     if (!date || Number.isNaN(date.getTime())) throw fieldError('submittedAt', 'Укажите дату подачи');
-    if (date.getTime() > Date.now() + 24 * 3_600_000) throw fieldError('submittedAt', 'Эта дата ещё не наступила');
+    // «Сегодня» — по часовому поясу дома: подать заявление завтрашним днём нельзя.
+    const today = new Date().toLocaleDateString('sv-SE', { timeZone: c.house.tz });
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw!) ? raw! > today : date.getTime() > Date.now()) throw fieldError('submittedAt', 'Эта дата ещё не наступила');
     if (date.getTime() < new Date(c.p.started_at).getTime() - 24 * 3_600_000) throw fieldError('submittedAt', 'Заявление не могли подать раньше отключения');
     const created = claimOf(c.p).createdAt;
     if (created && raw!.slice(0, 10) < new Date(created).toLocaleDateString('sv-SE', { timeZone: c.house.tz })) {
