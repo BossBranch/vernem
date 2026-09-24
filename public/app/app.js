@@ -37,8 +37,30 @@
     sewerage_off: 'Когда начался засор',
     waste_off: 'С какого дня не вывозят мусор'
   };
-  var END_TITLE = { heating_temp: 'Стало тепло?', hot_water_temp: 'Вода снова горячая?', waste_off: 'Мусор вывезли?' };
-  var END_BUTTON = { heating_temp: '✅ Стало тепло — посчитать деньги', hot_water_temp: '✅ Вода горячая — посчитать деньги', waste_off: '✅ Вывезли — посчитать деньги' };
+  /** Кнопка «починили» — словами жителя, без «посчитать деньги»: её не должны нажимать раньше времени. */
+  var END_NAME = {
+    hot_water_off: 'Воду дали', cold_water_off: 'Воду дали', electricity_off: 'Свет дали', gas_off: 'Газ дали',
+    heating_off: 'Отопление дали', sewerage_off: 'Канализацию починили', waste_off: 'Мусор вывезли',
+    heating_temp: 'Стало тепло', hot_water_temp: 'Вода снова горячая'
+  };
+  var END_TITLE = {
+    hot_water_off: 'Когда дадут воду — отметьте здесь', cold_water_off: 'Когда дадут воду — отметьте здесь',
+    electricity_off: 'Когда дадут свет — отметьте здесь', gas_off: 'Когда дадут газ — отметьте здесь',
+    heating_off: 'Когда дадут отопление — отметьте здесь', sewerage_off: 'Когда починят канализацию — отметьте здесь',
+    waste_off: 'Когда вывезут мусор — отметьте здесь', heating_temp: 'Когда станет тепло — отметьте здесь',
+    hot_water_temp: 'Когда вода станет горячей — отметьте здесь'
+  };
+  function endName(c) { return END_NAME[c.service] || 'Починили'; }
+  var LACK_NOW = {
+    hot_water_off: 'Горячей воды нет', cold_water_off: 'Холодной воды нет', electricity_off: 'Света нет', gas_off: 'Газа нет',
+    heating_off: 'Отопления нет', sewerage_off: 'Канализация не работает', waste_off: 'Мусор не вывозят',
+    heating_temp: 'Холодно', hot_water_temp: 'Вода еле тёплая'
+  };
+  var LACK_WAS = {
+    hot_water_off: 'Горячей воды не было', cold_water_off: 'Холодной воды не было', electricity_off: 'Света не было', gas_off: 'Газа не было',
+    heating_off: 'Отопления не было', sewerage_off: 'Канализация не работала', waste_off: 'Мусор не вывозили',
+    heating_temp: 'Холодно было', hot_water_temp: 'Вода была еле тёплой'
+  };
   var TONE = { tracking: 'open', ended: 'action', claim_ready: 'action', refunded: 'money', refused: 'open', closed: '' };
   /** Как услуга называется в квитанции — для вопроса «сколько начислено за …». */
   var BILL_NAME = {
@@ -173,8 +195,7 @@
     Object.keys(fields).forEach(function (k) {
       var el = $((map && map[k]) || k);
       if (!el) return;
-      var d = el.closest && el.closest('details');
-      if (d) d.open = true;
+      for (var d = el.closest && el.closest('details'); d; d = d.parentElement && d.parentElement.closest('details')) d.open = true;
       el.setAttribute('aria-invalid', 'true');
       var p = document.createElement('p');
       p.className = 'field-error';
@@ -267,9 +288,12 @@
         // Сверху — то, что требует действий; закрытые дела — в архиве.
         var active = cases.filter(function (c) { return c.status !== 'refunded' && c.status !== 'closed'; });
         var archive = cases.filter(function (c) { return c.status === 'refunded' || c.status === 'closed'; });
+        // Демо-дела входят в итоги — честно помечаем, чтобы их не приняли за настоящие деньги.
+        var demoRefund = cases.some(function (c) { return c.demo && c.status === 'refunded'; });
+        var demoPending = cases.some(function (c) { return c.demo && c.status === 'claim_ready'; });
         html += '<ul class="ledger">' +
-          '<li class="main"><span class="label">Вернули</span><span class="dots"></span><span class="sum">' + rub(me.refunded) + '</span></li>' +
-          (pending > 0 ? '<li class="sub"><span class="label">Положено по готовым заявлениям</span><span class="sum">≈ ' + rub(Math.round(pending * 100) / 100) + '</span></li>' : '') +
+          '<li class="main"><span class="label">Вернули' + (demoRefund ? ' <span class="demo-tag">демо</span>' : '') + '</span><span class="dots"></span><span class="sum">' + rub(me.refunded) + '</span></li>' +
+          (pending > 0 ? '<li class="sub"><span class="label">Ещё ждёте по заявлениям' + (demoPending ? ' <span class="demo-tag">демо</span>' : '') + '</span><span class="sum">≈ ' + rub(Math.round(pending * 100) / 100) + '</span></li>' : '') +
           '</ul>' +
           (active.length ? '<ul class="cases">' + active.map(caseRow).join('') + '</ul>' : '<p class="muted">Открытых дел нет.</p>') +
           (archive.length ? '<details class="more archive"><summary>Архив: ' + archive.length + ' ' + plural(archive.length, ['дело', 'дела', 'дел']) + '</summary><ul class="cases">' + archive.map(caseRow).join('') + '</ul></details>' : '');
@@ -302,7 +326,7 @@
       '</div></li>';
   }
   function infoFilled(i) { return Object.keys(i || {}).some(function (k) { return k !== 'updatedAt' && k !== 'updatedBy' && i[k]; }); }
-  function membersText(n) { return n > 1 ? 'в сети ' + n + ' ' + plural(n, ['житель', 'жителя', 'жителей']) : 'в сети пока только вы'; }
+  function membersText(n) { return n > 1 ? 'здесь ' + n + ' ' + plural(n, ['житель', 'жителя', 'жителей']) + ' дома' : 'из соседей здесь пока только вы'; }
 
   function caseRow(c) {
     var sum = c.status === 'refunded' ? (c.refundAmount ? rub(c.refundAmount) : 'сумма не указана') : c.estimate > 0 ? '≈ ' + rub(c.estimate) : '';
@@ -340,7 +364,7 @@
       (next === 'report' ? '<p class="note">Сначала добавьте адрес — потом сразу перейдём к проблеме.</p>' : '') +
       '<label>Город</label><div id="cityBox"></div>' +
       '<label for="q">Улица и номер дома</label><input id="q" autocomplete="off" placeholder="Например: Садовая 10">' +
-      '<p class="muted hint" id="searchHint">Выберите свой дом из списка — так вы окажетесь в одной сети с соседями. Нет в списке — вы первый, добавьте его.</p>' +
+      '<p class="muted hint" id="searchHint">Выберите свой дом из списка — так вы будете вместе с соседями. Нет в списке — добавьте его.</p>' +
       '<ul class="results" id="results"></ul>' +
       '<div id="pick" hidden><p class="picked" id="picked"></p>' +
       '<div class="row2"><div><label for="entrance">Подъезд</label><input id="entrance" maxlength="4" placeholder="2 или 2А"></div>' +
@@ -396,7 +420,7 @@
       // Похоже на опечатку («Масква») — не предлагаем завести «новый город».
       if (check && check.name && !check.inList && !check.suggestion) items.push('<li><button class="result new" data-city="' + esc(check.name) + '">➕ Другой город: «' + esc(check.name) + '»</button></li>');
       if (check && !check.name && typed && !items.length) items.push('<li class="muted">' + (check.latin ? 'Напишите город по-русски, например «Москва»' : 'Напишите название полностью — хотя бы четыре буквы') + '</li>');
-      if (check && check.name && !check.inList && !check.suggestion) items.push('<li class="muted small">Этого города пока нет в справочнике — ничего страшного, добавьте его. Проверьте только, что название написано верно: время буду считать по Москве.</li>');
+      if (check && check.name && !check.inList && !check.suggestion) items.push('<li class="muted small">Этого города пока нет в справочнике — ничего страшного, добавьте его. Проверьте только, что название написано верно.</li>');
       $('cityResults').innerHTML = items.join('');
       each('#cityResults .result', function (b) { b.onclick = function () { pickCity(b.getAttribute('data-city')); }; });
     }
@@ -452,15 +476,15 @@
       api('POST', '/api/me/houses', body).then(function (r) {
         haptic('success');
         track('app_house_added');
-        toast(r.already ? (r.entranceChanged ? 'Этот адрес уже был в списке — подъезд обновил' : 'Этот адрес уже есть в вашем списке') : 'Адрес добавлен');
-        location.hash = next === 'report' ? '#report/' + r.house.id : '#house/' + r.house.id;
+        toast(r.already ? (r.entranceChanged ? 'Этот адрес уже был в списке — подъезд обновил' : 'Этот адрес уже есть в вашем списке') : 'Адрес добавлен. Если что-то отключат — нажмите «Сообщить о проблеме»');
+        location.hash = next === 'report' ? '#report/' + r.house.id : '';
       }).catch(function (e) { showErrors(e); }).then(done);
     };
   }
 
   // ---------- карточка дома: данные из квитанции ----------
   var INFO_FIELDS = [
-    ['ukName', 'УК или ТСЖ — получатель за «содержание жилья»', 'Например: ООО «УК Пример»'],
+    ['ukName', 'Ваша управляющая компания (УК или ТСЖ, как в квитанции)', 'Например: ООО «УК Пример»'],
     ['ukInn', 'ИНН УК', '10 цифр из квитанции', 'numeric'],
     ['adsPhone', 'Телефон аварийной службы', 'Например: +7 495 123-45-67', 'tel'],
     ['ukEmail', 'Почта УК — туда можно отправить заявление', 'Например: uk@example.ru', 'email'],
@@ -479,7 +503,7 @@
       var h = r.house;
       var i = h.info || {};
       var html = backLink('Главная', '') + '<h1>🏠 ' + esc(h.address) + '</h1>' +
-        '<p class="muted">' + (h.members > 1 ? 'В сети дома ' + h.members + ' ' + plural(h.members, ['житель', 'жителя', 'жителей']) + ' вместе с вами.' : 'В сети дома пока только вы. Позовите соседей: когда что-то отключат, я спрошу их «у вас тоже?», а вместе проще доказать.') + '</p>' +
+        '<p class="muted">' + (h.members > 1 ? 'Здесь уже ' + h.members + ' ' + plural(h.members, ['житель', 'жителя', 'жителей']) + ' этого дома, вместе с вами.' : 'Из соседей здесь пока только вы. Позовите их: когда что-то отключат, я спрошу «у вас тоже?», а вместе проще доказать.') + '</p>' +
         '<button class="btn primary" id="reportHere">🚨 Сообщить о проблеме в этом доме</button>';
 
       html += '<section class="sheet"><h2>Я и этот дом</h2>' +
@@ -488,7 +512,7 @@
         '<label for="account">Лицевой счёт (из квитанции)</label><input id="account" maxlength="40" value="' + esc(h.account || '') + '">' +
         '<p class="muted hint">Квартира и лицевой счёт нужны только для ваших заявлений, соседи их не видят.</p>' +
         '<label for="notify">Писать мне, если у соседей отключат воду, свет или тепло</label><select id="notify"><option value="1"' + (h.notify ? ' selected' : '') + '>Да, писать</option><option value="0"' + (h.notify ? '' : ' selected') + '>Нет, не писать</option></select>' +
-        (h.inviteLink ? '<label>Позовите соседей — чем больше в сети, тем проще доказать отключение</label><div class="copy"><input readonly id="invite" value="' + esc(h.inviteLink) + '"><button class="btn" id="copy">Копировать</button></div>' : '') +
+        (h.inviteLink ? '<label>Позовите соседей — вместе проще доказать отключение</label><div class="copy"><input readonly id="invite" value="' + esc(h.inviteLink) + '"><button class="btn" id="copy">Копировать</button></div>' : '') +
         '</section>';
 
       html += '<section class="sheet"><h2>Данные дома <small>из квитанции</small></h2>' +
@@ -530,18 +554,22 @@
         b.twoPowerSources = $('twoPower').value === '' ? null : $('twoPower').value === '1';
         return b;
       }
+      // Ответы приходят не по порядку: старый «сохранено» не должен стирать свежую ошибку.
+      var infoSeq = 0;
       function saveInfo(btn) {
         var body = infoBody();
         var json = JSON.stringify(body);
         if (!btn && json === saved) return Promise.resolve();
         var done = btn ? busy(btn, 'Сохраняю…') : function () {};
+        var mine = ++infoSeq;
         return api('PUT', '/api/houses/' + h.id + '/info', body).then(function (res) {
           saved = json;
+          if (mine !== infoSeq) return;
           clearErrors();
           var info = (res.house && res.house.info) || {};
           $('infoStatus').textContent = '✓ Сохранено' + (info.updatedAt ? ' ' + when(info.updatedAt) : '') + '. Эти данные попадут в заявления соседей.';
           if (btn) { haptic('success'); track('app_house_info'); toast('Данные дома сохранены — они попадут в заявления соседей'); }
-        }).catch(function (e) { showErrors(e, { ukInn: 'f_ukInn', ukEmail: 'f_ukEmail', adsPhone: 'f_adsPhone' }); }).then(done);
+        }).catch(function (e) { if (mine === infoSeq) showErrors(e, { ukInn: 'f_ukInn', ukEmail: 'f_ukEmail', adsPhone: 'f_adsPhone' }); }).then(done);
       }
       each('[data-info]', function (el) { el.addEventListener('change', function () { saveInfo(null); }); });
       $('twoPower').addEventListener('change', function () { saveInfo(null); });
@@ -571,12 +599,13 @@
         '<div id="extra"></div>' +
         '<section class="sheet"><h2 id="adsTitle">📞 Аварийная служба</h2><p id="adsHint" class="muted"></p>' +
         '<label><input type="radio" name="ev" value="ads" checked> Дозвонились — есть номер заявки</label>' +
-        '<label><input type="radio" name="ev" value="written"> Написали обращение (Госуслуги Дом, ГИС ЖКХ)</label>' +
+        '<label><input type="radio" name="ev" value="written"> Написали в «Госуслуги Дом» — есть номер обращения</label>' +
         '<label><input type="radio" name="ev" value="self"> Не дозвонились — докажу актом с соседями</label>' +
         '<div id="numberBox"><label for="number" id="numberLabel">Номер заявки</label><input id="number" maxlength="60"></div>' +
         '<label for="started" id="startedLabel">Когда позвонили в аварийную службу</label>' +
         '<div class="chips" id="startChips"><button class="chip" type="button" data-ago="0">Только что</button><button class="chip" type="button" data-ago="60">1 ч назад</button>' +
-        '<button class="chip" type="button" data-ago="180">3 ч назад</button><button class="chip" type="button" data-ago="1440">Вчера в это же время</button></div>' +
+        '<button class="chip" type="button" data-ago="180">3 ч назад</button><button class="chip" type="button" data-ago="1440">Вчера в это же время</button>' +
+        '<button class="chip" type="button" data-ago="2880">2 дня назад</button><button class="chip" type="button" data-ago="10080">Неделю назад</button></div>' +
         '<input id="started" type="datetime-local" max="' + localNow() + '" aria-describedby="startedHint">' +
         '<p class="muted hint" id="startedHint"></p>' +
         '</section>' +
@@ -675,18 +704,24 @@
           variant: $('variant') ? $('variant').value : undefined,
           planned: $('planned') ? $('planned').checked : false
         };
-        if (!body.startedAt) { showErrors(fieldErr('started', 'Выберите время кнопкой выше или впишите своё')); return; }
+        // Все ошибки формы — сразу, а не по одной за нажатие.
+        var errs = {};
+        if (!body.startedAt) errs.started = 'Выберите время кнопкой выше или впишите своё';
+        if (ev !== 'self' && !body.number) errs.number = ev === 'written' ? 'Впишите номер обращения' : 'Впишите номер заявки или выберите «Не дозвонились»';
+        if ($('temp') && !body.temp) errs.temp = 'Впишите, сколько градусов показал термометр';
+        if (Object.keys(errs).length) { showErrors({ message: 'Заполните отмеченные поля', fields: errs }); return; }
         // Больше месяца — чаще всего опечатка в дате. Не запрещаем, но переспрашиваем.
         if (Date.now() - new Date(body.startedAt).getTime() > 31 * 24 * 3600000 &&
           !confirm('Начало — ' + new Date(body.startedAt).toLocaleDateString('ru-RU') + ', больше месяца назад. Всё верно?')) return;
-        if (ev !== 'self' && !body.number) { showErrors(fieldErr('number', ev === 'written' ? 'Впишите номер обращения' : 'Впишите номер заявки или выберите «Не дозвонились»')); return; }
-        if ($('temp') && !body.temp) { showErrors(fieldErr('temp', 'Впишите, сколько градусов показал термометр')); return; }
         var done = busy($('submit'), 'Записываю…');
         api('POST', '/api/report', body).then(function (r) {
           haptic('success');
           track('app_report');
           // Честно говорим, что произошло: новое дело, уже записанное или присоединение к соседям.
-          if (r.outcome === 'existing') toast('Это у вас уже записано — открыл ваше дело.' + (r.numberSaved ? ' Номер заявки добавил.' : ''));
+          if (r.outcome === 'existing') {
+            toast('Это у вас уже записано' + (r.since ? ' с ' + when(r.since) : '') + ' — открыл дело.' + (r.numberSaved ? ' Номер добавил.' : '') + (r.readingSaved ? ' Замер добавил.' : '') +
+              (r.since && body.startedAt && Math.abs(new Date(r.since) - new Date(body.startedAt)) > 3600000 ? ' Время начала оставил прежним — его можно исправить в деле.' : ''));
+          }
           else if (r.outcome === 'joined') toast('Соседи уже сообщили об этом — вы присоединились к их делу.' + (r.numberSaved ? ' Ваш номер заявки сохранён.' : ''));
           else toast(r.neighbours > 0 && r.botConnected ? 'Записал. Спрошу соседей в сети: «у вас тоже?»' : 'Записал. Позовите соседей — вместе проще доказать.');
           // Без записи в истории: «назад» из дела ведёт на главную, а не обратно в форму.
@@ -728,12 +763,23 @@
       if (c.demo) html += demoNote(c);
       // Ни номера заявки, ни подписанного акта: УК скажет «не знаем, что услуги не было».
       if (open && c.evidence === 'self' && !(c.act && c.act.status === 'signed')) {
-        html += '<p class="note warn">⚠️ <b>Пока нет доказательства</b> — ни номера заявки, ни подписанного акта. Без них УК может отказать. Соберите акт с соседями (ниже). Дозвонились позже — сообщите о проблеме ещё раз, с номером: я добавлю его в это дело.</p>';
+        html += '<p class="note warn">⚠️ <b>Нет доказательства</b> — ни номера заявки, ни подписанного акта. Соберите подписи соседей в акте — ниже. Дозвонились позже — сообщите о проблеме ещё раз, с номером.</p>';
       }
 
+      if (c.claimOutdated) {
+        html += '<p class="note warn">⚠️ После того как вы скачали заявление, в нём изменились данные (время, расчёт или доказательства — например, подписали акт). Старое заявление больше не верно — скачайте новое и подайте его. Дата подачи сбросится: отметьте её заново.</p>';
+      }
+      // Нет доказательства — сначала акт, потом всё остальное: так и подсказка, и экран говорят одно.
+      var actFirst = open && c.evidence === 'self' && !(c.act && c.act.status === 'signed');
+      if (actFirst) html += actSection(c);
+      if (c.status === 'claim_ready') html += nextSteps(c);
+      if (c.status === 'refused') html += escalationSection(c);
+
       if (c.status === 'tracking') {
-        html += '<section class="sheet"><h2>' + esc(END_TITLE[c.service] || 'Починили?') + '</h2><label for="ended">Когда</label><input id="ended" type="datetime-local" value="' + localNow() + '">' +
-          '<div class="actions"><button class="btn primary" id="endBtn">' + esc(END_BUTTON[c.service] || '✅ Починили — посчитать деньги') + '</button></div>' +
+        html += '<section class="sheet"><h2>' + esc(END_TITLE[c.service] || 'Когда починят — отметьте здесь') + '</h2><label for="ended">Когда</label>' +
+          timeChips('endChips', [[0, 'Только что'], [60, '1 ч назад'], [180, '3 ч назад'], [1440, 'Вчера в это же время']]) +
+          '<input id="ended" type="datetime-local" max="' + localNow() + '" value="' + localNow() + '">' +
+          '<div class="actions"><button class="btn" id="endBtn">✅ ' + esc(endName(c)) + '</button></div>' +
           '<p class="muted hint">' + (c.service === 'waste_off' ? 'Запишите, когда вывезли, — время попадёт в заявление.' : c.evidence === 'ads' ? 'Позвоните в аварийную службу и скажите, что починили, — так фиксируется время окончания.' : c.evidence === 'written' ? 'Допишите в обращение, когда починили.' : 'Запишите время — оно попадёт в заявление.') + '</p></section>';
         if (temp) {
           html += '<section class="sheet"><h2>🌡 Новый замер</h2><p class="muted hint">' + (c.service === 'heating_temp' ? 'Холодно' : 'Вода еле тёплая') + ' несколько дней — меряйте хотя бы раз в день: каждый замер — ещё одно доказательство.</p>' +
@@ -742,19 +788,11 @@
             '<div class="actions"><button class="btn" id="addReading">Записать замер</button></div></section>';
         }
       }
-      if (c.status === 'ended' || c.status === 'closed') {
-        html += '<div class="actions"><button class="btn" id="reopen">↩️ Ещё не починили — вернуть в отслеживание</button></div>';
-      }
-
-      if (c.claimOutdated) {
-        html += '<p class="note warn">⚠️ После того как вы скачали заявление, в нём изменились данные (время, расчёт или доказательства — например, подписали акт). Старое заявление больше не верно — скачайте новое и подайте его. Дата подачи сбросится: отметьте её заново.</p>';
-      }
       html += moneySection(c);
-      if (c.endedAt && (c.status === 'ended' || c.status === 'claim_ready' || c.status === 'refused')) html += claimForm(c);
-      if (c.status === 'claim_ready') html += nextSteps(c);
-      if (c.status === 'refused') html += escalationSection(c);
+      // Заявление уже выдано — форма свёрнута: главное теперь «Что дальше» (оно выше).
+      if (c.endedAt && (c.status === 'ended' || c.status === 'claim_ready' || c.status === 'refused')) html += claimForm(c, c.status !== 'ended');
       if (c.status === 'refunded') html += refundedSection(c);
-      if (open && (c.evidence === 'self' || c.inspection === 'no_show' || (c.act && c.act.mine))) html += actSection(c);
+      if (!actFirst && open && (c.evidence === 'self' || c.inspection === 'no_show' || (c.act && c.act.mine))) html += actSection(c);
       html += factsSection(c);
 
       html += '<div class="actions">';
@@ -771,10 +809,13 @@
   function demoNote(c) {
     if (c.evidence === 'self' && c.status === 'tracking') {
       return '<p class="note">🧪 <b>Демо 2: не дозвонились — номера заявки нет.</b> Доказательство — акт с соседями: двое соседей (демо) уже в нём. ' +
-        (c.act && c.act.status === 'signed' ? 'Акт подписан — отметьте «Починили», и он попадёт в заявление.' : 'Отметьте в блоке акта «Соседи подписали», потом «Починили» — акт попадёт в заявление.') + '</p>';
+        (c.act && c.act.status === 'signed' ? 'Акт подписан — отметьте «' + esc(endName(c)) + '», и он попадёт в заявление.' : 'Отметьте в акте ниже «Соседи подписали», потом «' + esc(endName(c)) + '» — акт попадёт в заявление.') + '</p>';
+    }
+    if (c.status === 'ended') {
+      return '<p class="note">🧪 Демо: впишите в «Деньги» любую плату, например 600, и нажмите «Скачать заявление».</p>';
     }
     if (c.evidence === 'ads' && c.status === 'claim_ready') {
-      return '<p class="note">🧪 <b>Демо 1: дозвонились — есть номер заявки.</b> Этого достаточно: заявление готово. Скачайте его и посмотрите «Что дальше».</p>';
+      return '<p class="note">🧪 <b>Демо 1: дозвонились — есть номер заявки.</b> Этого достаточно: заявление готово. Ниже — что с ним делать.</p>';
     }
     return '';
   }
@@ -788,14 +829,8 @@
   /** Деньги: расчёт, плата из квитанции и сумма — в одном месте, сумма видна рядом с полем. */
   function moneySection(c) {
     if (!c.months.length) return '';
-    var html = '<section class="sheet" id="money"><h2>Деньги</h2>';
-    if (c.status === 'tracking') html += '<p class="muted">Пока не починили — считаю на сейчас: процент растёт с каждым часом. Рубли покажу, когда отметите «Починили» и впишете плату из квитанции.</p>';
-    html += '<ul class="formula">';
-    c.months.forEach(function (m) {
-      if (c.months.length > 1) html += '<li class="month">' + esc(monthTitle(m.month)) + '</li>';
-      m.lines.forEach(function (l) { html += '<li>' + nb(l) + '</li>'; });
-    });
-    html += '</ul>';
+    var html = '<section class="sheet" id="money"><h2>Деньги</h2><p class="money-summary">' + nb(moneySummary(c)) + '</p>';
+    if (c.status === 'tracking') html += '<p class="muted hint">Рубли посчитаю, когда отметите «' + esc(endName(c)) + '» и впишете плату из квитанции.</p>';
     var paid = c.months.filter(function (m) { return m.percent > 0; });
     if (c.endedAt && paid.length && c.status !== 'refunded' && c.status !== 'closed') {
       paid.forEach(function (m) {
@@ -820,14 +855,52 @@
     }
     html += '<p class="total" id="liveTotal"' + (c.estimate > 0 ? '' : ' hidden') + '>Положено ≈ ' + rub(c.estimate) + '</p>' +
       '<p class="muted hint" id="liveNote"></p>' +
-      '<p class="source muted">Источник: <a href="' + esc(c.basisUrl) + '" data-ext>' + esc(c.basis) + ' к ПП РФ № 354</a>. Итог считает УК.</p></section>';
+      '<details class="more"><summary>Как посчитано</summary><ul class="formula">' +
+      c.months.map(function (m) {
+        return (c.months.length > 1 ? '<li class="month">' + esc(monthTitle(m.month)) + '</li>' : '') + m.lines.map(function (l) { return '<li>' + nb(l) + '</li>'; }).join('');
+      }).join('') + '</ul>' +
+      '<p class="source muted">Источник: <a href="' + esc(c.basisUrl) + '" data-ext>' + esc(c.basis) + ' к ПП РФ № 354</a>. Итог считает УК.</p></details></section>';
     return html;
+  }
+
+  function pct(p) { return String(Math.round(p * 100) / 100).replace('.', ',') + '%'; }
+  /** Главное о деньгах одной фразой: сколько не было услуги и на сколько снизить плату. */
+  function moneySummary(c) {
+    var hours = ((c.endedAt ? new Date(c.endedAt) : new Date()) - new Date(c.startedAt)) / 3600000;
+    var paid = c.months.filter(function (m) { return m.percent > 0; });
+    var what = c.endedAt ? (LACK_WAS[c.service] || 'Услуги не было') + ' ' + fmtHours(hours) : (LACK_NOW[c.service] || 'Услуги нет') + ' уже ' + fmtHours(hours);
+    if (!paid.length) {
+      if (c.months.some(function (m) { return m.coldTariffHours >= 1; })) return what + '. За часы, когда вода была ниже +40 °C, горячая вода оплачивается как холодная.';
+      return c.endedAt ? what + ' — это в пределах допустимого, снижения платы не положено.' : what + '. Пока это в пределах допустимого — если не починят дольше, начнут считаться деньги.';
+    }
+    var cut = paid.length === 1
+      ? 'плату за ' + monthTitle(paid[0].month) + ' должны снизить на ' + pct(paid[0].percent)
+      : 'плату должны снизить: ' + paid.map(function (m) { return 'за ' + monthTitle(m.month) + ' — на ' + pct(m.percent); }).join(', ');
+    return what + ' — ' + cut + (c.endedAt ? '.' : '. С каждым часом — больше.');
+  }
+
+  /** Кнопки быстрого выбора времени: [минут назад, подпись]. */
+  function timeChips(id, list) {
+    return '<div class="chips time-chips" id="' + id + '">' + list.map(function (x) {
+      return '<button class="chip" type="button" data-ago="' + x[0] + '">' + esc(x[1]) + '</button>';
+    }).join('') + '</div>';
+  }
+  function bindTimeChips(chipsId, inputId) {
+    each('#' + chipsId + ' .chip', function (b) {
+      b.onclick = function () {
+        $(inputId).value = toLocalInput(new Date(Date.now() - Number(b.getAttribute('data-ago')) * 60000).toISOString());
+        each('#' + chipsId + ' .chip', function (x) { x.classList.toggle('on', x === b); });
+        if ($(inputId).getAttribute('aria-invalid')) clearErrors();
+      };
+    });
+    if ($(inputId)) $(inputId).addEventListener('input', function () { each('#' + chipsId + ' .chip', function (x) { x.classList.remove('on'); }); });
   }
 
   /** «Что записано»: факты, замеры и исправление времени. */
   function factsSection(c) {
     var canEditReadings = c.status === 'tracking' || c.status === 'ended' || c.status === 'closed';
-    var startLabel = c.evidence === 'ads' ? 'Начало (звонок)' : c.evidence === 'written' ? 'Начало (обращение)' : 'Начало';
+    var se = c.startEvidence || c.evidence;
+    var startLabel = se === 'ads' ? 'Начало (звонок)' : se === 'written' ? 'Начало (обращение)' : 'Начало';
     var html = '<section class="sheet"><h2>Что записано</h2><dl class="facts">' +
       '<dt>' + startLabel + '</dt><dd class="num">' + esc(when(c.startedAt, c.tz)) + '</dd>' +
       '<dt>Окончание</dt><dd class="num">' + (c.endedAt ? esc(when(c.endedAt, c.tz)) : c.service === 'waste_off' ? 'ещё не вывезли' : 'ещё не починили') + '</dd>' +
@@ -848,6 +921,7 @@
         '<p class="muted hint">Меняется только в вашем деле, у соседей время остаётся прежним.</p>' +
         '<div class="actions"><button class="btn primary" id="saveTimes">Сохранить время</button></div></div>';
     }
+    if (c.status === 'ended' || c.status === 'closed') html += '<p><button class="linklike" id="reopen">↩️ Ещё не починили — вернуть в отслеживание</button></p>';
     return html + '</section>';
   }
 
@@ -884,34 +958,39 @@
       '<div class="actions"><button class="btn primary" id="actPdf">📄 Получить акт для подписи (PDF)</button></div></section>';
   }
 
-  function claimForm(c) {
+  function claimForm(c, collapsed) {
     var cl = c.claim || {};
     // Вывоз мусора оплачивают региональному оператору, а не УК.
     if (!cl.executorType) cl.executorType = c.service === 'waste_off' ? 'rop' : 'uk';
     var opt = function (v, t) { return '<option value="' + v + '"' + (cl.executorType === v ? ' selected' : '') + '>' + t + '</option>'; };
     var s = c.signer;
     var mismatch = s && s.signed && cl.fio && (cl.fio.trim() !== (s.fio || '').trim() || (cl.flat || '') !== (s.flat || ''));
-    return '<section class="sheet"><h2>Заявление на перерасчёт</h2>' +
-      '<p class="muted hint">💰 Заявление — требование вернуть деньги. Подписываете вы. Акт с соседями, если есть, прикладывается к нему.</p>' +
+    var body = '<p class="muted hint">Пустые поля можно вписать от руки после печати. Всё, что вы вписали, сохраняется само.</p>' +
       '<label for="executor">Кому подаёте — кому платите за эту услугу</label><input id="executor" autocomplete="off" value="' + esc(cl.executor || '') + '" placeholder="Название из квитанции">' +
-      '<p class="muted hint">В квитанции найдите строку этой услуги — рядом указан получатель платежа. За тепло и горячую воду часто платят напрямую поставщику (например, «Теплосеть»), за остальное — УК. Не уверены — пишите УК.</p>' +
-      '<label for="etype">Кто это</label><select id="etype">' + opt('uk', 'УК или ТСЖ') + opt('rso', 'Поставщик: Теплосеть, Водоканал и т. п.') + opt('rop', 'Вывоз мусора (региональный оператор)') + opt('unknown', 'Не знаю') + '</select>' +
-      '<label for="inn">ИНН получателя</label><input id="inn" inputmode="numeric" value="' + esc(cl.executorInn || '') + '" placeholder="10 цифр из квитанции">' +
+      '<p class="muted hint">Название — в квитанции, рядом со строкой этой услуги. Не уверены — пишите УК.</p>' +
       '<label for="fio">Ваши ФИО полностью</label><input id="fio" autocomplete="name" value="' + esc(cl.fio || '') + '" placeholder="Фамилия Имя Отчество">' +
       (mismatch ? '<p class="note warn">В подписанном акте вы — ' + esc(s.fio) + (s.flat ? ', кв. ' + esc(s.flat) : '') + '. В заявлении должно быть так же.</p>' : '') +
       '<div class="row2"><div><label for="flat">Квартира</label><input id="flat" value="' + esc(cl.flat || '') + '"></div>' +
       '<div><label for="account">Лицевой счёт</label><input id="account" value="' + esc(cl.account || '') + '"></div></div>' +
+      '<label><input type="checkbox" id="remember"' + (c.savedPersonal ? ' checked' : '') + '> Запомнить ФИО, квартиру и лицевой счёт для следующих заявлений</label>' +
+      '<details class="more" id="claimMore"><summary>Дополнительно (можно не заполнять)</summary>' +
+      '<label for="etype">Кто это</label><select id="etype">' + opt('uk', 'УК или ТСЖ') + opt('rso', 'Поставщик: Теплосеть, Водоканал и т. п.') + opt('rop', 'Вывоз мусора (региональный оператор)') + opt('unknown', 'Не знаю') + '</select>' +
+      '<label for="inn">ИНН получателя</label><input id="inn" inputmode="numeric" value="' + esc(cl.executorInn || '') + '" placeholder="10 цифр из квитанции">' +
       (c.evidence === 'ads' && c.ownNumber
-        ? '<label for="adsOperator">Кто принял заявку <small>необязательно</small></label><input id="adsOperator" maxlength="80" value="' + esc(cl.adsOperator || '') + '" placeholder="ФИО или номер диспетчера">' +
-          '<p class="muted hint">Диспетчер обязан назвать себя (п. 106 ПП № 354). Запомнили — впишите: это попадёт в заявление и усилит его.</p>'
+        ? '<label for="adsOperator">Кто принял заявку</label><input id="adsOperator" maxlength="80" value="' + esc(cl.adsOperator || '') + '" placeholder="ФИО или номер диспетчера">' +
+          '<p class="muted hint">Диспетчер обязан назвать себя. Запомнили — впишите, это попадёт в заявление.</p>'
         : '') +
-      '<p class="muted hint">Пустые поля можно вписать от руки после печати. Всё, что вы вписали, сохраняется само.</p><p class="muted hint" id="claimStatus"></p>' +
-      '<label><input type="checkbox" id="remember"' + (c.savedPersonal ? ' checked' : '') + '> Запомнить ФИО, квартиру и лицевой счёт для следующих заявлений по этому адресу</label>' +
-      '<div class="actions"><button class="btn primary" id="pdf">📄 ' + (c.status === 'ended' ? 'Скачать заявление (PDF)' : 'Скачать заявление ещё раз') + '</button>' +
-      '<button class="btn" id="scan" type="button">📷 Заполнить из QR квитанции</button></div>' +
-      '<p class="muted hint">Подавать тому, кому адресовано заявление: лично (два экземпляра) или через «Госуслуги Дом» / ГИС ЖКХ с PDF во вложении.</p>' +
+      '<div class="actions"><button class="btn" id="scan" type="button">📷 Заполнить из QR квитанции</button></div>' +
       extraFlatsBlock(c) +
-      '</section>';
+      '</details>' +
+      '<p class="muted hint" id="claimStatus"></p>' +
+      '<div class="actions"><button class="btn' + (collapsed ? '' : ' primary') + '" id="pdf">📄 Скачать заявление (PDF)</button></div>';
+    if (collapsed) {
+      return '<details class="sheet more" id="claimBox"><summary>Проверить или исправить данные в заявлении</summary>' + body + '</details>';
+    }
+    return '<section class="sheet"><h2>Заявление на перерасчёт</h2>' +
+      '<p class="muted hint">💰 Заявление — требование вернуть деньги. Подписываете вы. Акт с соседями, если есть, прикладывается к нему.</p>' +
+      body + '</section>';
   }
 
   /** Вторая (третья…) квартира в этом же доме: у каждой — своё заявление со своим счётом и платой. */
@@ -943,8 +1022,10 @@
     var parts = [];
     if (toUk && k.ukAddress) parts.push('адрес: ' + esc(k.ukAddress));
     if (toUk && k.ukEmail) parts.push('почта: <a href="mailto:' + esc(k.ukEmail) + '">' + esc(k.ukEmail) + '</a>');
-    return '<p><b>1. Подайте заявление ' + who + '.</b> Лично — два экземпляра, на своём попросите отметку о приёме. Или через «Госуслуги Дом» / ГИС ЖКХ — PDF во вложении.' +
-      (parts.length ? ' ' + parts.join(', ') + '.' : (cl.executor ? ' Адрес и почту ищите в квитанции — рядом с получателем платежа.' : ' Кому подаёте, в заявлении не указано — впишите от руки: кому платите за эту услугу по квитанции.')) + '</p>';
+    return '<p><b>1. Подайте заявление ' + who + '.</b> Лично — два экземпляра, на своём попросите отметку о приёме. Или через «Госуслуги Дом» — PDF во вложении.' +
+      (c.act && c.act.status === 'signed' ? ' <b>Приложите копию акта с подписями соседей.</b>' : '') +
+      (parts.length ? ' ' + parts.join(', ') + '.' : (cl.executor ? ' Адрес и почту ищите в квитанции — рядом с получателем платежа.' : ' Кому подаёте, в заявлении не указано — впишите от руки: кому платите за эту услугу по квитанции.')) + '</p>' +
+      '<div class="actions"><button class="btn primary" id="pdfTop">📄 Скачать заявление (PDF)</button></div>';
   }
 
   function submittedForm(c) {
@@ -973,14 +1054,22 @@
     var early = monthKeyOf(new Date().toISOString()) < ready;
     var cl = c.claim || {};
     var base = cl.submittedAt || cl.createdAt || new Date().toISOString();
-    return '<section class="sheet"><h2>Что дальше</h2>' + whereToSubmit(c) +
-      '<p><b>2. Отметьте, когда подали</b> — дата и входящий номер попадут в документы, если деньги не вернут.</p>' + submittedForm(c) +
-      '<p class="step3"><b>3. Проверьте квитанцию за ' + esc(monthTitle(monthKeyOf(base))) + '</b> (придёт в начале следующего месяца) и отметьте, сделали ли перерасчёт.</p>' +
-      (early
-        ? '<p class="muted hint">Перерасчёт появится в квитанции, которая придёт в начале ' + esc(MONTHS_GEN[Number(ready.split('-')[1]) - 1]) + '. Тогда и отметьте здесь результат.</p>'
-        : '<label for="refundAmount">Сколько вернули по квитанции, ₽ (если знаете)</label><input id="refundAmount" inputmode="decimal" placeholder="Например: 115,20">' +
-          '<div class="actions"><button class="btn primary" id="refundYes">✅ Перерасчёт сделали</button><button class="btn" id="refundNo">❌ Не сделали</button></div>') +
-      '</section>';
+    var html = '<section class="sheet"><h2>Что дальше</h2>';
+    if (cl.submittedAt) {
+      // Подали — шаги 1–2 сделаны: одна строка вместо инструкции.
+      html += '<p class="done">✓ Подано ' + esc(day(cl.submittedAt, c.tz)) + (cl.incomingNumber ? ', вх. № ' + esc(cl.incomingNumber) : '') + ' <button class="linklike" id="subEdit">Изменить</button></p>' +
+        '<div id="subBox" hidden>' + submittedFields(cl, c) + '</div>';
+    } else {
+      html += whereToSubmit(c) +
+        '<p><b>2. Отметьте, когда подали</b> — дата и входящий номер попадут в документы, если деньги не вернут.</p>' + submittedFields(cl, c);
+    }
+    var num = cl.submittedAt ? '' : '3. ';
+    html += early
+      ? '<p class="step3"><b>' + num + 'В начале ' + esc(MONTHS_GEN[Number(ready.split('-')[1]) - 1]) + ' придёт квитанция за ' + esc(monthTitle(monthKeyOf(base))) + '</b> — посмотрите, уменьшили ли плату, и отметьте здесь.</p>'
+      : '<p class="step3"><b>' + num + 'Пришла квитанция за ' + esc(monthTitle(monthKeyOf(base))) + '?</b> Посмотрите, уменьшили ли плату, и отметьте:</p>' +
+        '<label for="refundAmount">Сколько вернули по квитанции, ₽ (если знаете)</label><input id="refundAmount" inputmode="decimal" placeholder="Например: 115,20">' +
+        '<div class="actions"><button class="btn primary" id="refundYes">✅ Перерасчёт сделали</button><button class="btn" id="refundNo">❌ Не сделали</button></div>';
+    return html + '</section>';
   }
 
   function escalationButtons(c) {
@@ -1126,14 +1215,15 @@
     });
     liveTotal();
 
+    bindTimeChips('endChips', 'ended');
     var endBtn = $('endBtn');
     if (endBtn) endBtn.onclick = function () {
       if (!$('ended').value) { showErrors(fieldErr('ended', 'Укажите дату и время')); return; }
       var done = busy(endBtn, 'Считаю…');
-      api('POST', '/api/cases/' + c.id + '/end', { endedAt: new Date($('ended').value).toISOString() }).then(function () {
+      api('POST', '/api/cases/' + c.id + '/end', { endedAt: new Date($('ended').value).toISOString() }).then(function (r) {
         haptic('success');
         track('app_end');
-        toast('Записал — ниже расчёт денег');
+        toast(r.case && r.case.status === 'closed' ? 'Записал. Это было в пределах допустимого — денег не положено' : 'Записал — посчитал, сколько положено');
         renderCase(c.id);
       }).catch(function (e) { showErrors(e.fields ? e : fieldErr('ended', e.message)); done(); });
     };
@@ -1226,15 +1316,17 @@
     });
 
     var pdfBtn = $('pdf');
-    if (pdfBtn) pdfBtn.onclick = function () {
-      var done = busy(pdfBtn, 'Готовлю PDF…');
+    if ($('pdfTop') && pdfBtn) $('pdfTop').onclick = function () { pdfBtn.onclick(null, $('pdfTop')); };
+    if (pdfBtn) pdfBtn.onclick = function (_e, from) {
+      var done = busy(from || pdfBtn, 'Готовлю PDF…');
       (c.status === 'refunded' ? Promise.resolve() : save()).then(function () {
         clearErrors();
         return api('POST', '/api/cases/' + c.id + '/pdf-link');
       }).then(function (r) {
         track('app_pdf');
         return download(r.url, r.fileName).then(function () {
-          toast('Заявление скачивается');
+          var noBill = c.status !== 'refunded' && c.months.some(function (m) { return m.percent > 0 && !parseMoney(($('bill_' + m.month) || {}).value || ''); });
+          toast(noBill ? 'Заявление скачивается. Платы из квитанции нет — в нём только процент, без рублей' : 'Заявление скачивается');
           // Статус, получатель и «Что дальше» могли измениться — перерисовываем экран.
           setTimeout(function () { renderCase(c.id); }, 1200);
         });

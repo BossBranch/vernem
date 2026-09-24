@@ -256,7 +256,9 @@ input[type='radio'] { width: 22px; height: 22px; min-height: 0; flex: 0 0 auto; 
 
 /* Сообщить о проблеме: адреса-«чипы» и плитки проблем */
 .chips { display: flex; flex-wrap: wrap; gap: 8px; }
-#startChips { margin-bottom: 8px; }
+#startChips, .time-chips { margin-bottom: 8px; }
+.money-summary { font-size: 1.05em; margin: 4px 0 8px; }
+details.sheet > summary { padding: 4px 0; min-height: 44px; display: flex; align-items: center; }
 .chip {
   font: inherit;
   color: var(--ink);

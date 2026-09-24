@@ -138,7 +138,7 @@ export function adsFacts(input: Pick<ClaimInput, 'incident' | 'house' | 'partici
   const regTime = formatDateTime(new Date(incident.started_at), house.tz);
   const adsNumber = p.own_ads_number || incident.ads_number;
   // Сосед мог дозвониться сам, даже если первый житель сообщил без номера.
-  const evidence = p.own_ads_number && incident.evidence === 'self' ? 'ads' : incident.evidence;
+  const evidence = p.own_ads_number && incident.evidence === 'self' ? (p.own_evidence ?? 'ads') : incident.evidence;
   const waste = incident.service_key === 'waste_off';
   const ads = waste ? 'диспетчерскую службу регионального оператора' : 'аварийно-диспетчерскую службу исполнителя';
   const what = `о нарушении предоставления коммунальной услуги «${serviceName}»`;

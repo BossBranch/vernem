@@ -268,7 +268,7 @@ export const STATUS_TITLE: Record<ParticipantStatus, string> = {
   claim_ready: 'Заявление готово — осталось подать',
   refunded: 'Перерасчёт получен',
   refused: 'Перерасчёт не сделали',
-  closed: 'Закрыт без перерасчёта',
+  closed: 'Закрыто',
 };
 
 export type CaseSummary = {
@@ -283,6 +283,7 @@ export type CaseSummary = {
   status: ParticipantStatus;
   statusTitle: string;
   evidence: string;
+  startEvidence: string;
   ownNumber: boolean;
   adsNumber: string | null;
   role: string;
@@ -344,9 +345,16 @@ export function summarize(db: Db, norms: Norms, c: CaseBundle, now: Date): CaseS
     statusTitle:
       c.p.status === 'claim_ready' && claim.submittedAt
         ? `Подано — ждём квитанцию за ${monthTitle(monthKey(new Date(claim.submittedAt), c.house.tz))}`
-        : statusTitle(c.p.status, norm.kind, c.incident.service_key),
+        : c.p.status === 'closed' && c.p.ended_at && !hasMoney(calc)
+          ? norm.kind === 'interruption'
+            ? 'Денег не положено — отключение было коротким'
+            : 'Денег не положено — отклонение было недолгим'
+          : statusTitle(c.p.status, norm.kind, c.incident.service_key),
     kind: norm.kind,
-    evidence: c.incident.evidence,
+    // Свой номер жителя при отключении «без номера» — тоже доказательство.
+    evidence: c.p.own_ads_number && c.incident.evidence === 'self' ? (c.p.own_evidence ?? 'ads') : c.incident.evidence,
+    // Начало дела — время звонка или обращения только если с него дело и началось.
+    startEvidence: c.incident.evidence,
     // Номер заявки получил сам житель — тогда он знает, кто её принял.
     ownNumber: !!c.p.own_ads_number || (c.p.role === 'reporter' && c.incident.evidence === 'ads'),
     // Повторный звонок первого жителя — показываем оба номера, первый не теряем.

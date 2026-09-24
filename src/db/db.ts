@@ -123,6 +123,8 @@ export type Participant = {
   refund_amount: number | null;
   last_card_mid: string | null;
   inspection: Inspection | null;
+  /** Свой номер жителя (own_ads_number) — по звонку в аварийную службу или письменному обращению. */
+  own_evidence?: 'ads' | 'written' | null;
   created_at: string;
   updated_at: string;
 };
@@ -326,6 +328,7 @@ const ADDED_COLUMNS: [table: string, column: string, ddl: string][] = [
   ['acts', 'chair_signed', 'INTEGER'],
   ['user_houses', 'flat', 'TEXT'],
   ['user_houses', 'account', 'TEXT'],
+  ['participants', 'own_evidence', 'TEXT'],
 ];
 
 /**

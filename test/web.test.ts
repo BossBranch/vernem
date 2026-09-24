@@ -236,6 +236,9 @@ test('дело в мини-приложении: повтор, правка вр
     let data = (await (await fetch(`${base}/api/cases/${first.caseId}`, { headers })).json()) as any;
     assert.equal(data.case.adsNumber, '777');
     assert.equal(data.case.evidence, 'ads');
+    // Время начала — прежнее (не время звонка): в заявлении номер без выдуманного времени регистрации.
+    assert.equal(data.case.startEvidence, 'self');
+    assert.equal(data.case.startedAt, startedAt);
 
     const end = () => fetch(`${base}/api/cases/${first.caseId}/end`, { method: 'POST', headers, body: JSON.stringify({ endedAt: new Date().toISOString() }) });
     assert.equal((await end()).status, 200);
@@ -493,6 +496,33 @@ test('отопление летом не считается', async () => {
   h.close();
 });
 
+test('повторное сообщение: замер не теряется, номер — без выдуманного времени, закрытое дело объясняет почему', async () => {
+  await withServer(async (base, h) => {
+    const headers = { 'X-Max-Init-Data': initFor(61), 'Content-Type': 'application/json' };
+    await h.start(61);
+    const { house } = (await (await fetch(`${base}/api/me/houses`, { method: 'POST', headers, body: JSON.stringify({ address: 'Лесная 7', city: 'Москва' }) })).json()) as any;
+    const report = (body: object) => fetch(`${base}/api/report`, { method: 'POST', headers, body: JSON.stringify({ houseId: house.id, ...body }) }).then((r) => r.json() as any);
+    const yesterday = new Date(Date.now() - 24 * 3_600_000).toISOString();
+    const first = await report({ service: 'heating_temp', evidence: 'self', startedAt: yesterday, temp: '16' });
+    const again = await report({ service: 'heating_temp', evidence: 'ads', number: 'Б-55', startedAt: new Date().toISOString(), temp: '17' });
+    assert.equal(again.outcome, 'existing');
+    assert.equal(again.readingSaved, true);
+    assert.equal(again.since, yesterday);
+    const data = (await (await fetch(`${base}/api/cases/${first.caseId}`, { headers })).json()) as any;
+    assert.deepEqual(data.case.readings.map((r: any) => r.tempC), [16, 17]);
+    await fetch(`${base}/api/cases/${first.caseId}/end`, { method: 'POST', headers, body: JSON.stringify({}) });
+    const put = (await (await fetch(`${base}/api/cases/${first.caseId}/claim`, { method: 'PUT', headers, body: JSON.stringify({ fio: 'Лесная Анна Петровна' }) })).json()) as any;
+    assert.match(put.claimText, /сообщение зарегистрировано под № Б-55 \(п\. 105–106 Правил\)/);
+    assert.doesNotMatch(put.claimText, /С этого времени исчисляется период нарушения/);
+
+    // Короткое отключение: статус объясняет, почему денег нет.
+    const short = await report({ service: 'cold_water_off', evidence: 'ads', number: '1', startedAt: new Date(Date.now() - 3_600_000).toISOString() });
+    const ended = (await (await fetch(`${base}/api/cases/${short.caseId}/end`, { method: 'POST', headers, body: JSON.stringify({}) })).json()) as any;
+    assert.equal(ended.case.status, 'closed');
+    assert.equal(ended.case.statusTitle, 'Денег не положено — отключение было коротким');
+  });
+});
+
 test('кто принял заявку — в заявлении; после подачи статус «ждём квитанцию»; подать завтрашним днём нельзя', async () => {
   await withServer(async (base, h) => {
     const headers = { 'X-Max-Init-Data': initFor(51), 'Content-Type': 'application/json' };
@@ -513,7 +543,7 @@ test('health и статика мини-приложения', async () => {
   await withServer(async (base) => {
     const health = (await (await fetch(`${base}/health`)).json()) as any;
     assert.equal(health.ok, true);
-    assert.equal(health.version, '1.0.5');
+    assert.equal(health.version, '1.0.6');
     const page = await fetch(`${base}/app/`);
     assert.equal(page.status, 200);
     const html = await page.text();

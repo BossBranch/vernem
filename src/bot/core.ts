@@ -213,7 +213,7 @@ export class Vernem {
   async reportFromApp(
     userId: number,
     r: { houseId: number; service: ServiceKey; evidence: Evidence; number: string | null; startedAt: Date; temp?: number; corner?: boolean; variant?: string; planned?: boolean },
-  ): Promise<{ pid: number; outcome: 'new' | 'existing' | 'joined'; numberSaved?: boolean; neighbours?: number } | { error: string }> {
+  ): Promise<{ pid: number; outcome: 'new' | 'existing' | 'joined'; numberSaved?: boolean; neighbours?: number; readingSaved?: boolean; since?: string } | { error: string }> {
     const norm = this.norms.services[r.service];
     if (!this.db.getUserHouse(userId, r.houseId)) return { error: 'Этого адреса нет в вашем списке' };
     if (r.service === 'hot_water_off' && r.planned) return { error: 'За плановое летнее отключение снижения платы не положено: со счётчиком вы и так не платите за неизрасходованную воду.' };
@@ -248,17 +248,22 @@ export class Vernem {
     this.db.addUserHouse(userId, r.houseId);
     this.db.track(userId, 'report_started', { service: r.service, via: 'app' });
     const open = this.db.findOpenIncident(r.houseId, r.service);
-    // Повторное сообщение не должно молча терять новый номер заявки.
+    // Повторное сообщение не должно молча терять новый номер заявки. Номер — собственный номер жителя:
+    // время начала дела он не меняет (звонок мог быть позже начала), поэтому время регистрации не выдумываем.
     const keepNumber = (p: Participant, inc: Incident): boolean => {
       const number = r.number?.trim();
       if (!number || r.evidence === 'self' || number === inc.ads_number || p.own_ads_number) return false;
-      if (p.role === 'reporter' && inc.evidence === 'self') this.db.setIncidentEvidence(inc.id, r.evidence, number);
-      else this.db.updateParticipant(p.id, { own_ads_number: number });
+      this.db.updateParticipant(p.id, { own_ads_number: number, own_evidence: r.evidence === 'written' ? 'written' : 'ads' });
       return true;
     };
     if (open) {
       const mine = this.db.getParticipantFor(open.id, userId);
-      if (mine) return { pid: mine.id, outcome: 'existing', numberSaved: keepNumber(mine, open) };
+      if (mine) {
+        // Новый замер — в то же дело, временем «сейчас»: мерили только что.
+        const readingSaved = norm.kind !== 'interruption' && r.temp !== undefined && mine.status === 'tracking';
+        if (readingSaved) this.db.addReading(mine.id, this.now().toISOString(), r.temp!);
+        return { pid: mine.id, outcome: 'existing', numberSaved: keepNumber(mine, open), readingSaved, since: mine.started_at };
+      }
       await this.completeJoin(userId, open, norm.kind === 'interruption' ? null : r.temp!, !!r.corner);
       const joined = this.db.getParticipantFor(open.id, userId)!;
       return { pid: joined.id, outcome: 'joined', numberSaved: keepNumber(joined, open) };
@@ -934,7 +939,7 @@ export class Vernem {
     const rows: Btn[][] = [];
     const done = cb(norm.kind === 'interruption' ? `✅ ${this.restoredWord(c.incident.service_key)}` : '✅ Стало тепло', `rest:${c.p.id}:y`);
     rows.push(norm.kind !== 'interruption' ? [done, cb('🌡 Новый замер', `tmp:${c.p.id}`)] : [done]);
-    if (c.p.role === 'neighbour' && !c.p.own_ads_number) rows.push([cb('✏️ Ввести свой номер заявки', `own:${c.p.id}`)]);
+    if ((c.p.role === 'neighbour' || c.incident.evidence === 'self') && !c.p.own_ads_number) rows.push([cb('✏️ Ввести свой номер заявки', `own:${c.p.id}`)]);
     rows.push([cb('👥 Позвать соседей', `nb:${c.p.id}`), cb('📷 Фото', `phadd:${c.p.id}:evidence`)]);
     rows.push(...actButtons(this, c));
     rows.push([cb('⬅️ Меню', 'menu')]);
@@ -967,7 +972,7 @@ export class Vernem {
       `${fresh ? '✅ **Записал.**' : '👀 **Слежу.**'} ${ICON[c.incident.service_key]} ${norm.title} · ${c.house.address} · с ${formatShort(new Date(c.p.started_at), tz)} · ${evidenceLine}`,
     ];
     if (readings.length) lines.push(`Последний замер: +${fmtNum(readings[readings.length - 1].temp_c, 1)} °C.`);
-    if (c.incident.evidence === 'self' && !this.db.getActByIncident(c.incident.id)) lines.push('Без номера заявки нужен акт с соседями — доказательство, что услуги не было.');
+    if (c.incident.evidence === 'self' && !c.p.own_ads_number && !this.db.getActByIncident(c.incident.id)) lines.push('Без номера заявки нужен акт с соседями — доказательство, что услуги не было.');
     if (extra) lines.push(extra);
     lines.push(`Каждые ${this.cfg.restoreCheckHours} ч спрошу, починили ли. Починят раньше — нажмите ✅.`);
     return this.send(userId, { text: lines.join('\n'), buttons: this.trackingButtons(c) });
@@ -1211,7 +1216,7 @@ export class Vernem {
     if (!c) return this.stale(userId);
     const number = clean(text).slice(0, 40);
     if (!number) return this.send(userId, { text: 'Напишите номер цифрами или буквами.' });
-    this.db.updateParticipant(pid, { own_ads_number: number });
+    this.db.updateParticipant(pid, { own_ads_number: number, own_evidence: 'ads' });
     this.db.setState(userId, 'idle');
     await this.send(userId, { text: `Записал ваш номер заявки: ${number}.` });
     return c.p.status === 'tracking' ? this.sendTracking(userId, pid, false) : this.showCase(userId, pid);
@@ -1501,7 +1506,7 @@ export class Vernem {
     this.db.schedule('ask_receipt', pid, userId, due);
     // Без номера заявки и без подписанного акта заявление слабое — говорим прямо и даём кнопку акта.
     const act = this.db.getActByIncident(c.incident.id);
-    const weak = c.incident.evidence === 'self' && act?.status !== 'signed';
+    const weak = c.incident.evidence === 'self' && !c.p.own_ads_number && act?.status !== 'signed';
     const rows: Btn[][] = weak ? actButtons(this, fresh) : [];
     rows.push([cb('👥 Позвать соседей', `nb:${pid}`), cb('⬅️ Меню', 'menu')]);
     return this.send(userId, {

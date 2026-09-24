@@ -354,7 +354,7 @@ export function createApp(deps: WebDeps) {
         planned: !!b.planned,
       });
       if ('error' in r) throw new HttpError(422, r.error, /°C/.test(r.error) ? { temp: r.error } : undefined);
-      res.json({ caseId: r.pid, outcome: r.outcome, numberSaved: !!r.numberSaved, neighbours: r.neighbours ?? 0, botConnected: !!cfg.token });
+      res.json({ caseId: r.pid, outcome: r.outcome, numberSaved: !!r.numberSaved, readingSaved: !!r.readingSaved, since: r.since ?? null, neighbours: r.neighbours ?? 0, botConnected: !!cfg.token });
     } catch (e) {
       next(e);
     }
