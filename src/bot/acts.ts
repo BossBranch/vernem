@@ -230,6 +230,16 @@ export async function actFromApp(bot: Vernem, userId: number, pid: number, fio: 
   return act.id;
 }
 
+/** Отменить отметку «подписан» — нажали по ошибке. */
+export function unmarkActSigned(bot: Vernem, userId: number, actId: number): boolean {
+  const ctx = load(bot, actId);
+  if (!ctx || ctx.act.initiator_user_id !== userId || ctx.act.status !== 'signed') return false;
+  bot.db.setActChairSigned(actId, 0);
+  bot.db.setActStatus(actId, ctx.signers.filter((s) => s.role === 'resident').length >= MIN_RESIDENTS ? 'ready' : 'collecting', bot.now());
+  bot.db.track(userId, 'act_unsigned', {});
+  return true;
+}
+
 /** «Акт подписан на бумаге» — отмечает только тот, кто начал акт. */
 export async function markActSigned(bot: Vernem, userId: number, actId: number, chair: boolean): Promise<boolean> {
   const ctx = load(bot, actId);

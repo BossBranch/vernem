@@ -456,6 +456,12 @@ export class Db {
    * Дом по адресу. С городом: адрес хранится как «Город, улица дом», а ключ дома включает город,
    * поэтому «Садовая 10» в Москве и в Казани — разные дома.
    */
+  /** Дом, который уже есть в реестре под этим городом и адресом (без создания нового). */
+  findHouse(address: string, city: string): House | undefined {
+    const norm = `${normalizeCity(city)}|${normalizeAddress(address.trim())}`;
+    return this.db.prepare('SELECT * FROM houses WHERE address_norm = ?').get(norm) as House | undefined;
+  }
+
   upsertHouse(address: string, tz: string, demo = 0, city: string | null = null): House {
     const street = address.trim();
     const cityNorm = city ? normalizeCity(city) : null;
@@ -599,6 +605,16 @@ export class Db {
 
   closeIncident(id: number, endedAt: string) {
     this.db.prepare('UPDATE incidents SET ended_at = ? WHERE id = ? AND ended_at IS NULL').run(endedAt, id);
+  }
+
+  /** «Ещё не починили»: снова открыть отключение, если его закрыли по ошибке. */
+  reopenIncident(id: number) {
+    this.db.prepare('UPDATE incidents SET ended_at = NULL WHERE id = ?').run(id);
+  }
+
+  /** Житель сообщил без номера, а потом дозвонился — номер заявки становится доказательством. */
+  setIncidentEvidence(id: number, evidence: Incident['evidence'], adsNumber: string) {
+    this.db.prepare('UPDATE incidents SET evidence = ?, ads_number = ? WHERE id = ?').run(evidence, adsNumber, id);
   }
 
   // ---------- участники ----------

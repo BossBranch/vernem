@@ -186,7 +186,7 @@ export function calcHeatingTemperature(
     if (degreeHours <= 0) {
       lines.push('Температура не опускалась ниже нормы — снижение платы не положено.');
     } else {
-      lines.push(`Часов ниже нормы: ${fmtNum(m.hoursBelow, 1)}. Сумма «градусо-часов» отклонения: ${fmtNum(degreeHours)}.`);
+      lines.push(`Часов ниже нормы: ${fmtNum(m.hoursBelow, 1)}. Недобор тепла: ${fmtNum(degreeHours)} (градусы ниже нормы × часы).`);
       lines.push(`${fmtNum(degreeHours)} × ${fmtPercent(t.rate_percent_per_degree_hour)} = ${fmtPercent(percent)} от платы за отопление.`);
     }
     months.push({ month, percent, lines, totalHours: round2(m.hoursBelow) });

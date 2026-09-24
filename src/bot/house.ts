@@ -83,9 +83,12 @@ export async function onAddressText(bot: Vernem, userId: number, text: string, b
     return bot.send(userId, { text: 'Нужны улица и номер дома, например «Садовая 10».', buttons: [backRow()] });
   }
   const found = bot.db.searchHouses(typed, 6, back.city).filter((h) => !h.demo).slice(0, 5);
+  // Дом уже в списке ровно с таким адресом — «добавить новый» не предлагаем, чтобы не путать.
+  const exact = bot.db.findHouse(typed, back.city);
+  if (exact && !exact.demo && !found.some((h) => h.id === exact.id)) found.unshift(exact);
   bot.db.setState(userId, 'await_address', { ...back, typed });
   const rows: Btn[][] = found.map((h) => [cb(`🏠 ${h.address}`.slice(0, 64), `adrpick:${h.id}`)]);
-  rows.push([cb(`➕ Моего дома нет — добавить «${typed}»`.slice(0, 64), 'adrnew')]);
+  if (!exact || exact.demo) rows.push([cb(`➕ Моего дома нет — добавить «${typed}»`.slice(0, 64), 'adrnew')]);
   rows.push(backRow());
   return bot.send(userId, {
     text: found.length ? 'Выберите свой дом:' : 'Такого дома в списке пока нет — вы первый из этого дома. Добавить его?',
@@ -293,7 +296,10 @@ export async function onHouseInfoText(bot: Vernem, userId: number, text: string,
   const field = INFO_FIELDS[data.idx];
   const value = clean(text).replace(/\s+/g, ' ').slice(0, 150);
   if (field.key === 'ukInn' && !/^\d{10}(\d{2})?$/.test(value)) return bot.send(userId, { text: 'ИНН — 10 цифр (у ИП — 12).', buttons: [[cb('Пропустить', `hsi:${h.id}:${data.idx}`)]] });
-  if (field.key === 'adsPhone' && value.replace(/\D/g, '').length < 5) return bot.send(userId, { text: 'Напишите номер телефона цифрами.', buttons: [[cb('Пропустить', `hsi:${h.id}:${data.idx}`)]] });
+  // Телефон видят все соседи и нажимают «позвонить» — только цифры, иначе ссылка не сработает.
+  if (field.key === 'adsPhone' && (value.replace(/\D/g, '').length < 3 || /[^\d\s+()\-.]/.test(value))) {
+    return bot.send(userId, { text: 'Телефон — цифрами, например +7 495 123-45-67 или 112.', buttons: [[cb('Пропустить', `hsi:${h.id}:${data.idx}`)]] });
+  }
   bot.db.setHouseInfo(h.id, { ...bot.db.houseInfo(h), [field.key]: value, updatedAt: bot.now().toISOString(), updatedBy: userId });
   bot.db.track(userId, 'house_info', { house: h.id, field: field.key });
   return askInfo(bot, userId, h.id, data.idx + 1);

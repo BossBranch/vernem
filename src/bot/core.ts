@@ -43,6 +43,7 @@ import { askPhoto, onPhoto, onPhotoPick } from './photos.ts';
 import { onEscalate, showEscalation } from './escalate.ts';
 import {
   STATUS_TITLE,
+  statusTitle,
   billsOf,
   calcFor,
   claimDocFor,
@@ -209,10 +210,10 @@ export class Vernem {
   async reportFromApp(
     userId: number,
     r: { houseId: number; service: ServiceKey; evidence: Evidence; number: string | null; startedAt: Date; temp?: number; corner?: boolean; variant?: string; planned?: boolean },
-  ): Promise<{ pid: number } | { error: string }> {
+  ): Promise<{ pid: number; outcome: 'new' | 'existing' | 'joined'; numberSaved?: boolean; neighbours?: number } | { error: string }> {
     const norm = this.norms.services[r.service];
     if (!this.db.getUserHouse(userId, r.houseId)) return { error: 'Этого адреса нет в вашем списке' };
-    if (r.service === 'hot_water_off' && r.planned) return { error: 'За плановое летнее отключение доплаты не положено: со счётчиком вы и так не платите за неизрасходованную воду.' };
+    if (r.service === 'hot_water_off' && r.planned) return { error: 'За плановое летнее отключение снижения платы не положено: со счётчиком вы и так не платите за неизрасходованную воду.' };
     if (norm.kind !== 'interruption') {
       if (r.temp === undefined) return { error: 'Укажите температуру' };
       const threshold =
@@ -221,23 +222,104 @@ export class Vernem {
             ? (norm.temperature as HeatingTempNorm).corner_norm_c
             : (norm.temperature as HeatingTempNorm).norm_c
           : (norm.temperature as HotWaterTempNorm).norm_c - (norm.temperature as HotWaterTempNorm).day_tolerance_c;
-      if (r.temp >= threshold) return { error: `+${fmtNum(r.temp, 1)} °C — это норма (не ниже +${threshold} °C), доплаты не положено.` };
+      if (r.temp >= threshold) return { error: `+${fmtNum(r.temp, 1)} °C — это норма (не ниже +${threshold} °C), снижения платы не положено.` };
     }
     this.db.addUserHouse(userId, r.houseId);
     this.db.track(userId, 'report_started', { service: r.service, via: 'app' });
     const open = this.db.findOpenIncident(r.houseId, r.service);
+    // Повторное сообщение не должно молча терять новый номер заявки.
+    const keepNumber = (p: Participant, inc: Incident): boolean => {
+      const number = r.number?.trim();
+      if (!number || r.evidence === 'self' || number === inc.ads_number || p.own_ads_number) return false;
+      if (p.role === 'reporter' && inc.evidence === 'self') this.db.setIncidentEvidence(inc.id, r.evidence, number);
+      else this.db.updateParticipant(p.id, { own_ads_number: number });
+      return true;
+    };
     if (open) {
       const mine = this.db.getParticipantFor(open.id, userId);
-      if (mine) return { pid: mine.id };
+      if (mine) return { pid: mine.id, outcome: 'existing', numberSaved: keepNumber(mine, open) };
       await this.completeJoin(userId, open, norm.kind === 'interruption' ? null : r.temp!, !!r.corner);
-      return { pid: this.db.getParticipantFor(open.id, userId)!.id };
+      const joined = this.db.getParticipantFor(open.id, userId)!;
+      return { pid: joined.id, outcome: 'joined', numberSaved: keepNumber(joined, open) };
     }
     await this.createIncident(
       userId,
       { service: r.service, houseId: r.houseId, evidence: r.evidence, number: r.number, variant: r.variant, corner: r.corner, temp: r.temp, hwChecked: true },
       r.startedAt,
     );
-    return { pid: this.db.listUserParticipants(userId)[0].id };
+    return { pid: this.db.listUserParticipants(userId)[0].id, outcome: 'new', neighbours: Math.max(0, this.db.countHouseMembers(r.houseId) - 1) };
+  }
+
+  /** Исправить время начала или окончания своего дела. Время у соседей не меняется. */
+  editTimesFromApp(userId: number, pid: number, startedAt: Date | null, endedAt: Date | null): string | null {
+    const c = this.ownCase(userId, pid);
+    if (!c) return 'Дело не найдено';
+    if (c.p.status === 'refunded') return 'Перерасчёт уже получен — время не меняем';
+    const start = startedAt ?? new Date(c.p.started_at);
+    const end = endedAt ?? (c.p.ended_at ? new Date(c.p.ended_at) : null);
+    const now = this.now().getTime();
+    if (start.getTime() > now + 5 * 60_000) return 'Время начала ещё не наступило';
+    if (now - start.getTime() > 92 * 24 * MS_HOUR) return 'Это было больше трёх месяцев назад';
+    if (end && end.getTime() <= start.getTime()) return 'Окончание должно быть позже начала';
+    if (end && end.getTime() > now + 5 * 60_000) return 'Время окончания ещё не наступило';
+    this.db.updateParticipant(pid, { started_at: start.toISOString(), ...(end && c.p.ended_at ? { ended_at: end.toISOString() } : {}) });
+    if (c.p.ended_at && (c.p.status === 'ended' || c.p.status === 'closed')) {
+      const calc = calcFor(this.db, this.norms, loadCase(this.db, pid)!, this.now());
+      this.db.setCalc(pid, calc);
+      this.db.updateParticipant(pid, { status: hasMoney(calc) ? 'ended' : 'closed' });
+    }
+    this.db.track(userId, 'times_edited', { via: 'app' });
+    return null;
+  }
+
+  /** «Ещё не починили» — нажали «Починили» по ошибке. */
+  reopenFromApp(userId: number, pid: number): string | null {
+    const c = this.ownCase(userId, pid);
+    if (!c) return 'Дело не найдено';
+    if (c.p.status !== 'ended' && c.p.status !== 'closed') return 'Заявление уже готово — вернуть дело нельзя, но время окончания можно исправить';
+    this.db.updateParticipant(pid, { ended_at: null, status: 'tracking', calc: null });
+    // Отключение закрыл этот житель — открываем снова, чтобы соседи могли присоединиться.
+    if (c.incident.ended_at && c.incident.ended_at === c.p.ended_at) this.db.reopenIncident(c.incident.id);
+    this.scheduleRestoredCheck(loadCase(this.db, pid)!.p, c.house.tz);
+    this.db.track(userId, 'reopened', { via: 'app' });
+    return null;
+  }
+
+  /** Удалить дело, созданное по ошибке. */
+  deleteFromApp(userId: number, pid: number): string | null {
+    const c = this.ownCase(userId, pid);
+    if (!c) return 'Дело не найдено';
+    if (c.p.status === 'refunded') return 'Дело с полученным перерасчётом не удаляем — это ваша история';
+    this.db.deleteParticipant(pid);
+    return null;
+  }
+
+  /** Новый замер температуры из приложения. */
+  addReadingFromApp(userId: number, pid: number, temp: number, at: Date): string | null {
+    const c = this.ownCase(userId, pid);
+    if (!c) return 'Дело не найдено';
+    if (this.norms.services[c.incident.service_key].kind === 'interruption') return 'Замер нужен только для температуры';
+    if (c.p.status !== 'tracking') return 'Дело уже закрыто для замеров';
+    if (at.getTime() < new Date(c.p.started_at).getTime()) return 'Замер раньше начала — проверьте время';
+    if (at.getTime() > this.now().getTime() + 5 * 60_000) return 'Это время ещё не наступило';
+    this.db.addReading(pid, at.toISOString(), temp);
+    this.db.track(userId, 'reading', { via: 'app' });
+    return null;
+  }
+
+  /** Перерасчёт пришёл (сумма) или его не сделали — ответ из приложения. */
+  async receiptFromApp(userId: number, pid: number, refunded: boolean, amount: number | null): Promise<string | null> {
+    const c = this.ownCase(userId, pid);
+    if (!c) return 'Дело не найдено';
+    if (c.p.status !== 'claim_ready' && c.p.status !== 'refused' && c.p.status !== 'refunded') return 'Сначала скачайте и подайте заявление';
+    if (refunded) {
+      await this.finishRefund(userId, pid, amount);
+      return null;
+    }
+    this.db.updateParticipant(pid, { status: 'refused', refund_amount: null });
+    this.db.cancelReminders(pid, 'ask_receipt');
+    this.db.track(userId, 'refund_no', { service: c.incident.service_key, via: 'app' });
+    return null;
   }
 
   /** «Починили» из мини-приложения. */
@@ -614,7 +696,7 @@ export class Vernem {
       if (value === 'planned') {
         this.db.setState(userId, 'idle');
         return this.send(userId, {
-          text: 'За плановое летнее отключение доплаты не положено: со счётчиком вы и так не платите за неизрасходованную воду (п. 98–99 ПП № 354). Если отключили дольше объявленного или без предупреждения — выберите «Внезапно». Денег за плановое я не обещаю.',
+          text: 'За плановое летнее отключение снижения платы не положено: со счётчиком вы и так не платите за неизрасходованную воду (п. 98–99 ПП № 354). Если отключили дольше объявленного или без предупреждения — выберите «Внезапно». Денег за плановое я не обещаю.',
           buttons: [[cb('Выбрать «Внезапно»', 'svc:hot_water_off')], backRow()],
         });
       }
@@ -877,7 +959,7 @@ export class Vernem {
     }
 
     await this.send(userId, {
-      text: `✅ Записал: починили в ${formatShort(endedAt, c.house.tz)}. Скажите об этом аварийной службе — так фиксируется конец (п. 112 ПП № 354).`,
+      text: `✅ Записал: починили в ${formatShort(endedAt, c.house.tz)}.${c.incident.evidence === 'self' ? '' : ' Скажите об этом аварийной службе — так фиксируется конец (п. 112 ПП № 354).'}`,
     });
     return this.resumeCalculation(userId, c.p.id);
   }
@@ -954,7 +1036,7 @@ export class Vernem {
     if (t >= threshold) {
       // Состояние не сбрасываем: житель может перемерить в другой комнате и ввести новое число.
       return this.send(userId, {
-        text: `+${fmtNum(t, 1)} °C — это норма (${normText}), доплаты не положено. Если в другой комнате холоднее или стало хуже — напишите новый замер.`,
+        text: `+${fmtNum(t, 1)} °C — это норма (${normText}), снижения платы не положено. Если в другой комнате холоднее или стало хуже — напишите новый замер.`,
         buttons: [[cb('⬅️ Меню', 'menu')]],
       });
     }
@@ -1110,7 +1192,7 @@ export class Vernem {
     if (!hasMoney(calc)) {
       this.db.updateParticipant(pid, { status: 'closed' });
       return this.send(userId, {
-        text: ['**Доплаты не положено:** перерыв в пределах нормы.', ...calc.months.flatMap((m) => m.lines), 'Повторится в этом месяце — сообщите снова: перерывы за месяц суммируются.'].join('\n'),
+        text: ['**Снижения платы не положено:** перерыв в пределах нормы.', ...calc.months.flatMap((m) => m.lines), 'Лимит — на весь месяц. Отключат ещё раз — сообщите снова и допишите в заявлении прошлый перерыв.'].join('\n'),
         buttons: this.menu(),
       });
     }
@@ -1399,7 +1481,7 @@ export class Vernem {
     return this.finishRefund(userId, pid, amount);
   }
 
-  private async finishRefund(userId: number, pid: number, amount: number | null) {
+  async finishRefund(userId: number, pid: number, amount: number | null) {
     const c = this.ownCase(userId, pid);
     if (!c) return this.stale(userId);
     this.db.updateParticipant(pid, { status: 'refunded', refund_amount: amount });
@@ -1434,7 +1516,7 @@ export class Vernem {
     const rows: Btn[][] = list.map((p) => {
       const c = loadCase(this.db, p.id)!;
       const norm = this.norms.services[c.incident.service_key];
-      return [cb(`${ICON[c.incident.service_key]} ${norm.button} · ${formatShort(new Date(p.started_at), c.house.tz).split(' ')[0]} · ${STATUS_TITLE[p.status]}`.slice(0, 64), `cs:${p.id}`)];
+      return [cb(`${ICON[c.incident.service_key]} ${norm.button} · ${formatShort(new Date(p.started_at), c.house.tz).split(' ')[0]} · ${statusTitle(p.status, norm.kind)}`.slice(0, 64), `cs:${p.id}`)];
     });
     if (this.cfg.miniAppEnabled) rows.push([app('📱 Открыть в приложении')]);
     rows.push(backRow());
@@ -1457,7 +1539,7 @@ export class Vernem {
       `${ICON[c.incident.service_key]} **${norm.title}**`,
       c.house.address,
       `с ${formatShort(new Date(c.p.started_at), tz)}${c.p.ended_at ? ` по ${formatShort(new Date(c.p.ended_at), tz)}` : ''}`,
-      `Статус: ${STATUS_TITLE[c.p.status]}`,
+      `Статус: ${statusTitle(c.p.status, norm.kind)}`,
     ];
     if (est.sum > 0) lines.push(`Расчёт: ≈ ${fmtRub(est.sum)}`);
     if (c.p.refund_amount) lines.push(`Вернули: ${fmtRub(c.p.refund_amount)}`);

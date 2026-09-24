@@ -345,7 +345,7 @@ test('плановое отключение горячей воды — дене
   h.close();
 });
 
-test('короткое отключение света — доплаты не положено', async () => {
+test('короткое отключение света — снижения платы не положено', async () => {
   const h = new Harness({ start: START });
   await h.start(1);
   await h.press(1, 'Что-то сломалось');
@@ -359,7 +359,8 @@ test('короткое отключение света — доплаты не �
   assert.match(textOf(h, 1), /без номера заявки/);
   await h.press(1, 'Свет дали');
   await h.press(1, 'Только что');
-  assert.match(textOf(h, 1), /Доплаты не положено/);
+  assert.match(textOf(h, 1), /Снижения платы не положено/);
+  assert.doesNotMatch(textOf(h, 1), /Скажите об этом аварийной службе/, 'не дозвонился — в аварийку не отправляем');
   assert.equal(h.db.listUserParticipants(1)[0].status, 'closed');
   h.close();
 });

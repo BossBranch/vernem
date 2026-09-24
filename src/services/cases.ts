@@ -92,11 +92,23 @@ export function claimInputFor(db: Db, norms: Norms, c: CaseBundle, now: Date): C
 export function claimDocFor(db: Db, norms: Norms, c: CaseBundle, now: Date): ClaimDoc {
   const doc = buildClaim(claimInputFor(db, norms, c, now));
   if (c.incident.demo) doc.note = `ДЕМОНСТРАЦИОННЫЕ ДАННЫЕ: не является реальным заявлением. ${doc.note}`;
+  // Адрес УК из карточки дома — если заявление адресовано именно ей.
+  const info = db.houseInfo(c.house);
+  const executor = claimOf(c.p).executor?.trim();
+  if (info.ukAddress && executor && executor === info.ukName?.trim()) {
+    doc.to = doc.to.map((l) => (/^адрес: _+$/.test(l) ? `адрес: ${info.ukAddress}` : l));
+  }
   return doc;
 }
 
 export function claimTextFor(db: Db, norms: Norms, c: CaseBundle, now: Date): string {
   return claimToText(claimDocFor(db, norms, c, now));
+}
+
+/** Статус по-человечески: для холода и еле тёплой воды «отключения» нет — следим за температурой. */
+export function statusTitle(status: ParticipantStatus, kind: string): string {
+  if (status === 'tracking' && kind !== 'interruption') return 'Слежу за температурой';
+  return STATUS_TITLE[status];
 }
 
 export const STATUS_TITLE: Record<ParticipantStatus, string> = {
@@ -111,6 +123,7 @@ export const STATUS_TITLE: Record<ParticipantStatus, string> = {
 export type CaseSummary = {
   id: number;
   service: string;
+  kind: string;
   serviceTitle: string;
   address: string;
   tz: string;
@@ -152,7 +165,8 @@ export function summarize(db: Db, norms: Norms, c: CaseBundle, now: Date): CaseS
     startedAt: c.p.started_at,
     endedAt: c.p.ended_at,
     status: c.p.status,
-    statusTitle: STATUS_TITLE[c.p.status],
+    statusTitle: statusTitle(c.p.status, norm.kind),
+    kind: norm.kind,
     evidence: c.incident.evidence,
     adsNumber: c.p.own_ads_number || c.incident.ads_number,
     role: c.p.role,

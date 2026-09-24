@@ -175,7 +175,7 @@ test('мини-приложение: акт с соседями, подсказ�
     let data = (await (await fetch(`${base}/api/cases/${caseId}`, { headers })).json()) as any;
     assert.deepEqual(data.case.act, { status: 'collecting', residents: 1, chair: false, mine: true, initiator: true });
     assert.deepEqual(data.executorHint, { name: 'ООО «УК Садовая»', type: 'uk', inn: '7700000001' });
-    assert.deepEqual(data.personHint, { fio: 'Сидорова Мария Ивановна', flat: '14' });
+    assert.deepEqual(data.personHint, { fio: 'Сидорова Мария Ивановна', flat: '14', account: null });
 
     // Отметить «подписан» может только тот, кто начал акт.
     assert.equal((await fetch(`${base}/api/cases/${caseId}/act/signed`, { method: 'POST', headers: { ...headers, 'X-Max-Init-Data': initFor(12) }, body: '{}' })).status, 404);
@@ -193,11 +193,98 @@ test('мини-приложение: акт с соседями, подсказ�
   });
 });
 
+test('проверка ввода: все ошибки формы сразу и с привязкой к полям', async () => {
+  await withServer(async (base, h) => {
+    const headers = { 'X-Max-Init-Data': initFor(21), 'Content-Type': 'application/json' };
+    await h.start(21);
+    // Мусор в подъезде не попадёт в акт.
+    const badEntrance = await fetch(`${base}/api/me/houses`, { method: 'POST', headers, body: JSON.stringify({ address: 'Ленина 1', city: 'Москва', entrance: 'абв' }) });
+    assert.equal(badEntrance.status, 400);
+    assert.ok(((await badEntrance.json()) as any).fields.entrance);
+    const { house, already } = (await (await fetch(`${base}/api/me/houses`, { method: 'POST', headers, body: JSON.stringify({ address: 'Ленина 1', city: 'Москва', entrance: '2а' }) })).json()) as any;
+    assert.equal(house.entrance, '2А');
+    assert.equal(already, false);
+    const again = (await (await fetch(`${base}/api/me/houses`, { method: 'POST', headers, body: JSON.stringify({ houseId: house.id }) })).json()) as any;
+    assert.equal(again.already, true);
+    const search = (await (await fetch(`${base}/api/houses/search?q=${encodeURIComponent('ленина 1')}&city=Москва`, { headers })).json()) as any;
+    assert.equal(search.exactId, house.id, 'точное совпадение — «добавить новый» не предлагаем');
+
+    // Телефон со словами ломает «позвонить» у всех соседей — не сохраняем. Ошибки — все сразу.
+    const info = await fetch(`${base}/api/houses/${house.id}/info`, { method: 'PUT', headers, body: JSON.stringify({ adsPhone: 'звоните', ukInn: 'абв123', ukEmail: 'почта' }) });
+    assert.equal(info.status, 400);
+    assert.deepEqual(Object.keys(((await info.json()) as any).fields).sort(), ['adsPhone', 'ukEmail', 'ukInn']);
+    assert.equal((await fetch(`${base}/api/houses/${house.id}/info`, { method: 'PUT', headers, body: JSON.stringify({ adsPhone: '+7 (495) 123-45-67' }) })).status, 200);
+  });
+});
+
+test('дело в мини-приложении: повтор, правка времени, «ещё не починили», квитанция, эскалация, удаление', async () => {
+  await withServer(async (base, h) => {
+    const headers = { 'X-Max-Init-Data': initFor(22), 'Content-Type': 'application/json' };
+    await h.start(22);
+    const { house } = (await (await fetch(`${base}/api/me/houses`, { method: 'POST', headers, body: JSON.stringify({ address: 'Мира 3', city: 'Москва' }) })).json()) as any;
+    const report = (body: object) => fetch(`${base}/api/report`, { method: 'POST', headers, body: JSON.stringify({ service: 'hot_water_off', houseId: house.id, ...body }) }).then((r) => r.json() as any);
+    const startedAt = new Date(Date.now() - 50 * 3_600_000).toISOString();
+    const first = await report({ evidence: 'self', startedAt });
+    assert.equal(first.outcome, 'new');
+
+    // Повторное сообщение с номером: не теряется, а становится доказательством.
+    const second = await report({ evidence: 'ads', number: '777', startedAt });
+    assert.equal(second.outcome, 'existing');
+    assert.equal(second.caseId, first.caseId);
+    assert.equal(second.numberSaved, true);
+    let data = (await (await fetch(`${base}/api/cases/${first.caseId}`, { headers })).json()) as any;
+    assert.equal(data.case.adsNumber, '777');
+    assert.equal(data.case.evidence, 'ads');
+
+    const end = () => fetch(`${base}/api/cases/${first.caseId}/end`, { method: 'POST', headers, body: JSON.stringify({ endedAt: new Date().toISOString() }) });
+    assert.equal((await end()).status, 200);
+    // «Ещё не починили» — вернуть в отслеживание, затем снова «починили».
+    assert.equal((await fetch(`${base}/api/cases/${first.caseId}/reopen`, { method: 'POST', headers })).status, 200);
+    data = (await (await fetch(`${base}/api/cases/${first.caseId}`, { headers })).json()) as any;
+    assert.equal(data.case.status, 'tracking');
+    assert.equal((await end()).status, 200);
+
+    // Исправить время: окончание раньше начала — ошибка у поля, короткий перерыв — дело закрывается.
+    const bad = await fetch(`${base}/api/cases/${first.caseId}/times`, { method: 'PATCH', headers, body: JSON.stringify({ endedAt: new Date(Date.now() - 60 * 3_600_000).toISOString() }) });
+    assert.equal(bad.status, 422);
+    assert.ok(((await bad.json()) as any).fields.editEnd);
+    const short = (await (await fetch(`${base}/api/cases/${first.caseId}/times`, { method: 'PATCH', headers, body: JSON.stringify({ startedAt: new Date(Date.now() - 2 * 3_600_000).toISOString() }) })).json()) as any;
+    assert.equal(short.case.status, 'closed');
+    const long = (await (await fetch(`${base}/api/cases/${first.caseId}/times`, { method: 'PATCH', headers, body: JSON.stringify({ startedAt }) })).json()) as any;
+    assert.equal(long.case.status, 'ended');
+
+    // Заявление → «не сделали» → документы эскалации → «всё-таки вернули».
+    await fetch(`${base}/api/cases/${first.caseId}/claim`, { method: 'PUT', headers, body: JSON.stringify({ fio: 'Петров Пётр', remember: true, bills: { [data.case.months[0].month]: '1000' } }) });
+    assert.equal(h.db.getUser(22)!.fio, 'Петров Пётр', '«запомнить мои данные»');
+    await fetch(`${base}/api/cases/${first.caseId}/pdf-link`, { method: 'POST', headers });
+    assert.equal((await fetch(`${base}/api/cases/${first.caseId}/receipt`, { method: 'POST', headers, body: JSON.stringify({ refunded: false }) })).status, 200);
+    const esc = (await (await fetch(`${base}/api/cases/${first.caseId}/escalation-link`, { method: 'POST', headers, body: JSON.stringify({ kind: 'fine' }) })).json()) as any;
+    const pdf = await fetch(esc.url.replace('https://example.test', base));
+    assert.equal(pdf.status, 200);
+    assert.equal(Buffer.from(await pdf.arrayBuffer()).subarray(0, 4).toString(), '%PDF');
+    const bad2 = await fetch(`${base}/api/cases/${first.caseId}/receipt`, { method: 'POST', headers, body: JSON.stringify({ refunded: true, amount: 'много' }) });
+    assert.ok(((await bad2.json()) as any).fields.refundAmount);
+    const refunded = (await (await fetch(`${base}/api/cases/${first.caseId}/receipt`, { method: 'POST', headers, body: JSON.stringify({ refunded: true, amount: '50,5' }) })).json()) as any;
+    assert.equal(refunded.case.status, 'refunded');
+    assert.equal(refunded.case.refundAmount, 50.5);
+    assert.equal((await fetch(`${base}/api/cases/${first.caseId}`, { method: 'DELETE', headers })).status, 422, 'полученный перерасчёт не удаляем');
+
+    // Дело по ошибке — удаляется. Замер температуры — отдельным запросом.
+    const cold = (await (await fetch(`${base}/api/report`, { method: 'POST', headers, body: JSON.stringify({ service: 'heating_temp', houseId: house.id, evidence: 'self', temp: '15' }) })).json()) as any;
+    assert.equal((await fetch(`${base}/api/cases/${cold.caseId}/readings`, { method: 'POST', headers, body: JSON.stringify({ temp: 'холодно' }) })).status, 400);
+    const withReading = (await (await fetch(`${base}/api/cases/${cold.caseId}/readings`, { method: 'POST', headers, body: JSON.stringify({ temp: '14,5' }) })).json()) as any;
+    assert.equal(withReading.case.readings.length, 2);
+    assert.equal(withReading.case.statusTitle, 'Слежу за температурой');
+    assert.equal((await fetch(`${base}/api/cases/${cold.caseId}`, { method: 'DELETE', headers })).status, 200);
+    assert.equal(h.db.getParticipant(cold.caseId), undefined);
+  });
+});
+
 test('health и статика мини-приложения', async () => {
   await withServer(async (base) => {
     const health = (await (await fetch(`${base}/health`)).json()) as any;
     assert.equal(health.ok, true);
-    assert.equal(health.version, '1.0.1');
+    assert.equal(health.version, '1.0.2');
     const page = await fetch(`${base}/app/`);
     assert.equal(page.status, 200);
     const html = await page.text();

@@ -38,6 +38,13 @@ function optsFor(bot: Vernem, c: CaseBundle): EscalationOpts {
   };
 }
 
+/** Документ эскалации для скачивания из мини-приложения. */
+export function escalationDocFor(bot: Vernem, c: CaseBundle, kind: EscalationKind) {
+  const doc = buildEscalation(kind, inputFor(bot, c), optsFor(bot, c));
+  if (c.incident.demo) doc.note = `ДЕМОНСТРАЦИОННЫЕ ДАННЫЕ: не является реальным документом. ${doc.note}`;
+  return doc;
+}
+
 export async function showEscalation(bot: Vernem, userId: number, pid: number) {
   const c = bot.ownCase(userId, pid);
   if (!c) return bot.stale(userId);

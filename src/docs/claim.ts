@@ -150,12 +150,14 @@ export function buildClaim(input: ClaimInput): ClaimDoc {
   }
 
   const adsNumber = p.own_ads_number || incident.ads_number;
-  if (incident.evidence === 'ads' && adsNumber) {
+  // Сосед мог дозвониться сам, даже если первый житель сообщил без номера.
+  const evidence = p.own_ads_number && incident.evidence === 'self' ? 'ads' : incident.evidence;
+  if (evidence === 'ads' && adsNumber) {
     const whose = p.own_ads_number ? '' : p.role === 'neighbour' ? ' (сообщение другого жителя дома о том же нарушении)' : '';
     facts.push(
       `Нарушение зафиксировано: сообщение в аварийно-диспетчерскую службу зарегистрировано под № ${adsNumber} ${formatDateTime(new Date(incident.started_at), tz)}${whose} (п. 105–106 Правил).`,
     );
-  } else if (incident.evidence === 'written' && adsNumber) {
+  } else if (evidence === 'written' && adsNumber) {
     facts.push(`О нарушении исполнителю сообщено письменно: обращение № ${adsNumber} от ${formatDateTime(new Date(incident.started_at), tz)} (п. 105 Правил).`);
   } else if (input.act?.act.status === 'signed') {
     facts.push('Сообщить о нарушении в аварийно-диспетчерскую службу не удалось. Время начала нарушения указано в акте (п. 111 Правил).');

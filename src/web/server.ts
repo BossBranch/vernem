@@ -8,7 +8,9 @@ import type { Norms } from '../calc/norms.ts';
 import type { AppConfig } from '../config.ts';
 import type { Vernem } from '../bot/core.ts';
 import { actDocFor, billsOf, claimDocFor, claimOf, loadCase, summarize } from '../services/cases.ts';
-import { actFromApp, markActSigned } from '../bot/acts.ts';
+import { actFromApp, markActSigned, unmarkActSigned } from '../bot/acts.ts';
+import { escalationDocFor } from '../bot/escalate.ts';
+import type { EscalationKind } from '../docs/escalation.ts';
 import { executorFromHouse } from '../bot/house.ts';
 import { claimToText } from '../docs/claim.ts';
 import { claimToPdf } from '../docs/pdf.ts';
@@ -30,11 +32,34 @@ type AuthedRequest = Request & { userId?: number };
 
 class HttpError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  /** Ошибки по полям формы: мини-приложение подсвечивает поле и пишет текст под ним. */
+  fields?: Record<string, string>;
+  constructor(status: number, message: string, fields?: Record<string, string>) {
     super(message);
     this.status = status;
+    this.fields = fields;
   }
 }
+
+/** Ошибка одного поля. */
+const fieldError = (field: string, message: string) => new HttpError(400, message, { [field]: message });
+
+/** Проверка сразу всех полей формы: житель видит все ошибки разом, а не по одной. */
+function checkAll(errors: Record<string, string>) {
+  const keys = Object.keys(errors);
+  if (keys.length) throw new HttpError(400, keys.length === 1 ? errors[keys[0]] : 'Проверьте отмеченные поля', errors);
+}
+
+const PHONE_ERROR = 'Телефон — цифрами, например +7 495 123-45-67 или 112';
+const isPhone = (v: string) => !/[^\d\s+()\-.]/.test(v) && v.replace(/\D/g, '').length >= 3;
+const ENTRANCE_ERROR = 'Номер подъезда — цифрами, например 2 или 2А';
+const entranceOf = (v: unknown): string | null | undefined => {
+  if (v === null) return null;
+  const s = str(v, 4);
+  if (s === undefined) return undefined;
+  if (!/^\d{1,2}[А-ЯЁA-Z]?$/i.test(s)) throw fieldError('entrance', ENTRANCE_ERROR);
+  return s.toUpperCase();
+};
 
 const str = (v: unknown, max: number): string | undefined => {
   if (v === undefined || v === null) return undefined;
@@ -43,6 +68,8 @@ const str = (v: unknown, max: number): string | undefined => {
   if (s.length > max) throw new HttpError(400, `Слишком длинное значение (максимум ${max} символов)`);
   return s || undefined;
 };
+
+const ESC_FILES: Record<string, string> = { fine: 'Требование_о_штрафе.pdf', gji: 'Жалоба_в_ГЖИ.pdf', ozpp: 'Заявление_в_общество_потребителей.pdf' };
 
 const VERSION: string = JSON.parse(readFileSync(resolve('package.json'), 'utf8')).version;
 
@@ -158,11 +185,17 @@ export function createApp(deps: WebDeps) {
     const q = typeof req.query.q === 'string' ? req.query.q.slice(0, 100) : '';
     const city = typeof req.query.city === 'string' ? resolveCity(req.query.city, cfg.defaultTz) : null;
     if (!city) throw new HttpError(400, 'Укажите город');
-    res.json({ houses: db.searchHouses(q, 8, city.name).filter((h) => !h.demo).map((h) => ({ id: h.id, address: h.address, members: db.countHouseMembers(h.id) })) });
+    // Точное совпадение с домом из списка — тогда «Моего дома нет — добавить» не предлагаем.
+    const exact = q.trim().length >= 3 ? db.findHouse(q, city.name) : undefined;
+    res.json({
+      houses: db.searchHouses(q, 8, city.name).filter((h) => !h.demo).map((h) => ({ id: h.id, address: h.address, members: db.countHouseMembers(h.id) })),
+      exactId: exact && !exact.demo ? exact.id : null,
+    });
   });
 
   api.post('/me/houses', (req: AuthedRequest, res) => {
     const b = req.body ?? {};
+    const entrance = entranceOf(b.entrance);
     let houseId: number;
     if (Number.isInteger(b.houseId)) {
       const h = db.getHouse(b.houseId);
@@ -175,18 +208,18 @@ export function createApp(deps: WebDeps) {
       if (!city) throw new HttpError(400, 'Укажите город');
       houseId = db.upsertHouse(address, city.tz, 0, city.name).id;
     }
+    const already = !!db.getUserHouse(req.userId!, houseId);
     db.addUserHouse(req.userId!, houseId);
-    const entrance = str(b.entrance, 4);
     if (entrance) db.setUserHouse(req.userId!, houseId, { entrance });
     db.track(req.userId!, 'house_set', { house: houseId, via: 'app' });
-    res.json({ house: houseJson(req.userId!, houseId) });
+    res.json({ house: houseJson(req.userId!, houseId), already });
   });
 
   api.patch('/me/houses/:id', (req: AuthedRequest, res) => {
     const id = Number(req.params.id);
     houseJson(req.userId!, id);
     const b = req.body ?? {};
-    const entrance = b.entrance === null ? null : str(b.entrance, 4);
+    const entrance = entranceOf(b.entrance);
     if (entrance !== undefined) db.setUserHouse(req.userId!, id, { entrance });
     if (typeof b.notify === 'boolean') db.setUserHouse(req.userId!, id, { notify: b.notify ? 1 : 0 });
     res.json({ house: houseJson(req.userId!, id) });
@@ -207,16 +240,20 @@ export function createApp(deps: WebDeps) {
     const id = Number(req.params.id);
     houseJson(req.userId!, id);
     const b = req.body ?? {};
+    const errors: Record<string, string> = {};
     const ukInn = str(b.ukInn, 12);
-    if (ukInn && !/^\d{10}(\d{2})?$/.test(ukInn)) throw new HttpError(400, 'ИНН — 10 или 12 цифр');
+    if (ukInn && !/^\d{10}(\d{2})?$/.test(ukInn)) errors.ukInn = 'ИНН — 10 или 12 цифр, есть в квитанции';
     const ukEmail = str(b.ukEmail, 100);
-    if (ukEmail && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(ukEmail)) throw new HttpError(400, 'Проверьте адрес почты');
+    if (ukEmail && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(ukEmail)) errors.ukEmail = 'Почта в виде name@example.ru';
+    const adsPhone = str(b.adsPhone, 40);
+    if (adsPhone && !isPhone(adsPhone)) errors.adsPhone = PHONE_ERROR;
+    checkAll(errors);
     const info = {
       ukName: str(b.ukName, 150),
       ukInn,
       ukAddress: str(b.ukAddress, 200),
       ukEmail,
-      adsPhone: str(b.adsPhone, 40),
+      adsPhone,
       rsoHeat: str(b.rsoHeat, 150),
       rsoWater: str(b.rsoWater, 150),
       rsoPower: str(b.rsoPower, 150),
@@ -242,11 +279,12 @@ export function createApp(deps: WebDeps) {
       if (!Number.isInteger(b.houseId)) throw new HttpError(400, 'Выберите адрес');
       const evidence = b.evidence === 'ads' || b.evidence === 'written' ? b.evidence : 'self';
       const startedAt = b.startedAt ? new Date(b.startedAt) : new Date();
-      if (Number.isNaN(startedAt.getTime())) throw new HttpError(400, 'Непонятное время начала');
-      if (startedAt.getTime() > Date.now() + 5 * 60_000) throw new HttpError(400, 'Время начала ещё не наступило');
-      if (Date.now() - startedAt.getTime() > 92 * 24 * 3_600_000) throw new HttpError(400, 'Это было больше трёх месяцев назад');
+      if (Number.isNaN(startedAt.getTime())) throw fieldError('started', 'Укажите дату и время');
+      if (startedAt.getTime() > Date.now() + 5 * 60_000) throw fieldError('started', 'Это время ещё не наступило');
+      if (Date.now() - startedAt.getTime() > 92 * 24 * 3_600_000) throw fieldError('started', 'Это было больше трёх месяцев назад');
       const temp = b.temp === undefined || b.temp === null || b.temp === '' ? undefined : Number(String(b.temp).replace(',', '.'));
-      if (temp !== undefined && (!Number.isFinite(temp) || temp < -30 || temp > 99)) throw new HttpError(400, 'Проверьте температуру');
+      if (temp !== undefined && (!Number.isFinite(temp) || temp < -30 || temp > 99)) throw fieldError('temp', 'Температура — число, например 16 или 15,5');
+      if (evidence !== 'self' && !str(b.number, 40)) throw fieldError('number', 'Впишите номер заявки или выберите «Не дозвонился»');
       const r = await bot.reportFromApp(req.userId!, {
         houseId: b.houseId,
         service: b.service,
@@ -258,8 +296,8 @@ export function createApp(deps: WebDeps) {
         variant: b.variant === 'two_sources' || b.variant === 'one_source' ? b.variant : undefined,
         planned: !!b.planned,
       });
-      if ('error' in r) throw new HttpError(422, r.error);
-      res.json({ caseId: r.pid });
+      if ('error' in r) throw new HttpError(422, r.error, /температур|норма/.test(r.error) ? { temp: r.error } : undefined);
+      res.json({ caseId: r.pid, outcome: r.outcome, numberSaved: !!r.numberSaved, neighbours: r.neighbours ?? 0, botConnected: !!cfg.token });
     } catch (e) {
       next(e);
     }
@@ -303,8 +341,11 @@ export function createApp(deps: WebDeps) {
     // ФИО и квартира, которые житель уже вписал в акт, — чтобы не спрашивать второй раз.
     const act = db.getActByIncident(c.incident.id);
     const signer = act ? db.listSigners(act.id).find((x) => x.user_id === c.p.user_id) : undefined;
-    const personHint = signer ? { fio: signer.fio, flat: signer.flat } : null;
-    res.json({ case: s, claimText, executorHint, personHint });
+    const u = db.getUser(c.p.user_id);
+    const saved = u?.save_personal && u.fio ? { fio: u.fio, flat: u.flat, account: u.account } : null;
+    const personHint = signer ? { fio: signer.fio, flat: signer.flat ?? saved?.flat ?? null, account: saved?.account ?? null } : saved;
+    const houseContacts = { ukName: info.ukName ?? null, ukEmail: info.ukEmail ?? null, ukAddress: info.ukAddress ?? null, adsPhone: info.adsPhone ?? null };
+    res.json({ case: s, claimText, executorHint, personHint, houseContacts, savedPersonal: !!u?.save_personal });
   });
 
   api.put('/cases/:id/claim', (req: AuthedRequest, res) => {
@@ -313,7 +354,7 @@ export function createApp(deps: WebDeps) {
     const types: ExecutorType[] = ['uk', 'rso', 'rop', 'unknown'];
     if (b.executorType !== undefined && !types.includes(b.executorType)) throw new HttpError(400, 'Неизвестный тип исполнителя');
     const inn = str(b.executorInn, 12);
-    if (inn && !/^\d{10}(\d{2})?$/.test(inn)) throw new HttpError(400, 'ИНН — 10 или 12 цифр');
+    if (inn && !/^\d{10}(\d{2})?$/.test(inn)) throw fieldError('inn', 'ИНН — 10 или 12 цифр, есть в квитанции');
     const claim = {
       ...claimOf(c.p),
       fio: str(b.fio, 150),
@@ -334,11 +375,14 @@ export function createApp(deps: WebDeps) {
           continue;
         }
         const amount = parseRubles(String(raw));
-        if (amount === null) throw new HttpError(400, 'Сумма из квитанции — число, например 1200');
+        if (amount === null) throw fieldError(`bill_${month}`, 'Сумма — число, например 1200 или 1 250,50');
         bills[month] = amount;
       }
       db.updateParticipant(c.p.id, { bills: JSON.stringify(bills) });
     }
+    // «Запомнить мои данные» — ФИО, квартира и лицевой счёт подставятся в следующие заявления.
+    if (b.remember === true) db.updateUser(req.userId!, { fio: claim.fio ?? null, flat: claim.flat ?? null, account: claim.account ?? null, save_personal: 1 });
+    if (b.remember === false && db.getUser(req.userId!)?.save_personal) db.updateUser(req.userId!, { fio: null, flat: null, account: null, save_personal: 0 });
     const fresh = loadCase(db, c.p.id)!;
     res.json({ case: summarize(db, norms, fresh, new Date()), claimText: fresh.p.ended_at ? claimToText(claimDocFor(db, norms, fresh, new Date())) : null });
   });
@@ -359,7 +403,9 @@ export function createApp(deps: WebDeps) {
       const bot = deps.bot();
       if (!bot) throw new HttpError(503, 'Бот сейчас недоступен');
       const fio = str(req.body?.fio, 150);
-      if (!fio || fio.length < 5 || /\d/.test(fio)) throw new HttpError(400, 'Впишите фамилию, имя и отчество');
+      if (!fio || /\d/.test(fio) || fio.split(' ').length < 2 || fio.length < 5) {
+        throw fieldError('fio', 'Фамилия и имя, например «Иванова Анна Петровна»: без них подпись в акте не засчитают');
+      }
       const flat = str(req.body?.flat, 10) ?? null;
       const actId = await actFromApp(bot, req.userId!, c.p.id, fio, flat);
       if (!actId) throw new HttpError(404, 'Случай не найден');
@@ -367,6 +413,93 @@ export function createApp(deps: WebDeps) {
     } catch (e) {
       next(e);
     }
+  });
+
+  api.post('/cases/:id/act/unsigned', (req: AuthedRequest, res) => {
+    const c = ownCase(req);
+    const bot = deps.bot();
+    const act = db.getActByIncident(c.incident.id);
+    if (!bot || !act || !unmarkActSigned(bot, req.userId!, act.id)) throw new HttpError(403, 'Отменить отметку может тот, кто начал акт');
+    res.json({ ok: true });
+  });
+
+  /** Исправить время начала или окончания. */
+  api.patch('/cases/:id/times', (req: AuthedRequest, res) => {
+    const c = ownCase(req);
+    const bot = deps.bot();
+    if (!bot) throw new HttpError(503, 'Бот сейчас недоступен');
+    const parse = (v: unknown, field: string) => {
+      if (v === undefined || v === null || v === '') return null;
+      const d = new Date(String(v));
+      if (Number.isNaN(d.getTime())) throw fieldError(field, 'Укажите дату и время');
+      return d;
+    };
+    const startedAt = parse(req.body?.startedAt, 'editStart');
+    const endedAt = parse(req.body?.endedAt, 'editEnd');
+    const err = bot.editTimesFromApp(req.userId!, c.p.id, startedAt, endedAt);
+    if (err) throw new HttpError(422, err, { [/окончан/i.test(err) ? 'editEnd' : 'editStart']: err });
+    res.json({ case: summarize(db, norms, loadCase(db, c.p.id)!, new Date()) });
+  });
+
+  api.post('/cases/:id/reopen', (req: AuthedRequest, res) => {
+    const c = ownCase(req);
+    const bot = deps.bot();
+    if (!bot) throw new HttpError(503, 'Бот сейчас недоступен');
+    const err = bot.reopenFromApp(req.userId!, c.p.id);
+    if (err) throw new HttpError(422, err);
+    res.json({ ok: true });
+  });
+
+  api.delete('/cases/:id', (req: AuthedRequest, res) => {
+    const c = ownCase(req);
+    const bot = deps.bot();
+    if (!bot) throw new HttpError(503, 'Бот сейчас недоступен');
+    const err = bot.deleteFromApp(req.userId!, c.p.id);
+    if (err) throw new HttpError(422, err);
+    res.json({ ok: true });
+  });
+
+  api.post('/cases/:id/readings', (req: AuthedRequest, res) => {
+    const c = ownCase(req);
+    const bot = deps.bot();
+    if (!bot) throw new HttpError(503, 'Бот сейчас недоступен');
+    const temp = Number(String(req.body?.temp ?? '').replace(',', '.'));
+    if (req.body?.temp === '' || req.body?.temp === undefined || !Number.isFinite(temp) || temp < -30 || temp > 99) throw fieldError('newTemp', 'Температура — число, например 16 или 15,5');
+    const at = req.body?.at ? new Date(req.body.at) : new Date();
+    if (Number.isNaN(at.getTime())) throw fieldError('newTempAt', 'Укажите дату и время');
+    const err = bot.addReadingFromApp(req.userId!, c.p.id, temp, at);
+    if (err) throw new HttpError(422, err, { newTempAt: err });
+    res.json({ case: summarize(db, norms, loadCase(db, c.p.id)!, new Date()) });
+  });
+
+  /** Перерасчёт пришёл (сумма) или нет. */
+  api.post('/cases/:id/receipt', async (req: AuthedRequest, res, next) => {
+    try {
+      const c = ownCase(req);
+      const bot = deps.bot();
+      if (!bot) throw new HttpError(503, 'Бот сейчас недоступен');
+      const refunded = req.body?.refunded === true;
+      let amount: number | null = null;
+      if (refunded && req.body?.amount !== undefined && req.body.amount !== '') {
+        amount = parseRubles(String(req.body.amount));
+        if (amount === null) throw fieldError('refundAmount', 'Сумма — число, например 115 или 115,20');
+      }
+      const err = await bot.receiptFromApp(req.userId!, c.p.id, refunded, amount);
+      if (err) throw new HttpError(422, err);
+      res.json({ case: summarize(db, norms, loadCase(db, c.p.id)!, new Date()) });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  /** Документы, если перерасчёт не сделали: требование о штрафе, жалоба в ГЖИ, заявление в общество потребителей. */
+  api.post('/cases/:id/escalation-link', (req: AuthedRequest, res) => {
+    const c = ownCase(req);
+    const kind = String(req.body?.kind ?? '');
+    if (!ESC_FILES[kind]) throw new HttpError(400, 'Неизвестный документ');
+    if (!c.p.ended_at) throw new HttpError(409, 'Сначала отметьте, что починили');
+    const path = `/files/esc/${c.p.id}-${kind}.pdf`;
+    res.json({ url: `${cfg.publicUrl ?? ''}${signLink(path, cfg.linkSecret, 600)}`, fileName: ESC_FILES[kind] });
   });
 
   api.post('/cases/:id/act/signed', async (req: AuthedRequest, res, next) => {
@@ -417,6 +550,26 @@ export function createApp(deps: WebDeps) {
   app.use('/api', api);
 
   // ---------- PDF по подписанной ссылке ----------
+  app.get('/files/esc/:file', async (req, res, next) => {
+    try {
+      const m = /^(\d+)-(fine|gji|ozpp)\.pdf$/.exec(String(req.params.file));
+      const path = `/files/esc/${req.params.file}`;
+      if (!m || !verifyLink(path, req.query.exp as string, req.query.sig as string, cfg.linkSecret)) {
+        throw new HttpError(403, 'Ссылка устарела. Нажмите кнопку документа ещё раз.');
+      }
+      const c = loadCase(db, Number(m[1]));
+      const bot = deps.bot();
+      if (!c || !c.p.ended_at || !bot) throw new HttpError(404, 'Документ не найден');
+      const pdf = await claimToPdf(escalationDocFor(bot, c, m[2] as EscalationKind));
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(ESC_FILES[m[2]])}`);
+      res.setHeader('Cache-Control', 'no-store');
+      res.send(pdf);
+    } catch (e) {
+      next(e);
+    }
+  });
+
   app.get('/files/act/:file', async (req, res, next) => {
     try {
       const m = /^(\d+)\.pdf$/.exec(String(req.params.file));
@@ -461,7 +614,7 @@ export function createApp(deps: WebDeps) {
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     const status = err instanceof HttpError ? err.status : err?.type === 'entity.parse.failed' ? 400 : 500;
     if (status >= 500) console.error('[web]', err);
-    res.status(status).json({ error: status >= 500 ? 'Внутренняя ошибка сервера. Попробуйте ещё раз.' : err.message });
+    res.status(status).json({ error: status >= 500 ? 'Внутренняя ошибка сервера. Попробуйте ещё раз.' : err.message, ...(err instanceof HttpError && err.fields ? { fields: err.fields } : {}) });
   });
 
   return app;
