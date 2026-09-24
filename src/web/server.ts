@@ -19,7 +19,7 @@ import { signLink, validateInitData, verifyLink } from './auth.ts';
 import { SERVICE_ORDER } from '../calc/norms.ts';
 import { CITIES, resolveCity, suggestCity } from '../calc/cities.ts';
 import { flatFromAddress } from '../db/db.ts';
-import { parseRubles } from '../calc/format.ts';
+import { fmtTemp, innProblem, parseRubles } from '../calc/format.ts';
 
 export type WebDeps = {
   db: Db;
@@ -54,14 +54,34 @@ function checkAll(errors: Record<string, string>) {
 // Неразрывные пробелы и дефисы: номер в подсказке не рвётся на две строки.
 const PHONE_ERROR = 'Телефон — цифрами, например +7\u00a0495\u00a0123\u201145\u201167 или 112';
 const TEMP_ERROR = 'Температура — число, например 16 или 15,5';
-const TEMP_RANGE = 'Проверьте число: температура бывает от −30 до +99 °C';
+/** Разумные пределы: в комнате 0…+40 °C, горячая вода 0…+99 °C. */
+const TEMP_LIMITS: Record<string, [number, number, string]> = {
+  heating_temp: [0, 40, 'Температура в комнате — от 0 до +40 °C. Проверьте число'],
+  hot_water_temp: [0, 99, 'Температура воды — от 0 до +99 °C. Проверьте число'],
+};
 /** Температура из поля формы: null — поле пустое; иначе число или ошибка у поля. */
-function tempOf(v: unknown, field: string): number | null {
+function tempOf(v: unknown, field: string, service = 'heating_temp'): number | null {
   if (v === undefined || v === null || v === '') return null;
-  const t = Number(String(v).replace(',', '.').trim());
+  const t = Number(String(v).replace(',', '.').replace(/[°cс\s+]/gi, '').replace('−', '-'));
   if (!Number.isFinite(t)) throw fieldError(field, TEMP_ERROR);
-  if (t < -30 || t > 99) throw fieldError(field, TEMP_RANGE);
+  const [min, max, msg] = TEMP_LIMITS[service] ?? [-30, 99, 'Проверьте число'];
+  if (t < min || t > max) throw fieldError(field, msg);
   return t;
+}
+
+const innError = innProblem;
+
+/** Сумма из квитанции: число больше нуля и разумного размера. */
+function billError(raw: string): { amount: number } | { error: string } {
+  const amount = parseRubles(raw);
+  if (amount === null) return { error: 'Сумма — число больше нуля, например 1200 или 1 250,50' };
+  if (amount > 100_000) return { error: 'Проверьте сумму: плата за одну услугу за месяц обычно меньше 100 000 ₽' };
+  return { amount };
+}
+
+/** ФИО для документа: хотя бы фамилия и имя, без цифр. */
+function fioError(fio: string): string | null {
+  return fio.split(' ').length < 2 || /\d/.test(fio) ? 'Фамилия и имя полностью, например «Иванова Анна Петровна»' : null;
 }
 const isPhone = (v: string) => !/[^\d\s+()\-.]/.test(v) && v.replace(/\D/g, '').length >= 3;
 const ENTRANCE_ERROR = 'Номер подъезда — цифрами, например 2 или 2А';
@@ -201,7 +221,7 @@ export function createApp(deps: WebDeps) {
     const known = resolveCity(q, cfg.defaultTz);
     const inList = !!known && CITIES.some((c) => c.name === known.name);
     const suggestion = inList ? null : suggestCity(q);
-    res.json({ name: known?.name ?? null, inList, suggestion: suggestion?.name ?? null });
+    res.json({ name: known?.name ?? null, inList, suggestion: suggestion?.name ?? null, latin: /[a-z]/i.test(q) });
   });
 
   api.get('/houses/search', (req: AuthedRequest, res) => {
@@ -270,8 +290,9 @@ export function createApp(deps: WebDeps) {
     houseJson(req.userId!, id);
     const b = req.body ?? {};
     const errors: Record<string, string> = {};
-    const ukInn = str(b.ukInn, 12);
-    if (ukInn && !/^\d{10}(\d{2})?$/.test(ukInn)) errors.ukInn = 'ИНН — 10 или 12 цифр, есть в квитанции';
+    const ukInn = str(b.ukInn, 20);
+    const ukInnErr = ukInn ? innError(ukInn) : null;
+    if (ukInnErr) errors.ukInn = ukInnErr;
     const ukEmail = str(b.ukEmail, 100);
     if (ukEmail && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(ukEmail)) errors.ukEmail = 'Почта в виде name@example.ru';
     const adsPhone = str(b.adsPhone, 40);
@@ -289,10 +310,14 @@ export function createApp(deps: WebDeps) {
       rsoGas: str(b.rsoGas, 150),
       rop: str(b.rop, 150),
       gji: str(b.gji, 200),
+      // Лифт / больше 9 этажей: не передан — оставляем прежний ответ.
+      twoPowerSources: typeof b.twoPowerSources === 'boolean' ? b.twoPowerSources : b.twoPowerSources === null ? undefined : db.houseInfo(db.getHouse(id)!).twoPowerSources,
       updatedAt: new Date().toISOString(),
       updatedBy: req.userId,
     };
+    const powerChanged = db.houseInfo(db.getHouse(id)!).twoPowerSources !== info.twoPowerSources;
     db.setHouseInfo(id, info);
+    if (powerChanged) deps.bot()?.recheckPowerCases(id);
     db.track(req.userId!, 'house_info', { house: id, via: 'app' });
     res.json({ house: houseJson(req.userId!, id) });
   });
@@ -311,7 +336,9 @@ export function createApp(deps: WebDeps) {
       if (Number.isNaN(startedAt.getTime())) throw fieldError('started', 'Укажите дату и время');
       if (startedAt.getTime() > Date.now() + 5 * 60_000) throw fieldError('started', 'Это время ещё не наступило');
       if (Date.now() - startedAt.getTime() > 366 * 24 * 3_600_000) throw fieldError('started', 'Это было больше года назад — такое проще решать через жилищную инспекцию');
-      const temp = tempOf(b.temp, 'temp') ?? undefined;
+      const temp = tempOf(b.temp, 'temp', b.service) ?? undefined;
+      const numberRaw = typeof b.number === 'string' ? b.number.trim() : '';
+      if (evidence !== 'self' && numberRaw.length > 60) throw fieldError('number', 'Номер слишком длинный — до 60 знаков');
       if (evidence !== 'self' && !str(b.number, 60)) {
         throw fieldError('number', evidence === 'written' ? 'Впишите номер обращения — он есть в «Госуслугах Дом» или ГИС ЖКХ' : 'Впишите номер заявки или выберите «Не дозвонились»');
       }
@@ -386,8 +413,55 @@ export function createApp(deps: WebDeps) {
     const b = req.body ?? {};
     const types: ExecutorType[] = ['uk', 'rso', 'rop', 'unknown'];
     if (b.executorType !== undefined && !types.includes(b.executorType)) throw new HttpError(400, 'Неизвестный тип исполнителя');
-    const inn = str(b.executorInn, 12);
-    if (inn && !/^\d{10}(\d{2})?$/.test(inn)) throw fieldError('inn', 'ИНН — 10 или 12 цифр, есть в квитанции');
+    const errors: Record<string, string> = {};
+    const inn = str(b.executorInn, 20);
+    const innErr = inn ? innError(inn) : null;
+    if (innErr) errors.inn = innErr;
+    const fioIn = str(b.fio, 150);
+    const fioErr = fioIn ? fioError(fioIn) : null;
+    if (fioErr) errors.fio = fioErr;
+    const billsIn: Record<string, number | null> = {};
+    if (b.bills && typeof b.bills === 'object') {
+      for (const [month, raw] of Object.entries(b.bills as Record<string, unknown>)) {
+        if (!/^\d{4}-\d{2}$/.test(month)) continue;
+        if (raw === '' || raw === null) {
+          billsIn[month] = null;
+          continue;
+        }
+        const r = billError(String(raw));
+        if ('error' in r) errors[`bill_${month}`] = r.error;
+        else billsIn[month] = r.amount;
+      }
+    }
+    // Объём горячей воды за месяц и тарифы — для суммы за часы ниже +40 °C.
+    const coldIn: Record<string, { volume: number; hot: number; cold: number } | null> = {};
+    if (b.coldTariff && typeof b.coldTariff === 'object') {
+      const num = (v: unknown) => {
+        const t = String(v ?? '').replace(/\s/g, '').replace(',', '.');
+        return /^\d+(\.\d+)?$/.test(t) ? Number(t) : NaN;
+      };
+      for (const [month, raw] of Object.entries(b.coldTariff as Record<string, any>)) {
+        if (!/^\d{4}-\d{2}$/.test(month) || !raw || typeof raw !== 'object') continue;
+        if (!raw.volume && !raw.hot && !raw.cold) {
+          coldIn[month] = null;
+          continue;
+        }
+        const volume = num(raw.volume);
+        const hot = num(raw.hot);
+        const cold = num(raw.cold);
+        if (!(volume > 0 && volume <= 100)) errors[`ct_vol_${month}`] = 'Объём горячей воды за месяц в м³, например 3,5';
+        if (!(hot > 0 && hot <= 2000)) errors[`ct_hot_${month}`] = 'Тариф горячей воды, ₽ за м³, например 250';
+        if (!(cold > 0 && cold <= 2000)) errors[`ct_cold_${month}`] = 'Тариф холодной воды, ₽ за м³, например 55';
+        if (hot > 0 && cold > 0 && cold >= hot) errors[`ct_cold_${month}`] = 'Холодная вода должна стоить меньше горячей — проверьте тарифы';
+        coldIn[month] = { volume, hot, cold };
+      }
+    }
+    checkAll(errors);
+    const coldTariff = { ...(claimOf(c.p).coldTariff ?? {}) };
+    for (const [month, v] of Object.entries(coldIn)) {
+      if (v) coldTariff[month] = v;
+      else delete coldTariff[month];
+    }
     const claim = {
       ...claimOf(c.p),
       fio: str(b.fio, 150),
@@ -396,20 +470,15 @@ export function createApp(deps: WebDeps) {
       executor: str(b.executor, 200),
       executorInn: inn,
       executorType: b.executorType ?? claimOf(c.p).executorType,
+      coldTariff: Object.keys(coldTariff).length ? coldTariff : undefined,
     };
     db.updateParticipant(c.p.id, { claim: JSON.stringify(claim) });
     // Суммы из квитанции по месяцам: { "2026-09": "1200" } — для расчёта в рублях.
-    if (b.bills && typeof b.bills === 'object') {
+    if (Object.keys(billsIn).length) {
       const bills = { ...billsOf(c.p) };
-      for (const [month, raw] of Object.entries(b.bills as Record<string, unknown>)) {
-        if (!/^\d{4}-\d{2}$/.test(month)) continue;
-        if (raw === '' || raw === null) {
-          delete bills[month];
-          continue;
-        }
-        const amount = parseRubles(String(raw));
-        if (amount === null) throw fieldError(`bill_${month}`, 'Сумма — число, например 1200 или 1 250,50');
-        bills[month] = amount;
+      for (const [month, amount] of Object.entries(billsIn)) {
+        if (amount === null) delete bills[month];
+        else bills[month] = amount;
       }
       db.updateParticipant(c.p.id, { bills: JSON.stringify(bills) });
     }
@@ -425,6 +494,33 @@ export function createApp(deps: WebDeps) {
     res.json({ case: summarize(db, norms, fresh, new Date()), claimText: fresh.p.ended_at ? claimToText(claimDocFor(db, norms, fresh, new Date())) : null });
   });
 
+  /** Другие квартиры жителя в этом доме: по каждой — отдельное заявление со своей платой. */
+  api.put('/cases/:id/extra-flats', (req: AuthedRequest, res) => {
+    const c = ownCase(req);
+    const list = Array.isArray(req.body?.flats) ? req.body.flats.slice(0, 5) : null;
+    if (!list) throw new HttpError(400, 'Нужен список квартир');
+    const errors: Record<string, string> = {};
+    const flats = list.map((f: any, i: number) => {
+      const flat = str(f?.flat, 10);
+      if (!flat) errors[`xf_flat_${i}`] = 'Номер квартиры';
+      const bills: Record<string, number> = {};
+      for (const [month, raw] of Object.entries((f?.bills ?? {}) as Record<string, unknown>)) {
+        if (!/^\d{4}-\d{2}$/.test(month) || raw === '' || raw === null || raw === undefined) continue;
+        const r = billError(String(raw));
+        if ('error' in r) errors[`xf_bill_${i}_${month}`] = r.error;
+        else bills[month] = r.amount;
+      }
+      return { flat: flat ?? '', account: str(f?.account, 40), bills };
+    });
+    const own = claimOf(c.p).flat ?? db.getUserHouse(c.p.user_id, c.house.id)?.flat;
+    flats.forEach((f: { flat: string }, i: number) => {
+      if (own && f.flat && f.flat.toUpperCase() === own.toUpperCase()) errors[`xf_flat_${i}`] = 'Это ваша основная квартира — её заявление выше';
+    });
+    checkAll(errors);
+    db.updateParticipant(c.p.id, { claim: JSON.stringify({ ...claimOf(c.p), extraFlats: flats.length ? flats : undefined }) });
+    res.json({ case: summarize(db, norms, loadCase(db, c.p.id)!, new Date()) });
+  });
+
   /** Житель подал заявление: дата и входящий номер попадут в требование и жалобы. */
   api.post('/cases/:id/submitted', (req: AuthedRequest, res) => {
     const c = ownCase(req);
@@ -433,7 +529,13 @@ export function createApp(deps: WebDeps) {
     if (!date || Number.isNaN(date.getTime())) throw fieldError('submittedAt', 'Укажите дату подачи');
     if (date.getTime() > Date.now() + 24 * 3_600_000) throw fieldError('submittedAt', 'Эта дата ещё не наступила');
     if (date.getTime() < new Date(c.p.started_at).getTime() - 24 * 3_600_000) throw fieldError('submittedAt', 'Заявление не могли подать раньше отключения');
-    const claim = { ...claimOf(c.p), submittedAt: date.toISOString(), incomingNumber: str(req.body?.number, 40) };
+    const created = claimOf(c.p).createdAt;
+    if (created && raw!.slice(0, 10) < new Date(created).toLocaleDateString('sv-SE', { timeZone: c.house.tz })) {
+      throw fieldError('submittedAt', `Заявление датировано ${new Date(created).toLocaleDateString('ru-RU', { timeZone: c.house.tz })} — подать его раньше нельзя`);
+    }
+    const numRaw = typeof req.body?.number === 'string' ? req.body.number.replace(/^\s*(вх\.?\s*)?№\s*/i, '').trim() : '';
+    if (numRaw.length > 40) throw fieldError('incoming', 'Входящий номер — до 40 знаков');
+    const claim = { ...claimOf(c.p), submittedAt: date.toISOString(), incomingNumber: str(numRaw, 40) };
     db.updateParticipant(c.p.id, { claim: JSON.stringify(claim) });
     res.json({ case: summarize(db, norms, loadCase(db, c.p.id)!, new Date()) });
   });
@@ -442,9 +544,12 @@ export function createApp(deps: WebDeps) {
     const c = ownCase(req);
     if (!c.p.ended_at) throw new HttpError(409, 'Заявление появится, когда услугу восстановят');
     deps.bot()?.markClaimIssued(c.p.id);
-    const path = `/files/claim/${c.p.id}.pdf`;
+    deps.bot()?.refreshClaimIssue(c.p.id);
+    const extra = Number.isInteger(req.body?.extra) ? Number(req.body.extra) : undefined;
+    if (extra !== undefined && !claimOf(loadCase(db, c.p.id)!.p).extraFlats?.[extra]) throw new HttpError(404, 'Квартира не найдена');
+    const path = extra !== undefined ? `/files/claim/${c.p.id}-${extra}.pdf` : `/files/claim/${c.p.id}.pdf`;
     const rel = signLink(path, cfg.linkSecret, 600);
-    res.json({ url: `${cfg.publicUrl ?? ''}${rel}`, fileName: claimDocFor(db, norms, loadCase(db, c.p.id)!, new Date()).fileName });
+    res.json({ url: `${cfg.publicUrl ?? ''}${rel}`, fileName: claimDocFor(db, norms, loadCase(db, c.p.id)!, new Date(), extra).fileName });
   });
 
   // ---------- акт с соседями (п. 110(1)) ----------
@@ -514,14 +619,14 @@ export function createApp(deps: WebDeps) {
     const c = ownCase(req);
     const bot = deps.bot();
     if (!bot) throw new HttpError(503, 'Бот сейчас недоступен');
-    const temp = tempOf(req.body?.temp, 'newTemp');
+    const temp = tempOf(req.body?.temp, 'newTemp', c.incident.service_key);
     if (temp === null) throw fieldError('newTemp', 'Впишите, сколько градусов показал термометр');
     const at = req.body?.at ? new Date(req.body.at) : new Date();
     if (Number.isNaN(at.getTime())) throw fieldError('newTempAt', 'Укажите дату и время');
     const err = bot.addReadingFromApp(req.userId!, c.p.id, temp, at);
     if (err) throw new HttpError(422, err, { newTempAt: err });
     const threshold = bot.normThreshold(c.incident.service_key, !!c.p.corner);
-    const note = threshold !== null && temp >= threshold ? `+${String(temp).replace('.', ',')} °C — это уже норма. Если так и осталось, отметьте «${c.incident.service_key === 'heating_temp' ? 'Стало тепло' : 'Вода горячая'}».` : null;
+    const note = threshold !== null && temp >= threshold ? `${fmtTemp(temp)} — это уже норма. Если так и осталось, отметьте «${c.incident.service_key === 'heating_temp' ? 'Стало тепло' : 'Вода горячая'}».` : null;
     res.json({ case: summarize(db, norms, loadCase(db, c.p.id)!, new Date()), note });
   });
 
@@ -541,6 +646,7 @@ export function createApp(deps: WebDeps) {
       const action = req.body?.action === 'undo' ? 'undo' : req.body?.refunded === true || req.body?.action === 'yes' ? 'yes' : 'no';
       let amount: number | null = null;
       if (action === 'yes' && req.body?.amount !== undefined && req.body.amount !== '') {
+        if (/^\s*0+([.,]0+)?\s*(₽|руб\.?)?\s*$/i.test(String(req.body.amount))) throw fieldError('refundAmount', 'Если не вернули ничего — это «Не сделали»');
         amount = parseRubles(String(req.body.amount));
         if (amount === null) throw fieldError('refundAmount', 'Сумма — число, например 115 или 115,20');
         if (amount > 1_000_000) throw fieldError('refundAmount', 'Проверьте сумму — это больше миллиона');
@@ -654,14 +760,14 @@ export function createApp(deps: WebDeps) {
 
   app.get('/files/claim/:file', async (req, res, next) => {
     try {
-      const m = /^(\d+)\.pdf$/.exec(String(req.params.file));
+      const m = /^(\d+)(?:-(\d+))?\.pdf$/.exec(String(req.params.file));
       const path = `/files/claim/${req.params.file}`;
       if (!m || !verifyLink(path, req.query.exp as string, req.query.sig as string, cfg.linkSecret)) {
         throw new HttpError(403, 'Ссылка устарела. Нажмите «Скачать PDF» ещё раз.');
       }
       const c = loadCase(db, Number(m[1]));
       if (!c || !c.p.ended_at) throw new HttpError(404, 'Заявление не найдено');
-      const doc = claimDocFor(db, norms, c, new Date());
+      const doc = claimDocFor(db, norms, c, new Date(), m[2] !== undefined ? Number(m[2]) : undefined);
       const pdf = await claimToPdf(doc);
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(doc.fileName ?? 'Заявление.pdf')}`);

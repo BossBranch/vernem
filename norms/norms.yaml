@@ -154,6 +154,7 @@ services:
     interruption:
       monthly_hours: 72
       single_hours: 48
+      single_hours_warm: 24
       single_hours_note: "48 ч при среднесуточной температуре +5 °C и ниже, 24 ч — выше +5 °C"
       rate_percent: 3.3
       unit_hours: 24

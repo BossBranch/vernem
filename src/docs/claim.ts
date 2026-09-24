@@ -4,10 +4,10 @@
 // «Руководителю …», заявитель с адресом и контактами, приложения, подпись, отметка о принятии.
 
 import type { CalcResult } from '../calc/engine.ts';
-import { refundAmount } from '../calc/engine.ts';
+import { coldTariffAmount, refundAmount } from '../calc/engine.ts';
 import type { Norms, ServiceNorm } from '../calc/norms.ts';
 import { allowedMonthlyHours } from '../calc/norms.ts';
-import { fmtNum, fmtPercent, fmtRub } from '../calc/format.ts';
+import { fmtNum, fmtPercent, fmtRub, fmtTemp } from '../calc/format.ts';
 import { formatDate, formatDateTime, formatDuration, hoursBetween, monthPrepositional, monthTitle } from '../calc/time.ts';
 import type { Act, ActSigner, Claim, House, Incident, Participant, Photo, Reading } from '../db/db.ts';
 
@@ -159,14 +159,14 @@ export function buildClaim(input: ClaimInput): ClaimDoc {
     facts.push(
       `С ${formatDateTime(start, tz)} по ${formatDateTime(end, tz)} температура воздуха в жилом помещении${p.corner ? ' (угловая комната)' : ''} была ниже нормативной. Результаты измерений:`,
     );
-    for (const r of readings) facts.push(`— ${formatDateTime(new Date(r.at), tz)}: +${fmtNum(r.temp_c, 1)} °C${r.temp_c >= normC ? ' (в пределах нормы)' : ''}`);
+    for (const r of readings) facts.push(`— ${formatDateTime(new Date(r.at), tz)}: ${fmtTemp(r.temp_c)}${r.temp_c >= normC ? ' (в пределах нормы)' : ''}`);
   } else {
     const t = norm.temperature as { norm_c: number; day_tolerance_c: number };
     facts.push(
-      `С ${formatDateTime(start, tz)} по ${formatDateTime(end, tz)} температура горячей воды в точке водоразбора была ниже нормативной. Результаты измерений:`,
+      `С ${formatDateTime(start, tz)} по ${formatDateTime(end, tz)} температура горячей воды в точке водоразбора отклонялась от нормативной. Результаты измерений:`,
     );
     // Замер в норме тоже пишем — честно помечаем, что в этот момент вода была нормальной.
-    for (const r of readings) facts.push(`— ${formatDateTime(new Date(r.at), tz)}: +${fmtNum(r.temp_c, 1)} °C${r.temp_c >= t.norm_c - t.day_tolerance_c ? ' (в пределах нормы)' : ''}`);
+    for (const r of readings) facts.push(`— ${formatDateTime(new Date(r.at), tz)}: ${fmtTemp(r.temp_c)}${r.temp_c >= t.norm_c - t.day_tolerance_c ? ' (в пределах нормы)' : ''}`);
   }
 
   const adsNumber = p.own_ads_number || incident.ads_number;
@@ -175,7 +175,13 @@ export function buildClaim(input: ClaimInput): ClaimDoc {
   // Время регистрации пишем, только если оно известно: для номера первого жителя это начало отключения
   // (по п. 111 Правил нарушение и считается с момента сообщения). Время звонка соседа не спрашивали — не выдумываем.
   const regAt = p.own_ads_number ? '' : ` ${formatDateTime(new Date(incident.started_at), tz)}`;
-  if (evidence === 'ads' && adsNumber) {
+  // Первый житель позвонил ещё раз и получил новый номер — пишем оба, первый не теряем.
+  const repeat = p.role === 'reporter' && p.own_ads_number && incident.ads_number && p.own_ads_number !== incident.ads_number;
+  if (repeat) {
+    facts.push(
+      `Нарушение зафиксировано: сообщение в аварийно-диспетчерскую службу зарегистрировано под № ${incident.ads_number} ${formatDateTime(new Date(incident.started_at), tz)}; повторное сообщение — № ${p.own_ads_number} (п. 105–106 Правил).`,
+    );
+  } else if (evidence === 'ads' && adsNumber) {
     const whose = p.own_ads_number ? '' : p.role === 'neighbour' ? ' (сообщение другого жителя дома о том же нарушении)' : '';
     facts.push(`Нарушение зафиксировано: сообщение в аварийно-диспетчерскую службу зарегистрировано под № ${adsNumber}${regAt}${whose} (п. 105–106 Правил).`);
   } else if (evidence === 'written' && adsNumber) {
@@ -217,11 +223,21 @@ export function buildClaim(input: ClaimInput): ClaimDoc {
       );
     }
     if (m.coldTariffHours && m.coldTariffHours >= 1) {
+      const ct = claim.coldTariff?.[m.month];
+      const cold = coldTariffAmount(m.month, m.coldTariffHours, ct);
+      if (ct && cold > 0) {
+        total += cold;
+        calcLines.push(
+          `  Горячая вода ниже +40 °C: ${formatDuration(m.coldTariffHours)}. ${fmtNum(ct.volume)} м³ × доля этих часов в месяце × (${fmtRub(ct.hot)} − ${fmtRub(ct.cold)}) за м³ ≈ ${fmtRub(cold)} (при равномерном расходе).`,
+        );
+      }
       requests.push(
-        `за ${formatDuration(m.coldTariffHours)} ${monthPrepositional(m.month)}, когда температура горячей воды была ниже +40 °C, произвести оплату горячей воды по тарифу за холодную воду;`,
+        `за ${formatDuration(m.coldTariffHours)} ${monthPrepositional(m.month)}, когда температура горячей воды была ниже +40 °C, произвести оплату горячей воды по тарифу за холодную воду${cold > 0 ? ` (ориентировочно ${fmtRub(cold)})` : ''};`,
       );
     }
   }
+  // Несколько месяцев — итог одной строкой, чтобы УК не складывала сама.
+  if (calc.months.filter((m) => m.percent > 0 && bills[m.month]).length > 1) calcLines.push(`Итого ориентировочно: ${fmtRub(Math.round(total * 100) / 100)}.`);
   requests.push('отразить перерасчёт в платёжном документе за ближайший расчётный период;');
   requests.push('дать письменный ответ на настоящее заявление по указанному адресу.');
 

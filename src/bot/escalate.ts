@@ -35,6 +35,7 @@ function optsFor(bot: Vernem, c: CaseBundle): EscalationOpts {
     refund: c.p.refund_amount,
     executorStats: key ? bot.db.executorStats(key, new Date(bot.now().getTime() - STATS_DAYS * 24 * MS_HOUR)) : undefined,
     partnerName: bot.cfg.partnerName,
+    gji: bot.db.houseInfo(c.house).gji ?? null,
   };
 }
 

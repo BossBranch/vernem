@@ -60,6 +60,8 @@ export type HouseInfo = {
   rsoGas?: string;
   rop?: string;
   gji?: string;
+  /** Есть лифт или больше 9 этажей → два ввода электричества (лимит перерыва 2 ч, а не 24). Одно на весь дом. */
+  twoPowerSources?: boolean;
   updatedAt?: string;
   updatedBy?: number;
 };
@@ -95,6 +97,12 @@ export type Claim = {
   /** Когда житель подал заявление исполнителю и под каким входящим номером. */
   submittedAt?: string;
   incomingNumber?: string;
+  /** Снимок расчёта и времени на момент выдачи: если изменился — заявление надо подать заново. */
+  issuedSnapshot?: string;
+  /** Часы, когда горячая вода была ниже +40 °C: объём и тарифы из квитанции по месяцам — для суммы в рублях. */
+  coldTariff?: Record<string, { volume: number; hot: number; cold: number }>;
+  /** Другие квартиры жителя в этом же доме: по каждой — своё заявление (своя квартира, счёт и плата). */
+  extraFlats?: { flat: string; account?: string; bills: Record<string, number> }[];
 };
 
 export type Participant = {
@@ -357,6 +365,8 @@ export function normalizeAddress(address: string): string {
     .replace(/ё/g, 'е')
     .replace(/[,;]/g, ' ')
     .replace(FLAT_RE, ' ')
+    // «д1», «д.1» — номер дома без пробела.
+    .replace(/(?<![а-яa-z])д\.?(?=\d)/gu, ' ')
     .replace(word('корпус|корп|к'), ' к')
     .replace(word('строение|стр'), ' с')
     .replace(word('улица|ул|проспект|просп|пр-т|пр|переулок|пер|бульвар|бульв|б-р|шоссе|ш|площадь|пл|набережная|наб|проезд|пр-д|дом|д'), ' ')
@@ -578,9 +588,8 @@ export class Db {
    */
   personFor(userId: number, houseId: number): { fio: string | null; flat: string | null; account: string | null } {
     const u = this.getUser(userId);
-    if (!u?.save_personal) return { fio: null, flat: null, account: null };
     const uh = this.getUserHouse(userId, houseId);
-    return { fio: u.fio, flat: uh?.flat ?? null, account: uh?.account ?? null };
+    return { fio: u?.save_personal ? u.fio : null, flat: uh?.flat ?? null, account: uh?.account ?? null };
   }
 
   savePerson(userId: number, houseId: number, p: { fio?: string | null; flat?: string | null; account?: string | null }) {
@@ -588,9 +597,9 @@ export class Db {
     if (this.getUserHouse(userId, houseId)) this.setUserHouse(userId, houseId, { flat: p.flat ?? null, account: p.account ?? null });
   }
 
+  /** «Не запоминать» — забываем ФИО; квартира и лицевой счёт остаются в карточке адреса, там их и правят. */
   forgetPerson(userId: number) {
     this.updateUser(userId, { fio: null, flat: null, account: null, save_personal: 0 });
-    this.db.prepare('UPDATE user_houses SET flat = NULL, account = NULL WHERE user_id = ?').run(userId);
   }
 
   removeUserHouse(userId: number, houseId: number) {
@@ -673,6 +682,13 @@ export class Db {
   setIncidentTimes(id: number, startedAt: string, endedAt?: string | null) {
     this.db.prepare('UPDATE incidents SET started_at = ? WHERE id = ?').run(startedAt, id);
     if (endedAt !== undefined) this.db.prepare('UPDATE incidents SET ended_at = ? WHERE id = ?').run(endedAt, id);
+  }
+
+  /** Участники всех отключений одной услуги в доме — чтобы пересчитать их при смене данных дома. */
+  listHouseParticipants(houseId: number, serviceKey: string): Participant[] {
+    return this.db
+      .prepare('SELECT p.* FROM participants p JOIN incidents i ON i.id = p.incident_id WHERE i.house_id = ? AND i.service_key = ?')
+      .all(houseId, serviceKey) as Participant[];
   }
 
   /** «Ещё не починили»: снова открыть отключение, если его закрыли по ошибке. */

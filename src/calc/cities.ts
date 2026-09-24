@@ -106,7 +106,8 @@ export function normalizeCity(text: string): string {
 /** Город из справочника или введённый жителем (с заглавной буквы) и его часовой пояс. */
 export function resolveCity(text: string, defaultTz: string): City | null {
   const norm = normalizeCity(text);
-  if (norm.length < 2 || norm.length > 60 || /\d/.test(norm)) return null;
+  // Латиница («Moscow») и цифры — не название города по-русски.
+  if (norm.length < 2 || norm.length > 60 || /[\da-z]/.test(norm)) return null;
   const known = CITIES.find((c) => normalizeCity(c.name) === norm) ?? (ALIASES[norm] ? CITIES.find((c) => c.name === ALIASES[norm]) : undefined);
   if (known) return known;
   // «Сам», «Мо» — недописанное название, а не новый город. Короткие настоящие («Уфа») есть в справочнике.

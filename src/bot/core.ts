@@ -51,6 +51,8 @@ import {
   estimate,
   hasMoney,
   loadCase,
+  claimSnapshot,
+  relatedOverlap,
 } from '../services/cases.ts';
 import type { CaseBundle } from '../services/cases.ts';
 import type { BotConfig, Btn, Input, OutMessage, Outbox } from './types.ts';
@@ -231,6 +233,17 @@ export class Vernem {
     if (related && relatedOpen && this.db.getParticipantFor(relatedOpen.id, userId)) {
       return { error: `У вас уже открыто «${this.norms.services[related].button}» по этому адресу. Сначала отметьте в том деле, что починили, — потом сообщите о новой проблеме.` };
     }
+    const overlap = relatedOverlap(this.db, this.norms, userId, r.houseId, r.service, r.startedAt, null);
+    if (overlap) return { error: `За это время уже есть дело ${overlap}. Одни и те же часы нельзя оплатить дважды — укажите время позже.` };
+    // Ответ про лифт — свойство дома: лимит перерыва света одинаков для всех дел этого дома.
+    if (r.service === 'electricity_off' && r.variant) {
+      const house = this.db.getHouse(r.houseId)!;
+      const two = r.variant === 'two_sources';
+      if (this.db.houseInfo(house).twoPowerSources !== two) {
+        this.db.setHouseInfo(r.houseId, { ...this.db.houseInfo(house), twoPowerSources: two });
+        this.recheckPowerCases(r.houseId);
+      }
+    }
     this.db.addUserHouse(userId, r.houseId);
     this.db.track(userId, 'report_started', { service: r.service, via: 'app' });
     const open = this.db.findOpenIncident(r.houseId, r.service);
@@ -269,6 +282,10 @@ export class Vernem {
     if (now - start.getTime() > 366 * 24 * MS_HOUR) return 'Это было больше года назад — такое проще решать через жилищную инспекцию';
     if (end && end.getTime() <= start.getTime()) return 'Окончание должно быть позже начала';
     if (end && end.getTime() > now + 5 * 60_000) return 'Время окончания ещё не наступило';
+    const early = this.db.listReadings(pid).find((r) => new Date(r.at).getTime() < start.getTime() - 60_000);
+    if (early) return `Есть замер раньше нового начала (${formatShort(new Date(early.at), c.house.tz)}). Удалите его или укажите начало не позже первого замера.`;
+    const overlap = relatedOverlap(this.db, this.norms, userId, c.house.id, c.incident.service_key, start, end, pid);
+    if (overlap) return `За это время уже есть дело ${overlap}. Одни и те же часы нельзя оплатить дважды.`;
     // Подписанный на бумаге акт уже не изменить — время в заявлении должно совпадать с ним.
     const act = this.db.getActByIncident(c.incident.id);
     if (act?.status === 'signed' && start.getTime() !== new Date(c.p.started_at).getTime()) {
@@ -311,6 +328,21 @@ export class Vernem {
   }
 
   /** Новый замер температуры из приложения. */
+  /**
+   * Изменился ответ «есть лифт» — лимит перерыва света в доме другой: дело, закрытое «без денег»,
+   * может получить деньги, и наоборот. Заявления, уже выданные, помечаются устаревшими сами (снимок расчёта).
+   */
+  recheckPowerCases(houseId: number) {
+    for (const p of this.db.listHouseParticipants(houseId, 'electricity_off')) {
+      if (p.status !== 'ended' && p.status !== 'closed') continue;
+      const c = loadCase(this.db, p.id);
+      if (!c) continue;
+      const calc = calcFor(this.db, this.norms, c, this.now());
+      this.db.setCalc(p.id, calc);
+      this.db.updateParticipant(p.id, { status: hasMoney(calc) ? 'ended' : 'closed' });
+    }
+  }
+
   /** Нижняя граница нормы для замера: ниже — нарушение. */
   normThreshold(serviceKey: ServiceKey, corner: boolean): number | null {
     const norm = this.norms.services[serviceKey];
@@ -340,17 +372,17 @@ export class Vernem {
       this.db.updateParticipant(pid, { status: 'claim_ready', refund_amount: null });
       return null;
     }
-    if (action === 'yes') {
-      await this.finishRefund(userId, pid, amount);
-      return null;
-    }
-    // «Не сделали» можно сказать только когда пришла квитанция за следующий месяц после подачи.
+    // И «сделали», и «не сделали» видно только в квитанции за следующий месяц после подачи.
     const cl = claimOf(c.p);
     const since = new Date(cl.submittedAt ?? cl.createdAt ?? this.now().toISOString());
     const [y, m] = monthKey(since, c.house.tz).split('-').map(Number);
     const next = `${m === 12 ? y + 1 : y}-${String(m === 12 ? 1 : m + 1).padStart(2, '0')}`;
-    if (monthKey(this.now(), c.house.tz) < next) {
-      return `Перерасчёт появится в квитанции за ${monthTitle(monthKey(since, c.house.tz))}, которая придёт в начале ${monthGenitive(next)}. Отметьте «не сделали», когда получите её.`;
+    if (monthKey(this.now(), c.house.tz) < next && c.p.status === 'claim_ready') {
+      return `Перерасчёт появится в квитанции за ${monthTitle(monthKey(since, c.house.tz))}, которая придёт в начале ${monthGenitive(next)}. Отметьте результат, когда получите её.`;
+    }
+    if (action === 'yes') {
+      await this.finishRefund(userId, pid, amount);
+      return null;
     }
     this.db.updateParticipant(pid, { status: 'refused', refund_amount: null });
     this.db.cancelReminders(pid, 'ask_receipt');
@@ -365,15 +397,37 @@ export class Vernem {
     if (c.p.status !== 'tracking') return 'Окончание уже записано';
     if (endedAt.getTime() <= new Date(c.p.started_at).getTime()) return 'Время окончания должно быть позже начала';
     if (endedAt.getTime() > this.now().getTime() + 5 * 60_000) return 'Это время ещё не наступило';
+    const overlap = relatedOverlap(this.db, this.norms, userId, c.house.id, c.incident.service_key, new Date(c.p.started_at), endedAt, pid);
+    if (overlap) return `За это время уже есть дело ${overlap}. Одни и те же часы нельзя оплатить дважды — исправьте время.`;
     await this.setEnded(userId, c, endedAt);
     return null;
+  }
+
+  /**
+   * Заявление уже выдавали, а расчёт или время с тех пор изменились (исправили время, добавили отключение
+   * за тот же месяц): это новое заявление — новая дата, прежняя отметка о подаче не относится к нему.
+   */
+  refreshClaimIssue(pid: number): boolean {
+    const c = loadCase(this.db, pid);
+    if (!c || c.p.status === 'ended' || c.p.status === 'tracking' || c.p.status === 'closed') return false;
+    const cl = claimOf(c.p);
+    const snap = claimSnapshot(this.db, this.norms, c, this.now());
+    if (cl.issuedSnapshot === snap) return false;
+    const changed = !!cl.issuedSnapshot;
+    const { submittedAt, incomingNumber, ...rest } = cl;
+    const next = changed ? { ...rest, createdAt: this.now().toISOString(), issuedSnapshot: snap } : { ...cl, issuedSnapshot: snap };
+    this.db.updateParticipant(pid, { claim: JSON.stringify(next) });
+    return changed;
   }
 
   /** Житель скачал заявление в приложении — значит, оно готово: через месяц спросим про квитанцию. */
   markClaimIssued(pid: number) {
     const c = loadCase(this.db, pid);
     if (!c || c.p.status !== 'ended') return;
-    this.db.updateParticipant(pid, { status: 'claim_ready', claim: JSON.stringify({ ...claimOf(c.p), createdAt: claimOf(c.p).createdAt ?? this.now().toISOString() }) });
+    this.db.updateParticipant(pid, {
+      status: 'claim_ready',
+      claim: JSON.stringify({ ...claimOf(c.p), createdAt: claimOf(c.p).createdAt ?? this.now().toISOString(), issuedSnapshot: claimSnapshot(this.db, this.norms, c, this.now()) }),
+    });
     this.db.track(c.p.user_id, 'claim_created', { service: c.incident.service_key, via: 'app' });
     const due = this.cfg.fastReminders ? new Date(this.now().getTime() + 3 * 60_000) : this.quietShift(new Date(this.now().getTime() + this.cfg.receiptCheckDays * 24 * MS_HOUR), c.house.tz);
     this.db.schedule('ask_receipt', pid, c.p.user_id, due);
@@ -1276,7 +1330,7 @@ export class Vernem {
     const calc = calcFor(this.db, this.norms, c, this.now());
     this.db.setCalc(pid, calc);
     const bills = billsOf(c.p);
-    const est = estimate(calc, bills);
+    const est = estimate(calc, bills, claimOf(c.p));
     const tz = c.house.tz;
     const start = new Date(c.p.started_at);
     const end = new Date(c.p.ended_at!);
@@ -1418,7 +1472,7 @@ export class Vernem {
     const c = this.ownCase(userId, pid);
     if (!c) return this.stale(userId);
     // Дата заявления — первая выдача: повторная не меняет дату в документе.
-    const claim = { ...claimOf(c.p), createdAt: claimOf(c.p).createdAt ?? this.now().toISOString() };
+    const claim = { ...claimOf(c.p), createdAt: claimOf(c.p).createdAt ?? this.now().toISOString(), issuedSnapshot: claimSnapshot(this.db, this.norms, c, this.now()) };
     this.db.updateParticipant(pid, { claim: JSON.stringify(claim), status: 'claim_ready' });
     if (save) this.db.savePerson(userId, c.house.id, claim);
 
@@ -1529,7 +1583,7 @@ export class Vernem {
       .listUserParticipants(userId)
       .reduce((s, p) => s + (p.status === 'refunded' && p.refund_amount ? p.refund_amount : 0), 0);
     // Вернули заметно меньше расчёта — предлагаем потребовать остальное.
-    const expected = estimate(calcFor(this.db, this.norms, c, this.now()), billsOf(c.p));
+    const expected = estimate(calcFor(this.db, this.norms, c, this.now()), billsOf(c.p), claimOf(c.p));
     const partial = amount !== null && expected.sum > 0 && amount < expected.sum * 0.9;
     const lines = [`🎉 Исполнитель заплатил за плохую услугу.${total > 0 ? `\nВсего вы вернули с ботом: **${fmtRub(Math.round(total * 100) / 100)}**.` : ''}`];
     if (partial) {
@@ -1553,7 +1607,7 @@ export class Vernem {
     const rows: Btn[][] = list.map((p) => {
       const c = loadCase(this.db, p.id)!;
       const norm = this.norms.services[c.incident.service_key];
-      return [cb(`${ICON[c.incident.service_key]} ${norm.button} · ${formatShort(new Date(p.started_at), c.house.tz).split(' ')[0]} · ${statusTitle(p.status, norm.kind)}`.slice(0, 64), `cs:${p.id}`)];
+      return [cb(`${ICON[c.incident.service_key]} ${norm.button} · ${formatShort(new Date(p.started_at), c.house.tz).split(' ')[0]} · ${statusTitle(p.status, norm.kind, c.incident.service_key)}`.slice(0, 64), `cs:${p.id}`)];
     });
     if (this.cfg.miniAppEnabled) rows.push([app('📱 Открыть в приложении')]);
     rows.push(backRow());
@@ -1571,12 +1625,12 @@ export class Vernem {
     const norm = this.norms.services[c.incident.service_key];
     const tz = c.house.tz;
     const calc = calcFor(this.db, this.norms, c, this.now());
-    const est = estimate(calc, billsOf(c.p));
+    const est = estimate(calc, billsOf(c.p), claimOf(c.p));
     const lines = [
       `${ICON[c.incident.service_key]} **${norm.title}**`,
       c.house.address,
       `с ${formatShort(new Date(c.p.started_at), tz)}${c.p.ended_at ? ` по ${formatShort(new Date(c.p.ended_at), tz)}` : ''}`,
-      `Статус: ${statusTitle(c.p.status, norm.kind)}`,
+      `Статус: ${statusTitle(c.p.status, norm.kind, c.incident.service_key)}`,
     ];
     if (est.sum > 0) lines.push(`Расчёт: ≈ ${fmtRub(est.sum)}`);
     if (c.p.refund_amount) lines.push(`Вернули: ${fmtRub(c.p.refund_amount)}`);

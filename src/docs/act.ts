@@ -4,7 +4,7 @@
 // акт получает силу после собственноручной подписи всех, кто в нём указан.
 
 import type { Norms } from '../calc/norms.ts';
-import { fmtNum } from '../calc/format.ts';
+import { fmtTemp } from '../calc/format.ts';
 import { formatDateTime } from '../calc/time.ts';
 import type { Act, ActSigner, House, Incident, Reading } from '../db/db.ts';
 import type { ClaimDoc } from './claim.ts';
@@ -46,7 +46,7 @@ export function buildActDoc(input: ActDocInput): ClaimDoc {
   if (measured.length) {
     facts.push('Результаты измерений:');
     for (const r of measured) {
-      for (const x of r.readings) facts.push(`— кв. ${r.flat ?? '___'}, ${formatDateTime(new Date(x.at), tz)}: +${fmtNum(x.temp_c, 1)} °C`);
+      for (const x of r.readings) facts.push(`— кв. ${r.flat ?? '___'}, ${formatDateTime(new Date(x.at), tz)}: ${fmtTemp(x.temp_c)}`);
     }
   }
   // Мосжилинспекция: в акте должны быть способ и средства измерения, иначе исполнитель оспорит цифры.

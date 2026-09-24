@@ -27,6 +27,8 @@ export const SERVICE_ORDER: ServiceKey[] = [
 export type InterruptionNorm = {
   monthly_hours?: number;
   single_hours?: number;
+  /** Единовременный лимит в тёплое время (май–сентябрь), если отличается. */
+  single_hours_warm?: number;
   single_hours_note?: string;
   variants?: Record<string, number>;
   default_variant?: string;

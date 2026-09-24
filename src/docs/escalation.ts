@@ -5,10 +5,10 @@
 // Суммы — ориентировочные. Оговорки о трактовках (ч. 6 ст. 157 ЖК — позиция потребителя, ЗоЗПП и ТСЖ)
 // бот говорит жителю в сообщении (bot/escalate.ts), а в документ для адресата не пишет.
 
-import { refundAmount } from '../calc/engine.ts';
+import { coldTariffAmount, refundAmount } from '../calc/engine.ts';
 import { fmtRub } from '../calc/format.ts';
 import { formatDate } from '../calc/time.ts';
-import { buildClaim, docAddress, docFileName, evidenceExtras, executorLine } from './claim.ts';
+import { buildClaim, docAddress, docFileName, evidenceExtras, executorLine, RECEIPT_BLOCK } from './claim.ts';
 import type { ClaimDoc, ClaimInput } from './claim.ts';
 
 const BLANK = '____________________';
@@ -21,6 +21,8 @@ export type EscalationOpts = {
   /** Подтверждённые нарушения того же исполнителя в других домах за 90 дней. */
   executorStats?: { houses: number; incidents: number };
   partnerName?: string | null;
+  /** Жилищная инспекция из карточки дома — адресат жалобы. */
+  gji?: string | null;
 };
 
 /** Сколько положено вернуть по расчёту (только месяцы, где житель указал сумму из квитанции). */
@@ -28,6 +30,11 @@ export function expectedRefund(input: ClaimInput): number | null {
   let sum = 0;
   let known = false;
   for (const m of input.calc.months) {
+    const cold = coldTariffAmount(m.month, m.coldTariffHours ?? 0, input.claim.coldTariff?.[m.month]);
+    if (cold > 0) {
+      known = true;
+      sum += cold;
+    }
     if (m.percent <= 0) continue;
     const bill = input.bills[m.month];
     if (!bill) continue;
@@ -60,11 +67,15 @@ function common(input: ClaimInput, opts: EscalationOpts) {
     // Без «обратился(ась)»: нейтральная формулировка подходит любому заявителю.
     `Заявление о перерасчёте подано исполнителю ${submitted}${incoming}. ${outcome}`,
   ];
+  const partial = !!opts.refund && opts.refund > 0;
   const attachments = [
     'Копия заявления о перерасчёте и подтверждение его направления исполнителю.',
-    'Копия платёжного документа, в котором перерасчёт не отражён.',
+    `Копия платёжного документа, в котором перерасчёт ${partial ? 'отражён не полностью' : 'не отражён'}.`,
     ...extras.attachments,
   ];
+  // Дата документа — день, когда его готовят, а не дата заявления о перерасчёте.
+  const fio = input.claim.fio?.trim() || BLANK;
+  base.signature = `Дата: ${formatDate(input.now, input.house.tz)}        Подпись: __________ / ${fio}`;
   return { base, facts, attachments, m };
 }
 
@@ -106,8 +117,9 @@ export function buildFineDemand(input: ClaimInput, opts: EscalationOpts): ClaimD
     // в требовании к исполнителю они только ослабили бы позицию.
     note: 'Суммы рассчитаны ориентировочно по данным потребителя и Приложению № 1 к Правилам.',
     signature: base.signature,
+    receipt: RECEIPT_BLOCK,
     total: m.fine ?? 0,
-    fileName: docFileName('Требование', input.norms.services[input.incident.service_key].button, new Date(), input.house.tz),
+    fileName: docFileName('Требование', input.norms.services[input.incident.service_key].button, input.now, input.house.tz),
   };
 }
 
@@ -122,10 +134,10 @@ export function buildGjiComplaint(input: ClaimInput, opts: EscalationOpts): Clai
         ]
       : [];
   return {
-    to: ['В Государственную жилищную инспекцию', input.house.city ? `(по месту нахождения дома: ${docAddress(input.house)})` : `${BLANK} (субъект РФ)`],
+    to: [opts.gji ? `В ${opts.gji}` : 'В Государственную жилищную инспекцию', input.house.city ? `(по месту нахождения дома: ${docAddress(input.house)})` : `${BLANK} (субъект РФ)`],
     from: base.from,
     heading: 'ЖАЛОБА',
-    title: 'Жалоба на неисполнение обязанности по перерасчёту платы за коммунальную услугу ненадлежащего качества',
+    title: `Жалоба на неисполнение обязанности по перерасчёту платы за коммунальную услугу, ${input.calc.kind === 'interruption' ? 'предоставленную с перерывами, превышающими допустимую продолжительность' : 'предоставленную ненадлежащего качества'}`,
     facts: [`Исполнитель коммунальной услуги: ${executor}.`, ...facts, ...mass],
     norm: [
       'Исполнитель обязан снизить размер платы при предоставлении коммунальной услуги ненадлежащего качества и (или) с перерывами, превышающими допустимую продолжительность (п. 98, 101 Правил и Приложение № 1 к Правилам предоставления коммунальных услуг, утв. ПП РФ от 06.05.2011 № 354).',
@@ -144,7 +156,7 @@ export function buildGjiComplaint(input: ClaimInput, opts: EscalationOpts): Clai
       : '',
     signature: base.signature,
     total: 0,
-    fileName: docFileName('Жалоба_в_ГЖИ', input.norms.services[input.incident.service_key].button, new Date(), input.house.tz),
+    fileName: docFileName('Жалоба_в_ГЖИ', input.norms.services[input.incident.service_key].button, input.now, input.house.tz),
   };
 }
 
@@ -170,7 +182,7 @@ export function buildConsumerOrgRequest(input: ClaimInput, opts: EscalationOpts)
     note: 'Суммы рассчитаны ориентировочно по данным потребителя и Приложению № 1 к Правилам.',
     signature: base.signature,
     total: 0,
-    fileName: 'Заявление_в_общество_защиты_прав_потребителей.pdf',
+    fileName: docFileName('Заявление_в_общество_потребителей', input.norms.services[input.incident.service_key].button, input.now, input.house.tz),
   };
 }
 

@@ -1,4 +1,4 @@
-import { calculate, refundAmount } from '../calc/engine.ts';
+import { calculate, coldTariffAmount, refundAmount } from '../calc/engine.ts';
 import type { CalcInput, CalcResult, Interval, MonthCalc } from '../calc/engine.ts';
 import { fmtPercent } from '../calc/format.ts';
 import { allowedMonthlyHours } from '../calc/norms.ts';
@@ -21,13 +21,25 @@ export function loadCase(db: Db, participantId: number): CaseBundle | null {
   return { p, incident, house };
 }
 
+/** Лимит перерыва света зависит от дома, а не от дела: ответ «есть лифт» хранится в карточке дома. */
+function variantFor(db: Db, c: CaseBundle): string | null {
+  if (c.incident.service_key !== 'electricity_off') return c.incident.variant;
+  const two = db.houseInfo(c.house).twoPowerSources;
+  return two === undefined ? c.incident.variant : two ? 'two_sources' : 'one_source';
+}
+
 export function calcInputFor(db: Db, norms: Norms, c: CaseBundle, now: Date): CalcInput {
   const norm = norms.services[c.incident.service_key];
   const end = c.p.ended_at ? new Date(c.p.ended_at) : now;
   if (norm.kind === 'interruption') {
-    return { kind: 'interruption', intervals: [{ start: new Date(c.p.started_at), end }], variant: c.incident.variant };
+    return { kind: 'interruption', intervals: [{ start: new Date(c.p.started_at), end }], variant: variantFor(db, c) };
   }
-  const readings = db.listReadings(c.p.id).map((r) => ({ at: new Date(r.at), tempC: r.temp_c }));
+  // Замеры до начала дела не считаем (начало могли исправить позже).
+  const start = new Date(c.p.started_at).getTime();
+  const readings = db
+    .listReadings(c.p.id)
+    .map((r) => ({ at: new Date(r.at), tempC: r.temp_c }))
+    .filter((r) => r.at.getTime() >= start - 60_000);
   if (norm.kind === 'heating_temperature') {
     return { kind: 'heating_temperature', readings, end, corner: !!c.p.corner };
   }
@@ -55,6 +67,12 @@ function earlierOutages(db: Db, c: CaseBundle): Interval[] {
 }
 
 export function calcFor(db: Db, norms: Norms, c: CaseBundle, now: Date): CalcResult {
+  const result = calcRaw(db, norms, c, now);
+  // Отопление (и «холодно», и «нет отопления») летом не подаётся — эти месяцы не считаем.
+  return c.incident.service_key === 'heating_temp' || c.incident.service_key === 'heating_off' ? withoutSummer(result) : result;
+}
+
+function calcRaw(db: Db, norms: Norms, c: CaseBundle, now: Date): CalcResult {
   const norm = norms.services[c.incident.service_key];
   const input = calcInputFor(db, norms, c, now);
   const own = calculate(norm, input, c.house.tz);
@@ -65,7 +83,7 @@ export function calcFor(db: Db, norms: Norms, c: CaseBundle, now: Date): CalcRes
   // так деньги за один и тот же месяц не посчитаются дважды.
   const prev = calculate(norm, { ...input, intervals: earlier }, c.house.tz);
   const all = calculate(norm, { ...input, intervals: [...earlier, ...input.intervals] }, c.house.tz);
-  const allowed = allowedMonthlyHours(norm.interruption, c.incident.variant);
+  const allowed = allowedMonthlyHours(norm.interruption, input.variant);
   const months: MonthCalc[] = own.months.map((m) => {
     const before = prev.months.find((x) => x.month === m.month);
     const total = all.months.find((x) => x.month === m.month);
@@ -74,15 +92,16 @@ export function calcFor(db: Db, norms: Norms, c: CaseBundle, now: Date): CalcRes
     const dates = earlier
       .filter((iv) => monthKey(iv.start, c.house.tz) <= m.month && monthKey(iv.end, c.house.tz) >= m.month)
       .map((iv) => `${formatShort(iv.start, c.house.tz)}–${formatShort(iv.end, c.house.tz)}`);
+    const many = dates.length > 1;
     return {
       ...total,
       percent,
       lines: [
-        `Лимит ${allowed} ч — на весь месяц, поэтому считаю вместе с прошлыми отключениями: ${dates.join(', ')}.`,
+        `Допустимая продолжительность ${allowed} ч установлена на месяц, поэтому ${many ? 'учтены также предыдущие перерывы' : 'учтён также предыдущий перерыв'}: ${dates.join(', ')}.`,
         ...total.lines,
         before.percent > 0
-          ? `Из них ${fmtPercent(before.percent)} уже положены по прошлому отключению — по этому: ${fmtPercent(percent)}.`
-          : `По прошлому отключению снижения не было — всё это по этому отключению: ${fmtPercent(percent)}.`,
+          ? `Из них ${fmtPercent(before.percent)} приходится на ${many ? 'предыдущие перерывы' : 'предыдущий перерыв'} (заявлено отдельно); по данному перерыву — ${fmtPercent(percent)}.`
+          : `По ${many ? 'предыдущим перерывам' : 'предыдущему перерыву'} снижение не положено; по данному перерыву — ${fmtPercent(percent)}.`,
       ],
     };
   });
@@ -105,6 +124,23 @@ export function claimOf(p: Participant): Claim {
   }
 }
 
+/** Июнь–август — отопление не подаётся: эти месяцы в расчёт холода не берём. */
+function withoutSummer(calc: CalcResult): CalcResult {
+  return {
+    ...calc,
+    months: calc.months.map((m) => {
+      const month = Number(m.month.split('-')[1]);
+      return month >= 6 && month <= 8 ? { ...m, percent: 0, lines: ['Летом (июнь–август) отопление не подаётся — этот месяц не считается.'] } : m;
+    }),
+  };
+}
+
+/** Снимок расчёта в момент выдачи заявления: изменился — значит, выданное заявление устарело. */
+export function claimSnapshot(db: Db, norms: Norms, c: CaseBundle, now: Date): string {
+  const calc = calcFor(db, norms, c, now);
+  return JSON.stringify({ s: c.p.started_at, e: c.p.ended_at, m: calc.months.map((m) => [m.month, m.percent]) });
+}
+
 /** Меньше часа «холодной» горячей воды — копейки; заявление ради этого не делаем. */
 export const MIN_COLD_TARIFF_HOURS = 1;
 
@@ -112,21 +148,54 @@ export function hasMoney(calc: CalcResult): boolean {
   return calc.months.some((m) => m.percent > 0 || (m.coldTariffHours ?? 0) >= MIN_COLD_TARIFF_HOURS);
 }
 
-/** Плата за месяц, которую житель уже вписывал в другом деле по той же услуге и дому. */
+/** Строка квитанции для услуги: «нет горячей воды» и «еле тёплая» — одна и та же строка. */
+const BILL_LINE: Record<string, string> = {
+  hot_water_off: 'hot_water', hot_water_temp: 'hot_water', heating_off: 'heating', heating_temp: 'heating',
+  cold_water_off: 'cold_water', electricity_off: 'electricity', gas_off: 'gas', sewerage_off: 'sewerage', waste_off: 'waste',
+};
+
+/** Интервалы других дел жителя по связанной услуге того же дома («нет горячей воды» ↔ «еле тёплая»). */
+export const RELATED_SERVICE: Record<string, string> = { hot_water_off: 'hot_water_temp', hot_water_temp: 'hot_water_off', heating_off: 'heating_temp', heating_temp: 'heating_off' };
+
+/**
+ * Пересечение по времени с делом по связанной услуге: одни и те же часы нельзя оплатить дважды
+ * («воды нет» и «вода еле тёплая» одновременно не бывает). Возвращает описание пересечения или null.
+ */
+export function relatedOverlap(db: Db, norms: Norms, userId: number, houseId: number, service: string, start: Date, end: Date | null, exceptPid?: number): string | null {
+  const related = RELATED_SERVICE[service];
+  if (!related) return null;
+  for (const o of db.listUserParticipants(userId)) {
+    if (o.id === exceptPid) continue;
+    const inc = db.getIncident(o.incident_id);
+    if (!inc || inc.house_id !== houseId || inc.service_key !== related) continue;
+    const oStart = new Date(o.started_at).getTime();
+    const oEnd = o.ended_at ? new Date(o.ended_at).getTime() : Infinity;
+    const myEnd = end ? end.getTime() : Infinity;
+    if (start.getTime() < oEnd && oStart < myEnd) {
+      const tz = db.getHouse(houseId)?.tz ?? 'Europe/Moscow';
+      return `«${norms.services[related].button}» (${formatShort(new Date(o.started_at), tz)}${o.ended_at ? `–${formatShort(new Date(o.ended_at), tz)}` : ', ещё не закончилось'})`;
+    }
+  }
+  return null;
+}
+
+/** Плата за месяц, которую житель уже вписывал в другом деле по той же строке квитанции и дому. */
 function billHints(db: Db, c: CaseBundle): Record<string, number> {
   const out: Record<string, number> = {};
   for (const o of db.listUserParticipants(c.p.user_id)) {
     if (o.id === c.p.id) continue;
     const inc = db.getIncident(o.incident_id);
-    if (!inc || inc.service_key !== c.incident.service_key || inc.house_id !== c.incident.house_id) continue;
+    if (!inc || inc.house_id !== c.incident.house_id || BILL_LINE[inc.service_key] !== BILL_LINE[c.incident.service_key]) continue;
     for (const [month, bill] of Object.entries(billsOf(o))) if (!(month in out)) out[month] = bill;
   }
   return out;
 }
 
-export function estimate(calc: CalcResult, bills: Record<string, number>): { sum: number; complete: boolean } {
+export function estimate(calc: CalcResult, bills: Record<string, number>, claim?: Claim): { sum: number; complete: boolean } {
   let sum = 0;
   let complete = true;
+  // Часы «по тарифу холодной воды» — если житель вписал объём и тарифы.
+  for (const m of calc.months) sum += coldTariffAmount(m.month, m.coldTariffHours ?? 0, claim?.coldTariff?.[m.month]);
   for (const m of calc.months) {
     if (m.percent <= 0) continue;
     const bill = bills[m.month];
@@ -158,8 +227,16 @@ export function claimInputFor(db: Db, norms: Norms, c: CaseBundle, now: Date): C
   };
 }
 
-export function claimDocFor(db: Db, norms: Norms, c: CaseBundle, now: Date): ClaimDoc {
-  const doc = buildClaim(claimInputFor(db, norms, c, now));
+export function claimDocFor(db: Db, norms: Norms, c: CaseBundle, now: Date, extra?: number): ClaimDoc {
+  const input = claimInputFor(db, norms, c, now);
+  // Заявление на другую квартиру: та же история, свои квартира, лицевой счёт и плата.
+  const flat = extra !== undefined ? input.claim.extraFlats?.[extra] : undefined;
+  if (flat) {
+    input.claim = { ...input.claim, flat: flat.flat, account: flat.account, coldTariff: undefined };
+    input.bills = flat.bills;
+  }
+  const doc = buildClaim(input);
+  if (flat) doc.fileName = doc.fileName?.replace(/^Заявление_/, `Заявление_кв${flat.flat.replace(/[^\dА-Яа-яA-Za-z]/g, '')}_`);
   if (c.incident.demo) doc.note = `ДЕМОНСТРАЦИОННЫЕ ДАННЫЕ: не является реальным заявлением. ${doc.note}`;
   // Адрес УК из карточки дома — если заявление адресовано именно ей.
   const info = db.houseInfo(c.house);
@@ -175,14 +252,16 @@ export function claimTextFor(db: Db, norms: Norms, c: CaseBundle, now: Date): st
 }
 
 /** Статус по-человечески: для холода и еле тёплой воды «отключения» нет — следим за температурой. */
-export function statusTitle(status: ParticipantStatus, kind: string): string {
+export function statusTitle(status: ParticipantStatus, kind: string, service?: string): string {
+  if (status === 'tracking' && service === 'waste_off') return 'Слежу, пока не вывезут';
   if (status === 'tracking' && kind !== 'interruption') return 'Слежу за температурой';
+  if (status === 'ended' && kind !== 'interruption') return 'Стало нормально — осталось скачать заявление';
   return STATUS_TITLE[status];
 }
 
 export const STATUS_TITLE: Record<ParticipantStatus, string> = {
   tracking: 'Слежу за отключением',
-  ended: 'Услугу восстановили — нужен расчёт',
+  ended: 'Починили — осталось скачать заявление',
   claim_ready: 'Заявление готово',
   refunded: 'Перерасчёт получен',
   refused: 'Перерасчёт не сделали',
@@ -219,14 +298,26 @@ export type CaseSummary = {
   act: { status: Act['status']; residents: number; chair: boolean; mine: boolean; initiator: boolean } | null;
   photos: number;
   inspection: Participant['inspection'];
+  /** Заявление уже выдавали, а расчёт или время с тех пор изменились. */
+  claimOutdated: boolean;
+  extraFlats: { flat: string; account?: string; bills: Record<string, number>; estimate: number }[];
 };
+
+function claimOutdated(db: Db, norms: Norms, c: CaseBundle, now: Date): boolean {
+  const snap = claimOf(c.p).issuedSnapshot;
+  if (!snap || !c.p.ended_at) return false;
+  return snap !== claimSnapshot(db, norms, c, now);
+}
 
 export function summarize(db: Db, norms: Norms, c: CaseBundle, now: Date): CaseSummary {
   const norm = norms.services[c.incident.service_key];
   const calc = calcFor(db, norms, c, now);
   const bills = billsOf(c.p);
-  const est = estimate(calc, bills);
+  const claim = claimOf(c.p);
+  const est = estimate(calc, bills, claim);
   const hints = billHints(db, c);
+  // Заявления на другие квартиры в этом доме — со своей платой из квитанции.
+  const extraFlats = (claim.extraFlats ?? []).map((f) => ({ ...f, estimate: estimate(calc, f.bills).sum }));
   return {
     id: c.p.id,
     service: c.incident.service_key,
@@ -236,10 +327,16 @@ export function summarize(db: Db, norms: Norms, c: CaseBundle, now: Date): CaseS
     startedAt: c.p.started_at,
     endedAt: c.p.ended_at,
     status: c.p.status,
-    statusTitle: statusTitle(c.p.status, norm.kind),
+    statusTitle: statusTitle(c.p.status, norm.kind, c.incident.service_key),
     kind: norm.kind,
     evidence: c.incident.evidence,
-    adsNumber: c.p.own_ads_number || c.incident.ads_number,
+    // Повторный звонок первого жителя — показываем оба номера, первый не теряем.
+    adsNumber:
+      c.p.role === 'reporter' && c.p.own_ads_number && c.incident.ads_number && c.p.own_ads_number !== c.incident.ads_number
+        ? `${c.incident.ads_number}, повторно № ${c.p.own_ads_number}`
+        : c.p.own_ads_number || c.incident.ads_number,
+    claimOutdated: claimOutdated(db, norms, c, now),
+    extraFlats,
     role: c.p.role,
     neighbours: db.listParticipants(c.incident.id).length - 1,
     demo: !!c.incident.demo,
@@ -289,5 +386,7 @@ export function actDocFor(db: Db, norms: Norms, actId: number, now: Date): Claim
     const p = db.getParticipantFor(incident.id, s.user_id);
     return { flat: s.flat, readings: p ? db.listReadings(p.id) : [] };
   });
-  return buildActDoc({ norms, incident, house: db.getHouse(incident.house_id)!, act, signers, readings, now });
+  const doc = buildActDoc({ norms, incident, house: db.getHouse(incident.house_id)!, act, signers, readings, now });
+  if (incident.demo) doc.note = `ДЕМОНСТРАЦИОННЫЕ ДАННЫЕ: не является реальным актом. ${doc.note}`;
+  return doc;
 }

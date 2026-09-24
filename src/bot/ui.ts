@@ -10,10 +10,10 @@ export const ICON: Record<ServiceKey, string> = {
   hot_water_off: '🚿',
   hot_water_temp: '🌡',
   heating_temp: '🥶',
-  heating_off: '🔥',
+  heating_off: '❄️',
   cold_water_off: '🚰',
   electricity_off: '💡',
-  gas_off: '🔵',
+  gas_off: '🔥',
   sewerage_off: '🚽',
   waste_off: '🗑',
 };

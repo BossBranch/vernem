@@ -8,7 +8,7 @@
 import type { Alert, ExecutorType, House, HouseInfo, Incident } from '../db/db.ts';
 import type { ServiceKey } from '../calc/norms.ts';
 import { POPULAR_CITIES, resolveCity } from '../calc/cities.ts';
-import { plural } from '../calc/format.ts';
+import { innProblem, plural } from '../calc/format.ts';
 import { formatDate, formatShort } from '../calc/time.ts';
 import type { Btn } from './types.ts';
 import type { Draft, Vernem } from './core.ts';
@@ -295,7 +295,8 @@ export async function onHouseInfoText(bot: Vernem, userId: number, text: string,
   if (!h) return bot.stale(userId);
   const field = INFO_FIELDS[data.idx];
   const value = clean(text).replace(/\s+/g, ' ').slice(0, 150);
-  if (field.key === 'ukInn' && !/^\d{10}(\d{2})?$/.test(value)) return bot.send(userId, { text: 'ИНН — 10 цифр (у ИП — 12).', buttons: [[cb('Пропустить', `hsi:${h.id}:${data.idx}`)]] });
+  const innErr = field.key === 'ukInn' ? innProblem(value) : null;
+  if (innErr) return bot.send(userId, { text: `${innErr}.`, buttons: [[cb('Пропустить', `hsi:${h.id}:${data.idx}`)]] });
   // Телефон видят все соседи и нажимают «позвонить» — только цифры, иначе ссылка не сработает.
   if (field.key === 'adsPhone' && (value.replace(/\D/g, '').length < 3 || /[^\d\s+()\-.]/.test(value))) {
     return bot.send(userId, { text: 'Телефон — цифрами, например +7 495 123-45-67 или 112.', buttons: [[cb('Пропустить', `hsi:${h.id}:${data.idx}`)]] });

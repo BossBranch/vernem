@@ -15,8 +15,8 @@
   var me = null;
 
   var SERVICE_ICON = {
-    hot_water_off: '🚿', hot_water_temp: '🌡', heating_temp: '🥶', heating_off: '🔥', cold_water_off: '🚰',
-    electricity_off: '💡', gas_off: '🔵', sewerage_off: '🚽', waste_off: '🗑'
+    hot_water_off: '🚿', hot_water_temp: '🌡', heating_temp: '🥶', heating_off: '❄️', cold_water_off: '🚰',
+    electricity_off: '💡', gas_off: '🔥', sewerage_off: '🚽', waste_off: '🗑'
   };
   /** Что значит каждая плитка — чтобы «Холодно в квартире» не путали с «Нет отопления». */
   var SERVICE_DESC = {
@@ -45,6 +45,7 @@
     hot_water_off: 'горячую воду', hot_water_temp: 'горячую воду', heating_temp: 'отопление', heating_off: 'отопление',
     cold_water_off: 'холодную воду', electricity_off: 'электричество', gas_off: 'газ', sewerage_off: 'водоотведение', waste_off: 'вывоз мусора'
   };
+  var MONTHS_PREP = ['январе', 'феврале', 'марте', 'апреле', 'мае', 'июне', 'июле', 'августе', 'сентябре', 'октябре', 'ноябре', 'декабре'];
   var MONTHS_GEN = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
   var MONTHS = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
   var ACT_STATUS = { collecting: 'ждёт подписей', chair: 'ждёт подписей', ready: 'ждёт подписей', signed: 'подписан' };
@@ -87,10 +88,34 @@
     var digits = String(phone || '').replace(/[^\d+]/g, '');
     return /[^\d\s+()\-.]/.test(phone) || digits.replace(/\D/g, '').length < 3 ? null : 'tel:' + digits;
   }
+  /** Сумма как на сервере: «1 250,50», «1.250,50», «1250.5»; иначе null. */
   function parseMoney(s) {
-    var v = parseFloat(String(s || '').replace(/\s/g, '').replace(',', '.'));
-    return Number.isFinite(v) ? v : null;
+    var t = String(s || '').toLowerCase().replace(/руб\.?|р\.?|₽/g, '').replace(/[\s\u00a0]/g, '');
+    if (t.indexOf(',') >= 0 && t.indexOf('.') >= 0) t = t.replace(/\./g, '');
+    t = t.replace(',', '.');
+    if (!/^\d+(\.\d{1,2})?$/.test(t)) return null;
+    var v = Number(t);
+    return v > 0 ? v : null;
   }
+  /** Снижение платы — вниз до копеек, как в заявлении (оценка снизу). */
+  function refundOf(bill, percent) { return Math.floor(Math.round(bill * 100) * Math.min(100, percent) / 100 + 1e-9) / 100; }
+  /** Рубли за часы, когда горячая вода была ниже +40 °C, — как на сервере. */
+  function coldAmount(month, hours, ct) {
+    if (!ct || !(hours >= 1)) return 0;
+    var p = month.split('-').map(Number);
+    var monthHours = new Date(p[0], p[1], 0).getDate() * 24;
+    return Math.floor(ct.volume * Math.min(1, hours / monthHours) * Math.max(0, ct.hot - ct.cold) * 100 + 1e-9) / 100;
+  }
+  function fmtHours(h) {
+    var min = Math.round(h * 60), d = Math.floor(min / 1440), hh = Math.floor((min % 1440) / 60), mm = min % 60;
+    var parts = [];
+    if (d) parts.push(d + '\u00a0сут');
+    if (hh) parts.push(hh + '\u00a0ч');
+    if (mm && !d) parts.push(mm + '\u00a0мин');
+    return parts.join(' ') || '0\u00a0мин';
+  }
+  function num(s) { var t = String(s || '').replace(/\s/g, '').replace(',', '.'); return /^\d+(\.\d+)?$/.test(t) ? Number(t) : null; }
+  function fmtTemp(t) { return (t < 0 ? '−' : '+') + String(Math.abs(t)).replace('.', ',') + '\u00a0°C'; }
   function haptic(type) { try { WebApp && WebApp.HapticFeedback.notificationOccurred(type); } catch (e) { /* не везде есть */ } }
   function track(name) { api('POST', '/api/track', { name: name }).catch(function () {}); }
   function $(id) { return document.getElementById(id); }
@@ -172,8 +197,18 @@
   /** Скачать файл по ссылке: в MAX — нативно, в браузере — переходом (ответ с attachment не уводит со страницы). */
   function download(url, fileName) {
     if (WebApp && WebApp.downloadFile && initData) return Promise.resolve(WebApp.downloadFile(url, fileName));
-    location.href = url;
-    return Promise.resolve();
+    // В браузере — через blob: если ссылка устарела, покажем ошибку, а не страницу с JSON.
+    return fetch(url).then(function (r) {
+      if (!r.ok) return r.json().catch(function () { return {}; }).then(function (d) { throw new Error(d.error || 'Не удалось скачать файл'); });
+      return r.blob();
+    }).then(function (blob) {
+      var a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = fileName || 'документ.pdf';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function () { URL.revokeObjectURL(a.href); a.parentNode.removeChild(a); }, 2000);
+    });
   }
 
   /** Поделиться ссылкой: системное меню телефона, иначе — копия в буфер обмена. */
@@ -214,7 +249,9 @@
     root.innerHTML = '<p class="state">Загружаю…</p>';
     Promise.all([loadMe(), api('GET', '/api/cases')]).then(function (res) {
       var cases = res[1].cases;
-      var pending = cases.filter(function (c) { return c.status === 'claim_ready'; }).reduce(function (s, c) { return s + c.estimate; }, 0);
+      var pending = cases.filter(function (c) { return c.status === 'claim_ready'; }).reduce(function (s, c) {
+        return s + c.estimate + (c.extraFlats || []).reduce(function (x, f) { return x + f.estimate; }, 0);
+      }, 0);
       var html = '<h1>Вернём</h1><p class="lead">Отключили воду, свет или в квартире холодно — по закону положено снизить плату. Помогу получить эти деньги.</p>';
       html += '<button class="btn primary big" id="report">🚨 Сообщить о проблеме</button>';
 
@@ -225,17 +262,22 @@
 
       html += '<h2 class="section">Мои дела</h2>';
       if (cases.length) {
+        // Сверху — то, что требует действий; закрытые дела — в архиве.
+        var active = cases.filter(function (c) { return c.status !== 'refunded' && c.status !== 'closed'; });
+        var archive = cases.filter(function (c) { return c.status === 'refunded' || c.status === 'closed'; });
         html += '<ul class="ledger">' +
           '<li class="main"><span class="label">Вернули</span><span class="dots"></span><span class="sum">' + rub(me.refunded) + '</span></li>' +
-          (pending > 0 ? '<li class="sub"><span class="label">Положено по готовым заявлениям</span><span class="dots"></span><span class="sum">≈ ' + rub(Math.round(pending * 100) / 100) + '</span></li>' : '') +
-          '</ul><ul class="cases">' + cases.map(caseRow).join('') + '</ul>';
+          (pending > 0 ? '<li class="sub"><span class="label">Положено по готовым заявлениям</span><span class="sum">≈ ' + rub(Math.round(pending * 100) / 100) + '</span></li>' : '') +
+          '</ul>' +
+          (active.length ? '<ul class="cases">' + active.map(caseRow).join('') + '</ul>' : '<p class="muted">Открытых дел нет.</p>') +
+          (archive.length ? '<details class="more archive"><summary>Архив: ' + archive.length + ' ' + plural(archive.length, ['дело', 'дела', 'дел']) + '</summary><ul class="cases">' + archive.map(caseRow).join('') + '</ul></details>' : '');
       } else {
         html += '<p class="muted">Пока пусто.</p>';
       }
       html += '<details class="sheet how"' + (cases.length ? '' : ' open') + '><summary>Как это работает</summary><ol class="steps">' +
-        '<li><b>Отключили</b> — нажмите «Сообщить о проблеме» и позвоните в аварийную службу: номер заявки — главное доказательство.</li>' +
-        '<li><b>Починили</b> — нажмите «Починили», я посчитаю, сколько вам должны вернуть по закону.</li>' +
-        '<li><b>Заявление</b> — скачайте его и отдайте в УК. Когда придёт следующая квитанция — отметьте, вернули ли деньги.</li>' +
+        '<li><b>Отключили или холодно</b> — нажмите «Сообщить о проблеме» и позвоните в аварийную службу: номер заявки — главное доказательство. Не дозвонились — поможет акт с соседями.</li>' +
+        '<li><b>Починили</b> (стало тепло, вывезли мусор) — отметьте это, я посчитаю, сколько вам должны вернуть по закону.</li>' +
+        '<li><b>Заявление</b> — скачайте его и отдайте той организации, что в шапке. Когда придёт следующая квитанция — отметьте, вернули ли деньги.</li>' +
         '</ol></details>';
       html += '<footer><p>Нормы: Приложение № 1 к ПП РФ № 354, проверены ' + esc(me.normsCheckedAt.split('-').reverse().join('.')) +
         '. Расчёт ориентировочный, итог считает УК.</p><button id="delme">Удалить все мои данные</button><div id="delBox"></div></footer>';
@@ -262,11 +304,12 @@
 
   function caseRow(c) {
     var sum = c.status === 'refunded' ? (c.refundAmount ? rub(c.refundAmount) : 'сумма не указана') : c.estimate > 0 ? '≈ ' + rub(c.estimate) : '';
+    var less = c.status === 'refunded' && c.refundAmount && c.estimate > 0 && c.refundAmount < c.estimate * 0.9;
     return '<li><button class="case" data-id="' + c.id + '" data-tone="' + (TONE[c.status] || '') + '">' +
       '<span class="title">' + (SERVICE_ICON[c.service] || '') + ' ' + esc(c.serviceButton || c.serviceTitle) + '</span>' +
       '<span class="amount">' + esc(sum) + '</span>' +
       '<span class="meta">' + esc(c.address) + ' · с ' + esc(when(c.startedAt, c.tz)) + '</span>' +
-      '<span class="status">' + esc(c.statusTitle) + (c.demo ? '<span class="demo-tag">демо</span>' : '') + '</span>' +
+      '<span class="status">' + esc(c.statusTitle) + (less ? ' · вернули меньше положенного' : '') + (c.claimOutdated ? ' · ⚠️ заявление устарело' : '') + (c.demo ? '<span class="demo-tag">демо</span>' : '') + '</span>' +
       '</button></li>';
   }
 
@@ -314,7 +357,7 @@
       var box = $('cityBox');
       if (cityName) {
         box.innerHTML = '<div class="picked-row"><span class="picked">🏙 ' + esc(cityName) + '</span><button class="linklike" id="cityChange">Изменить</button></div>';
-        $('cityChange').onclick = function () { cityName = ''; drawCity(); $('cityQ').focus(); };
+        $('cityChange').onclick = function () { cityName = ''; q.value = ''; drawCity(); $('cityQ').focus(); };
         q.disabled = false;
         q.placeholder = 'Например: Садовая 10';
         q.oninput();
@@ -350,7 +393,8 @@
       found.forEach(function (c) { items.push('<li><button class="result" data-city="' + esc(c) + '">🏙 ' + esc(c) + '</button></li>'); });
       // Похоже на опечатку («Масква») — не предлагаем завести «новый город».
       if (check && check.name && !check.inList && !check.suggestion) items.push('<li><button class="result new" data-city="' + esc(check.name) + '">➕ Другой город: «' + esc(check.name) + '»</button></li>');
-      if (check && !check.name && typed && !items.length) items.push('<li class="muted">Напишите название полностью — хотя бы четыре буквы</li>');
+      if (check && !check.name && typed && !items.length) items.push('<li class="muted">' + (check.latin ? 'Напишите город по-русски, например «Москва»' : 'Напишите название полностью — хотя бы четыре буквы') + '</li>');
+      if (check && check.name && !check.inList && !check.suggestion) items.push('<li class="muted small">Такого города нет в нашем списке — проверьте, правильно ли написано.</li>');
       $('cityResults').innerHTML = items.join('');
       each('#cityResults .result', function (b) { b.onclick = function () { pickCity(b.getAttribute('data-city')); }; });
     }
@@ -367,7 +411,7 @@
       $('searchHint').hidden = false;
       var text = q.value.trim();
       if (!cityName) return;
-      if (text.length < 2) { $('results').innerHTML = ''; return; }
+      if (text.length < 2 || /^\d+$/.test(text)) { $('results').innerHTML = /^\d+$/.test(text) ? '<li class="muted">Добавьте название улицы, например «Садовая 10»</li>' : ''; return; }
       timer = setTimeout(function () {
         api('GET', '/api/houses/search?q=' + encodeURIComponent(text) + '&city=' + encodeURIComponent(cityName)).then(function (r) {
           var items = r.houses.map(function (h) {
@@ -379,6 +423,10 @@
           Array.prototype.forEach.call($('results').querySelectorAll('.result'), function (b) {
             b.onclick = function () {
               chosen = b.getAttribute('data-new') ? { address: text, city: cityName, label: cityName + ', ' + text } : { houseId: Number(b.getAttribute('data-id')), label: b.getAttribute('data-address') };
+              // «Садовая 10 кв 15» — квартиру переносим в своё поле, в адрес дома она не входит.
+              var fm = /(?:^|[\s,])(?:квартира|кв)\.?\s*№?\s*(\d+[а-яa-z]?)/i.exec(text);
+              if (fm && !$('flat').value) $('flat').value = fm[1].toUpperCase();
+              if (fm && chosen.label) chosen.label = chosen.label.replace(fm[0], '').trim();
               $('picked').textContent = '📍 ' + chosen.label;
               $('pick').hidden = false;
               $('searchHint').hidden = true;
@@ -444,8 +492,9 @@
         INFO_FIELDS.slice(0, 3).map(infoField).join('') +
         '<details class="more"' + (INFO_FIELDS.slice(3).some(function (f) { return i[f[0]]; }) ? ' open' : '') + '><summary>Ещё: почта и адрес УК, поставщики, жилинспекция</summary>' +
         INFO_FIELDS.slice(3).map(infoField).join('') + '</details>' +
-        '<p class="muted hint" id="infoStatus">' + (i.updatedAt ? 'Обновлено ' + esc(when(i.updatedAt)) : 'Изменения сохраняются сами, когда вы переходите к следующему полю.') + '</p>' +
-        '<div class="actions"><button class="btn primary" id="saveInfo">Сохранить</button></div></section>';
+        '<label for="twoPower">В доме есть лифт или больше 9 этажей?</label><select id="twoPower"><option value=""' + (i.twoPowerSources === undefined ? ' selected' : '') + '>Не знаю</option><option value="1"' + (i.twoPowerSources === true ? ' selected' : '') + '>Да</option><option value="0"' + (i.twoPowerSources === false ? ' selected' : '') + '>Нет</option></select>' +
+        '<p class="muted hint">От этого зависит, сколько часов без света допустимо: у таких домов обычно два ввода электричества (2 часа), у остальных — 24 часа. Один ответ на весь дом.</p>' +
+        '<p class="muted hint" id="infoStatus">' + (i.updatedAt ? 'Сохранено ' + esc(when(i.updatedAt)) + '. ' : '') + 'Изменения сохраняются сами, когда вы переходите к следующему полю.</p></section>';
 
       html += '<div class="actions"><button class="btn danger" id="remove">Убрать адрес из моего списка</button></div>';
       root.innerHTML = html;
@@ -470,7 +519,12 @@
       };
       // Данные дома сохраняются сами — ушли с экрана, не нажав «Сохранить», ничего не пропадёт.
       var saved = JSON.stringify(infoBody());
-      function infoBody() { var b = {}; INFO_FIELDS.forEach(function (f) { b[f[0]] = $('f_' + f[0]).value.trim() || undefined; }); return b; }
+      function infoBody() {
+        var b = {};
+        INFO_FIELDS.forEach(function (f) { b[f[0]] = $('f_' + f[0]).value.trim() || undefined; });
+        b.twoPowerSources = $('twoPower').value === '' ? null : $('twoPower').value === '1';
+        return b;
+      }
       function saveInfo(btn) {
         var body = infoBody();
         var json = JSON.stringify(body);
@@ -480,12 +534,12 @@
           saved = json;
           clearErrors();
           var info = (res.house && res.house.info) || {};
-          $('infoStatus').textContent = '✓ Сохранено' + (info.updatedAt ? ' ' + when(info.updatedAt) : '');
+          $('infoStatus').textContent = '✓ Сохранено' + (info.updatedAt ? ' ' + when(info.updatedAt) : '') + '. Эти данные попадут в заявления соседей.';
           if (btn) { haptic('success'); track('app_house_info'); toast('Данные дома сохранены — они попадут в заявления соседей'); }
         }).catch(function (e) { showErrors(e, { ukInn: 'f_ukInn', ukEmail: 'f_ukEmail', adsPhone: 'f_adsPhone' }); }).then(done);
       }
       each('[data-info]', function (el) { el.addEventListener('change', function () { saveInfo(null); }); });
-      $('saveInfo').onclick = function () { saveInfo($('saveInfo')); };
+      $('twoPower').addEventListener('change', function () { saveInfo(null); });
       $('remove').onclick = function () {
         if (!confirm('Убрать «' + h.address + '» из вашего списка? Дела по этому адресу сохранятся.')) return;
         api('DELETE', '/api/me/houses/' + h.id).then(function () { toast('Адрес убран'); home(); }).catch(function (e) { toast(e.message); });
@@ -504,13 +558,13 @@
       html += '<label>Где</label><div class="chips" id="houses">' + me.houses.map(function (h) {
         return '<button class="chip' + (st.houseId === h.id ? ' on' : '') + '" data-id="' + h.id + '">📍 ' + esc(h.address) + '</button>';
       }).join('') + '</div>' +
-        '<p class="hint warn" id="whereHint" hidden>👆 Выберите адрес, где случилось</p>';
+        '<p class="hint" id="whereHint" hidden>👆 Выберите адрес, где случилось</p>';
       html += '<label>Что</label><div class="grid" id="services">' + me.services.map(function (s) {
         return '<button class="tile" data-key="' + s.key + '" aria-label="' + esc(s.button) + '">' + (SERVICE_ICON[s.key] || '') + '<span>' + esc(s.button) + '</span></button>';
       }).join('') + '</div><p class="desc" id="serviceDesc" hidden></p>';
       html += '<div id="details" hidden>' +
         '<div id="extra"></div>' +
-        '<section class="sheet"><h2>📞 Аварийная служба</h2><p id="adsHint" class="muted"></p>' +
+        '<section class="sheet"><h2 id="adsTitle">📞 Аварийная служба</h2><p id="adsHint" class="muted"></p>' +
         '<label><input type="radio" name="ev" value="ads" checked> Дозвонились — есть номер заявки</label>' +
         '<label><input type="radio" name="ev" value="written"> Написали обращение (Госуслуги Дом, ГИС ЖКХ)</label>' +
         '<label><input type="radio" name="ev" value="self"> Не дозвонились — докажу актом с соседями</label>' +
@@ -525,6 +579,8 @@
       function evidence() { return root.querySelector('input[name=ev]:checked').value; }
       function refreshEvidence() {
         var ev = evidence();
+        // Сменили вариант — прежняя ошибка про номер больше не относится к делу.
+        if ($('number').getAttribute('aria-invalid')) clearErrors();
         $('numberBox').hidden = ev === 'self';
         $('numberLabel').textContent = ev === 'written' ? 'Номер обращения' : 'Номер заявки';
         // По закону нарушение считается с момента сообщения в аварийную службу — поэтому спрашиваем время звонка.
@@ -559,12 +615,13 @@
             '<p class="muted hint" id="plannedHint" hidden>Плановое летнее отключение законно — снижения платы за него не будет. Отключили дольше объявленного или без объявления — снимите галочку.</p>';
         }
         if (st.service === 'electricity_off') {
-          extra = '<label for="variant">В доме есть лифт или больше 9 этажей?</label><select id="variant"><option value="one_source">Нет или не знаю</option><option value="two_sources">Да</option></select>' +
+          var two = h && h.info && h.info.twoPowerSources;
+          extra = '<label for="variant">В доме есть лифт или больше 9 этажей?</label><select id="variant"><option value="one_source"' + (two ? '' : ' selected') + '>Нет или не знаю</option><option value="two_sources"' + (two ? ' selected' : '') + '>Да</option></select>' +
             '<p class="muted hint">У таких домов обычно два ввода электричества, и без света можно быть не больше 2 часов в месяц, у остальных — 24 часа. Не знаете — посчитаю по минимуму, УК уточнит.</p>';
         }
         if (s && s.kind !== 'interruption') {
           extra = (st.service === 'heating_temp' ? '<label for="corner">Комната</label><select id="corner"><option value="0">Обычная — норма +18 °C</option><option value="1">Угловая (две стены на улицу) — норма +20 °C</option></select>' : '') +
-            '<label for="temp">🌡 Сколько градусов показал термометр</label><input id="temp" inputmode="decimal" placeholder="Например: 16">' +
+            '<label for="temp">🌡 Сколько градусов показал термометр</label><input id="temp" inputmode="decimal" placeholder="' + (st.service === 'heating_temp' ? 'Например: 16' : 'Например: 45') + '">' +
             '<p class="muted hint">' + (st.service === 'heating_temp' ? 'Меряйте в центре комнаты, на высоте около 1 м, вдали от окон и батарей.' : 'Меряйте воду из крана после того, как она стечёт 3 минуты.') + '</p>';
         }
         // Межсезонье: если отопление ещё не включали по графику, денег не будет — говорим сразу.
@@ -575,9 +632,12 @@
         $('extra').innerHTML = extra ? '<section class="sheet">' + extra + '</section>' : '';
         if ($('planned')) $('planned').onchange = function () { $('plannedHint').hidden = !$('planned').checked; };
         var phone = h && h.info && h.info.adsPhone;
-        $('adsHint').innerHTML = phone && telHref(phone)
-          ? 'Позвоните: <a href="' + esc(telHref(phone)) + '">' + esc(phone) + '</a>. Скажите адрес и что случилось, запишите номер заявки — это главное доказательство.'
-          : 'Телефон есть в квитанции. Скажите адрес и что случилось, запишите номер заявки — это главное доказательство.';
+        var waste = st.service === 'waste_off';
+        $('adsTitle').textContent = waste ? '📞 Оператор по вывозу мусора' : '📞 Аварийная служба';
+        var phoneHtml = phone ? (telHref(phone) ? '<a href="' + esc(telHref(phone)) + '">' + esc(phone) + '</a>' : '<b>' + esc(phone) + '</b>') : '';
+        $('adsHint').innerHTML = waste
+          ? 'Позвоните региональному оператору по вывозу мусора — телефон есть в квитанции. Запишите номер обращения — это главное доказательство.'
+          : (phoneHtml ? 'Позвоните: ' + phoneHtml + '.' : 'Телефон есть в квитанции.') + ' Скажите адрес и что случилось, запишите номер заявки — это главное доказательство.';
         refreshEvidence();
       }
       each('#houses .chip', function (b) { b.onclick = function () { st.houseId = Number(b.getAttribute('data-id')); refresh(); }; });
@@ -609,7 +669,8 @@
           if (r.outcome === 'existing') toast('Это у вас уже записано — открыл ваше дело.' + (r.numberSaved ? ' Номер заявки добавил.' : ''));
           else if (r.outcome === 'joined') toast('Соседи уже сообщили об этом — вы присоединились к их делу.' + (r.numberSaved ? ' Ваш номер заявки сохранён.' : ''));
           else toast(r.neighbours > 0 && r.botConnected ? 'Записал. Спрошу соседей в сети: «у вас тоже?»' : 'Записал. Позовите соседей — вместе проще доказать.');
-          location.hash = '#case/' + r.caseId;
+          // Без записи в истории: «назад» из дела ведёт на главную, а не обратно в форму.
+          location.replace(location.pathname + location.search + '#case/' + r.caseId);
         }).catch(function (e) { showErrors(e); }).then(done);
       };
     }).catch(function (e) { showError(e.message, function () { renderReport(houseId); }); });
@@ -648,7 +709,7 @@
       if (c.status === 'tracking') {
         html += '<section class="sheet"><h2>' + esc(END_TITLE[c.service] || 'Починили?') + '</h2><label for="ended">Когда</label><input id="ended" type="datetime-local" value="' + localNow() + '">' +
           '<div class="actions"><button class="btn primary" id="endBtn">' + esc(END_BUTTON[c.service] || '✅ Починили — посчитать деньги') + '</button></div>' +
-          '<p class="muted hint">' + (c.evidence === 'ads' ? 'Позвоните в аварийную службу и скажите, что починили, — так фиксируется время окончания.' : c.evidence === 'written' ? 'Допишите в обращение, когда починили.' : 'Запишите время — оно попадёт в заявление.') + '</p></section>';
+          '<p class="muted hint">' + (c.service === 'waste_off' ? 'Запишите, когда вывезли, — время попадёт в заявление.' : c.evidence === 'ads' ? 'Позвоните в аварийную службу и скажите, что починили, — так фиксируется время окончания.' : c.evidence === 'written' ? 'Допишите в обращение, когда починили.' : 'Запишите время — оно попадёт в заявление.') + '</p></section>';
         if (temp) {
           html += '<section class="sheet"><h2>🌡 Новый замер</h2><p class="muted hint">' + (c.service === 'heating_temp' ? 'Холодно' : 'Вода еле тёплая') + ' несколько дней — меряйте хотя бы раз в день: каждый замер — ещё одно доказательство.</p>' +
             '<div class="row2"><div><label for="newTemp">Градусы</label><input id="newTemp" inputmode="decimal" placeholder="Например: 16"></div>' +
@@ -660,6 +721,9 @@
         html += '<div class="actions"><button class="btn" id="reopen">↩️ Ещё не починили — вернуть в отслеживание</button></div>';
       }
 
+      if (c.claimOutdated) {
+        html += '<p class="note warn">⚠️ После того как вы скачали заявление, расчёт изменился (время или отключения за этот месяц). Старое заявление больше не верно — скачайте новое и подайте его. Дата подачи сбросится: отметьте её заново.</p>';
+      }
       html += moneySection(c);
       if (c.endedAt && (c.status === 'ended' || c.status === 'claim_ready' || c.status === 'refused')) html += claimForm(c);
       if (c.status === 'claim_ready') html += nextSteps(c);
@@ -688,7 +752,7 @@
   function moneySection(c) {
     if (!c.months.length) return '';
     var html = '<section class="sheet" id="money"><h2>Деньги</h2>';
-    if (c.status === 'tracking') html += '<p class="muted">Пока не починили — считаю на сейчас: сумма растёт с каждым часом.</p>';
+    if (c.status === 'tracking') html += '<p class="muted">Пока не починили — считаю на сейчас: процент растёт с каждым часом. Рубли покажу, когда отметите «Починили» и впишете плату из квитанции.</p>';
     html += '<ul class="formula">';
     c.months.forEach(function (m) {
       if (c.months.length > 1) html += '<li class="month">' + esc(monthTitle(m.month)) + '</li>';
@@ -704,6 +768,18 @@
           (!m.bill && m.billHint ? '<p class="muted hint">Подставил из вашего другого дела за этот месяц — проверьте.</p>' : '');
       });
     }
+    if (c.endedAt && c.status !== 'refunded' && c.status !== 'closed') {
+      c.months.filter(function (m) { return m.coldTariffHours >= 1; }).forEach(function (m) {
+        var ct = (c.claim && c.claim.coldTariff && c.claim.coldTariff[m.month]) || {};
+        var mp = m.month.split('-');
+        html += '<div class="cold-box"><p class="hint">В ' + MONTHS_PREP[Number(mp[1]) - 1] + ' ' + mp[0] + ' горячая вода была ниже +40&nbsp;°C ' + fmtHours(m.coldTariffHours) +
+          ' — за эти часы горячая вода оплачивается как холодная. Чтобы посчитать разницу в рублях, впишите из квитанции (необязательно):</p>' +
+          '<label for="ct_vol_' + m.month + '">Горячей воды за месяц, м³</label><input id="ct_vol_' + m.month + '" class="ct" data-month="' + m.month + '" data-k="volume" inputmode="decimal" placeholder="Например: 3,5" value="' + (ct.volume ? String(ct.volume).replace('.', ',') : '') + '">' +
+          '<div class="row2"><div><label for="ct_hot_' + m.month + '">Тариф горячей, ₽/м³</label><input id="ct_hot_' + m.month + '" class="ct" data-month="' + m.month + '" data-k="hot" inputmode="decimal" placeholder="Например: 250" value="' + (ct.hot ? String(ct.hot).replace('.', ',') : '') + '"></div>' +
+          '<div><label for="ct_cold_' + m.month + '">Тариф холодной, ₽/м³</label><input id="ct_cold_' + m.month + '" class="ct" data-month="' + m.month + '" data-k="cold" inputmode="decimal" placeholder="Например: 55" value="' + (ct.cold ? String(ct.cold).replace('.', ',') : '') + '"></div></div>' +
+          '<p class="muted hint">Считаю, как если бы вода расходовалась равномерно, — это оценка. Точную сумму пересчитает исполнитель.</p></div>';
+      });
+    }
     html += '<p class="total" id="liveTotal"' + (c.estimate > 0 ? '' : ' hidden') + '>Положено ≈ ' + rub(c.estimate) + '</p>' +
       '<p class="muted hint" id="liveNote"></p>' +
       '<p class="source muted">Источник: <a href="' + esc(c.basisUrl) + '" data-ext>' + esc(c.basis) + ' к ПП РФ № 354</a>. Итог считает УК.</p></section>';
@@ -716,10 +792,10 @@
     var startLabel = c.evidence === 'ads' ? 'Начало (звонок)' : c.evidence === 'written' ? 'Начало (обращение)' : 'Начало';
     var html = '<section class="sheet"><h2>Что записано</h2><dl class="facts">' +
       '<dt>' + startLabel + '</dt><dd class="num">' + esc(when(c.startedAt, c.tz)) + '</dd>' +
-      '<dt>Окончание</dt><dd class="num">' + (c.endedAt ? esc(when(c.endedAt, c.tz)) : 'ещё не починили') + '</dd>' +
+      '<dt>Окончание</dt><dd class="num">' + (c.endedAt ? esc(when(c.endedAt, c.tz)) : c.service === 'waste_off' ? 'ещё не вывезли' : 'ещё не починили') + '</dd>' +
       '<dt>Доказательство</dt><dd>' + esc(evidenceText(c)) + '</dd>' +
       (c.readings.length ? '<dt>Замеры</dt><dd class="num">' + c.readings.map(function (r) {
-        return '<span class="reading">' + esc(when(r.at, c.tz)) + ': +' + String(r.tempC).replace('.', ',') + '&nbsp;°C' +
+        return '<span class="reading">' + esc(when(r.at, c.tz)) + ': ' + esc(fmtTemp(r.tempC)) +
           (canEditReadings ? ' <button class="reading-del" data-reading="' + r.id + '" aria-label="Удалить замер">✕</button>' : '') + '</span>';
       }).join('') + '</dd>' : '') +
       (c.neighbours > 0 ? '<dt>Соседи</dt><dd>' + c.neighbours + '</dd>' : '') +
@@ -746,7 +822,8 @@
       return html + '<p>✅ Акт подписан ' + (a.chair ? 'жителями и председателем совета дома' : 'жителями') + '. ' + (claimExists ? 'Он указан в приложениях к заявлению — приложите его копию.' : 'Он попадёт в приложения к заявлению.') + '</p>' +
         '<div class="actions"><button class="btn" id="actPdf">📄 Акт (PDF)</button></div>' + (a.initiator ? '<button class="linklike" id="actUnsigned">Снять отметку «подписан»</button>' : '') + '</section>';
     }
-    html += '<p class="muted hint">Акт доказывает, что услуги не было. Распечатайте его и попросите расписаться двух и более соседей и председателя совета дома. Потом акт прикладывают к заявлению.</p>';
+    var what = c.service === 'heating_temp' ? 'в квартире было холодно' : c.service === 'hot_water_temp' ? 'вода была еле тёплой' : 'услуги не было';
+    html += '<p class="muted hint">Акт доказывает, что ' + what + '. Распечатайте его и попросите расписаться двух и более соседей и председателя совета дома. Потом акт прикладывают к заявлению.</p>';
     if (a && a.mine) {
       var s = c.signer || {};
       html += '<p>Вы в акте: <b>' + esc(s.fio || '') + '</b>' + (s.flat ? ', кв. ' + esc(s.flat) : '') + ' <button class="linklike" id="actEdit">✏️ Исправить</button></p>' +
@@ -770,25 +847,48 @@
 
   function claimForm(c) {
     var cl = c.claim || {};
+    // Вывоз мусора оплачивают региональному оператору, а не УК.
+    if (!cl.executorType) cl.executorType = c.service === 'waste_off' ? 'rop' : 'uk';
     var opt = function (v, t) { return '<option value="' + v + '"' + (cl.executorType === v ? ' selected' : '') + '>' + t + '</option>'; };
     var s = c.signer;
     var mismatch = s && s.signed && cl.fio && (cl.fio.trim() !== (s.fio || '').trim() || (cl.flat || '') !== (s.flat || ''));
     return '<section class="sheet"><h2>Заявление на перерасчёт</h2>' +
       '<p class="muted hint">💰 Заявление — требование вернуть деньги. Подписываете вы. Акт с соседями, если есть, прикладывается к нему.</p>' +
-      '<label for="executor">Кому подаёте — кому платите за эту услугу</label><input id="executor" autocomplete="off" value="' + esc(cl.executor || '') + '" placeholder="Например: ООО «УК Пример»">' +
+      '<label for="executor">Кому подаёте — кому платите за эту услугу</label><input id="executor" autocomplete="off" value="' + esc(cl.executor || '') + '" placeholder="Название из квитанции">' +
       '<p class="muted hint">В квитанции найдите строку этой услуги — рядом указан получатель платежа. За тепло и горячую воду часто платят ресурсоснабжающей организации (например, «Теплосеть»), за остальное — УК. Не уверены — пишите УК.</p>' +
       '<label for="etype">Кто это</label><select id="etype">' + opt('uk', 'УК или ТСЖ') + opt('rso', 'Ресурсоснабжающая организация') + opt('rop', 'Вывоз мусора (региональный оператор)') + opt('unknown', 'Не знаю') + '</select>' +
       '<label for="inn">ИНН получателя</label><input id="inn" inputmode="numeric" value="' + esc(cl.executorInn || '') + '" placeholder="10 цифр из квитанции">' +
-      '<label for="fio">Ваши ФИО</label><input id="fio" autocomplete="name" value="' + esc(cl.fio || '') + '">' +
+      '<label for="fio">Ваши ФИО полностью</label><input id="fio" autocomplete="name" value="' + esc(cl.fio || '') + '" placeholder="Фамилия Имя Отчество">' +
       (mismatch ? '<p class="note warn">В подписанном акте вы — ' + esc(s.fio) + (s.flat ? ', кв. ' + esc(s.flat) : '') + '. В заявлении должно быть так же.</p>' : '') +
       '<div class="row2"><div><label for="flat">Квартира</label><input id="flat" value="' + esc(cl.flat || '') + '"></div>' +
       '<div><label for="account">Лицевой счёт</label><input id="account" value="' + esc(cl.account || '') + '"></div></div>' +
-      '<p class="muted hint">Пустые поля можно вписать от руки после печати.</p>' +
+      '<p class="muted hint">Пустые поля можно вписать от руки после печати. Всё, что вы вписали, сохраняется само.</p><p class="muted hint" id="claimStatus"></p>' +
       '<label><input type="checkbox" id="remember"' + (c.savedPersonal ? ' checked' : '') + '> Запомнить ФИО, квартиру и лицевой счёт для следующих заявлений по этому адресу</label>' +
       '<div class="actions"><button class="btn primary" id="pdf">📄 ' + (c.status === 'ended' ? 'Скачать заявление (PDF)' : 'Скачать заявление ещё раз') + '</button>' +
       '<button class="btn" id="scan" type="button">📷 Заполнить из QR квитанции</button></div>' +
       '<p class="muted hint">Подавать тому, кому адресовано заявление: лично (два экземпляра) или через «Госуслуги Дом» / ГИС ЖКХ с PDF во вложении.</p>' +
+      extraFlatsBlock(c) +
       '</section>';
+  }
+
+  /** Вторая (третья…) квартира в этом же доме: у каждой — своё заявление со своим счётом и платой. */
+  function extraFlatsBlock(c) {
+    var list = c.extraFlats || [];
+    var paid = c.months.filter(function (m) { return m.percent > 0; });
+    var html = '<details class="more" id="xfBox"' + (list.length ? ' open' : '') + '><summary>Ещё квартира в этом доме?</summary>' +
+      '<p class="muted hint">По каждой квартире — своё заявление: с её лицевым счётом и платой из её квитанции. Всё остальное — как в заявлении выше.</p>';
+    list.forEach(function (f, i) {
+      html += '<div class="xf-row"><span><b>кв. ' + esc(f.flat) + '</b>' + (f.estimate > 0 ? ' · ≈ ' + rub(f.estimate) : '') + '</span>' +
+        '<span><button class="btn" data-xf-pdf="' + i + '">📄 Заявление</button> <button class="linklike danger-link" data-xf-del="' + i + '">Удалить</button></span></div>';
+    });
+    html += '<div class="row2"><div><label for="xf_flat_new">Квартира</label><input id="xf_flat_new" maxlength="10"></div>' +
+      '<div><label for="xf_acc_new">Лицевой счёт</label><input id="xf_acc_new" maxlength="40"></div></div>' +
+      paid.map(function (m) {
+        return '<label for="xf_bill_new_' + m.month + '">Начислено по этой квартире за ' + esc(BILL_NAME[c.service] || 'услугу') + ' за ' + esc(monthTitle(m.month)) + ', ₽</label>' +
+          '<input id="xf_bill_new_' + m.month + '" class="xf-bill" data-month="' + m.month + '" inputmode="decimal">';
+      }).join('') +
+      '<div class="actions"><button class="btn" id="xfAdd">➕ Добавить квартиру</button></div></details>';
+    return html;
   }
 
   /** Куда нести заявление — той организации, что в шапке, а не всегда в УК. */
@@ -833,10 +933,10 @@
     return '<section class="sheet"><h2>Что дальше</h2>' + whereToSubmit(c) +
       '<p><b>2. Отметьте, когда подали</b> — дата и входящий номер попадут в документы, если деньги не вернут.</p>' + submittedForm(c) +
       '<p class="step3"><b>3. Проверьте квитанцию за ' + esc(monthTitle(monthKeyOf(base))) + '</b> (придёт в начале следующего месяца) и отметьте, сделали ли перерасчёт.</p>' +
-      '<label for="refundAmount">Сколько вернули по квитанции, ₽ (если знаете)</label><input id="refundAmount" inputmode="decimal" placeholder="Например: 115,20">' +
-      '<div class="actions"><button class="btn primary" id="refundYes">✅ Перерасчёт сделали</button>' +
-      '<button class="btn" id="refundNo"' + (early ? ' disabled' : '') + '>❌ Не сделали</button></div>' +
-      (early ? '<p class="muted hint">«Не сделали» можно отметить, когда придёт квитанция — не раньше начала ' + esc(MONTHS_GEN[Number(ready.split('-')[1]) - 1]) + '.</p>' : '') +
+      (early
+        ? '<p class="muted hint">Перерасчёт появится в квитанции, которая придёт в начале ' + esc(MONTHS_GEN[Number(ready.split('-')[1]) - 1]) + '. Тогда и отметьте здесь результат.</p>'
+        : '<label for="refundAmount">Сколько вернули по квитанции, ₽ (если знаете)</label><input id="refundAmount" inputmode="decimal" placeholder="Например: 115,20">' +
+          '<div class="actions"><button class="btn primary" id="refundYes">✅ Перерасчёт сделали</button><button class="btn" id="refundNo">❌ Не сделали</button></div>') +
       '</section>';
   }
 
@@ -875,7 +975,13 @@
     var v = function (id) { var el = $(id); return el ? el.value.trim() : undefined; };
     var bills = {};
     each('.bill', function (el) { bills[el.getAttribute('data-month')] = el.value.trim(); });
-    return { executor: v('executor'), executorInn: v('inn'), executorType: v('etype'), fio: v('fio'), flat: v('flat'), account: v('account'), bills: bills, remember: $('remember') ? $('remember').checked : undefined };
+    var coldTariff = {};
+    each('.ct', function (el) {
+      var m = el.getAttribute('data-month');
+      coldTariff[m] = coldTariff[m] || {};
+      coldTariff[m][el.getAttribute('data-k')] = el.value.trim();
+    });
+    return { coldTariff: coldTariff, executor: v('executor'), executorInn: v('inn'), executorType: v('etype'), fio: v('fio'), flat: v('flat'), account: v('account'), bills: bills, remember: $('remember') ? $('remember').checked : undefined };
   }
 
   function bindCase(c) {
@@ -896,6 +1002,23 @@
       });
     }
 
+    // Введённое сохраняется само — уйти с экрана, не нажав «Скачать», можно без потерь.
+    var autoTimer = null;
+    function autosave() {
+      clearTimeout(autoTimer);
+      autoTimer = setTimeout(function () {
+        if (!dirty || !$('pdf') || c.status === 'refunded') return;
+        save().then(function () {
+          clearErrors();
+          if ($('claimStatus')) $('claimStatus').textContent = '✓ Сохранено';
+        }).catch(function (e) { showErrors(e); });
+      }, 700);
+    }
+    each('#executor, #inn, #etype, #fio, #flat, #account, #remember, .bill, .ct', function (el) {
+      el.addEventListener('change', autosave);
+    });
+    each('.bill, .ct', function (el) { el.addEventListener('input', autosave); });
+
     // Сумма в рублях — сразу, пока житель вписывает начисление из квитанции.
     function liveTotal() {
       var t = $('liveTotal');
@@ -906,11 +1029,17 @@
         if (m.percent <= 0) return;
         var inp = $('bill_' + m.month);
         var bill = inp ? parseMoney(inp.value) : m.bill;
-        if (bill > 0) sum += Math.round(bill * m.percent) / 100;
+        if (bill > 0) sum += refundOf(bill, m.percent);
         else missing.push(monthTitle(m.month));
       });
+      // Часы «по тарифу холодной воды»: объём и тарифы из квитанции.
+      c.months.forEach(function (m) {
+        if (!(m.coldTariffHours >= 1) || !$('ct_vol_' + m.month)) return;
+        var ct = { volume: num($('ct_vol_' + m.month).value), hot: num($('ct_hot_' + m.month).value), cold: num($('ct_cold_' + m.month).value) };
+        if (ct.volume && ct.hot && ct.cold) sum += coldAmount(m.month, m.coldTariffHours, ct);
+      });
       t.hidden = !(sum > 0);
-      t.textContent = 'Положено ≈ ' + rub(Math.round(sum * 100) / 100) + (sum > 0 && missing.length ? ' — пока без ' + missing.join(', ') : '');
+      t.textContent = 'Положено ≈ ' + rub(Math.round(sum * 100) / 100) + (sum > 0 && missing.length ? ' — пока без платы за ' + missing.join(', ') : '');
       var note = $('liveNote');
       if (note) {
         var anyInputs = !!root.querySelector('.bill');
@@ -918,7 +1047,40 @@
         note.hidden = !note.textContent;
       }
     }
-    each('.bill', function (el) { el.addEventListener('input', liveTotal); });
+    each('.bill, .ct', function (el) { el.addEventListener('input', liveTotal); });
+
+    // Другие квартиры в доме: добавить, скачать заявление, удалить.
+    function saveFlats(list, errMap) {
+      return api('PUT', '/api/cases/' + c.id + '/extra-flats', { flats: list }).then(function () { renderCase(c.id); }).catch(function (e) { showErrors(e, errMap); });
+    }
+    var baseFlats = (c.extraFlats || []).map(function (f) { return { flat: f.flat, account: f.account, bills: f.bills }; });
+    if ($('xfAdd')) $('xfAdd').onclick = function () {
+      var flat = $('xf_flat_new').value.trim();
+      if (!flat) { showErrors(fieldErr('xf_flat_new', 'Номер квартиры')); return; }
+      var bills = {};
+      each('.xf-bill', function (el) { if (el.value.trim()) bills[el.getAttribute('data-month')] = el.value.trim(); });
+      var n = baseFlats.length;
+      var map = {};
+      map['xf_flat_' + n] = 'xf_flat_new';
+      c.months.forEach(function (m) { map['xf_bill_' + n + '_' + m.month] = 'xf_bill_new_' + m.month; });
+      saveFlats(baseFlats.concat([{ flat: flat, account: $('xf_acc_new').value.trim() || undefined, bills: bills }]), map).then(function () { toast('Квартира добавлена — скачайте заявление на неё'); });
+    };
+    each('[data-xf-del]', function (b) {
+      b.onclick = function () {
+        var i = Number(b.getAttribute('data-xf-del'));
+        if (!confirm('Убрать кв. ' + baseFlats[i].flat + ' из этого дела?')) return;
+        saveFlats(baseFlats.filter(function (_, j) { return j !== i; }));
+      };
+    });
+    each('[data-xf-pdf]', function (b) {
+      b.onclick = function () {
+        var done = busy(b, 'Готовлю…');
+        (dirty ? save() : Promise.resolve()).then(function () {
+          return api('POST', '/api/cases/' + c.id + '/pdf-link', { extra: Number(b.getAttribute('data-xf-pdf')) });
+        }).then(function (r) { return download(r.url, r.fileName).then(function () { toast('Заявление на эту квартиру скачивается'); }); })
+          .catch(function (e) { toast(e.message); }).then(done);
+      };
+    });
     liveTotal();
 
     var endBtn = $('endBtn');
@@ -967,7 +1129,7 @@
     var reopenBtn = $('reopen');
     if (reopenBtn) reopenBtn.onclick = function () {
       var done = busy(reopenBtn, 'Возвращаю…');
-      api('POST', '/api/cases/' + c.id + '/reopen').then(function () {
+      (dirty && $('pdf') ? save().catch(function () {}) : Promise.resolve()).then(function () { return api('POST', '/api/cases/' + c.id + '/reopen'); }).then(function () {
         toast('Вернул в отслеживание — отметьте, когда действительно починят');
         renderCase(c.id);
       }).catch(function (e) { toast(e.message); done(); });
@@ -976,7 +1138,8 @@
     var delBtn = $('deleteCase');
     if (delBtn) delBtn.onclick = function () {
       var extra = c.status === 'refunded' && c.refundAmount ? ' Сумма ' + rub(c.refundAmount) + ' уйдёт из итога «Вернули».' : '';
-      if (!confirm('Удалить это дело вместе с расчётом и заявлением? Отменить будет нельзя.' + extra)) return;
+      var what = c.status === 'tracking' || c.status === 'ended' ? 'вместе с расчётом' : 'вместе с расчётом и заявлением';
+      if (!confirm('Удалить это дело ' + what + '? Отменить будет нельзя.' + extra)) return;
       api('DELETE', '/api/cases/' + c.id).then(function () { toast('Дело удалено'); home(); }).catch(function (e) { toast(e.message); });
     };
 
@@ -1029,8 +1192,8 @@
         track('app_pdf');
         return download(r.url, r.fileName).then(function () {
           toast('Заявление скачивается');
-          // Статус дела сменился на «заявление готово» — показываем, что делать дальше.
-          if (c.status === 'ended') setTimeout(function () { renderCase(c.id); }, 1200);
+          // Статус, получатель и «Что дальше» могли измениться — перерисовываем экран.
+          setTimeout(function () { renderCase(c.id); }, 1200);
         });
       }).catch(function (e) { showErrors(e); }).then(done);
     };

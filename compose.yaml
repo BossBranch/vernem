@@ -3,7 +3,7 @@
 services:
   app:
     build: .
-    image: vernem-bot:1.0.3
+    image: vernem-bot:1.0.4
     env_file:
       - path: .env
         required: false

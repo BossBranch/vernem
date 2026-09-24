@@ -29,7 +29,9 @@ export function claimToPdf(doc: ClaimDoc): Promise<Buffer> {
 
     pdf.font('regular').fontSize(10);
     const header = [...doc.to, ...doc.from];
-    for (const line of header) pdf.text(line, headerX, undefined, { width: headerW });
+    for (const line of doc.to) pdf.text(line, headerX, undefined, { width: headerW });
+    if (doc.to.length && doc.from.length) pdf.moveDown(0.6);
+    for (const line of doc.from) pdf.text(line, headerX, undefined, { width: headerW });
 
     if (header.length) pdf.moveDown(2);
     pdf.font('bold').fontSize(12).text(heading, left, undefined, { width, align: 'center' });
@@ -74,6 +76,8 @@ export function claimToPdf(doc: ClaimDoc): Promise<Buffer> {
 
     // Отметка о принятии — отделена пунктиром: её заполняет исполнитель на экземпляре жителя.
     if (doc.receipt?.length) {
+      // Блок «Отметка о принятии» целиком на одной странице: разорванный его не заполнят.
+      if (pdf.y + 110 > pdf.page.height - pdf.page.margins.bottom) pdf.addPage();
       pdf.moveDown(1.5);
       const top = pdf.y;
       pdf.moveTo(left, top).lineTo(left + width, top).dash(3, { space: 3 }).strokeColor('#888888').stroke().undash().strokeColor('#000000');

@@ -59,6 +59,12 @@ export function mergeIntervals(intervals: Interval[]): Interval[] {
   return out;
 }
 
+/** «736 × 0,15% = 110,4%, но не больше 100%» — без обманчивого «= 100%». */
+function capLine(units: number, rate: number, percent: number, of: string): string {
+  const raw = round2(units * rate);
+  return raw > percent ? `${units} × ${fmtPercent(rate)} = ${fmtPercent(raw)}; снижение не может быть больше 100% — ${fmtPercent(percent)} ${of}.` : `${units} × ${fmtPercent(rate)} = ${fmtPercent(percent)} ${of}.`;
+}
+
 export function calcInterruption(norm: ServiceNorm, intervals: Interval[], tz: string, variant?: string | null): CalcResult {
   const n = norm.interruption;
   if (!n) throw new Error(`${norm.key}: не норма перерыва`);
@@ -68,12 +74,13 @@ export function calcInterruption(norm: ServiceNorm, intervals: Interval[], tz: s
   const byMonth = new Map<string, { total: number; maxSingle: number }>();
   for (const iv of merged) {
     const fullHours = hoursBetween(iv.start, iv.end);
-    for (const slice of splitByMonth(iv.start, iv.end, tz)) {
+    splitByMonth(iv.start, iv.end, tz).forEach((slice, i) => {
       const cur = byMonth.get(slice.month) ?? { total: 0, maxSingle: 0 };
       cur.total += hoursBetween(slice.start, slice.end);
-      cur.maxSingle = Math.max(cur.maxSingle, fullHours);
+      // Длинный перерыв упоминаем один раз — в месяце, где он начался, а не в каждом месяце.
+      if (i === 0) cur.maxSingle = Math.max(cur.maxSingle, fullHours);
       byMonth.set(slice.month, cur);
-    }
+    });
   }
 
   const months: MonthCalc[] = [];
@@ -81,7 +88,10 @@ export function calcInterruption(norm: ServiceNorm, intervals: Interval[], tz: s
     const excess = Math.max(0, total - allowed);
     const units = Math.floor(excess / n.unit_hours + EPS);
     const percent = Math.min(100, round2(units * n.rate_percent));
-    const singleLimitExceeded = n.single_hours !== undefined && maxSingle > n.single_hours + EPS;
+    // Вывоз мусора: единовременно 24 ч в тёплое время и 48 ч в холодное; тёплым считаем май–сентябрь.
+    const warm = Number(month.split('-')[1]) >= 5 && Number(month.split('-')[1]) <= 9;
+    const singleLimit = n.single_hours_warm !== undefined && warm ? n.single_hours_warm : n.single_hours;
+    const singleLimitExceeded = singleLimit !== undefined && maxSingle > singleLimit + EPS;
     const lines: string[] = [];
     lines.push(`Перерыв за месяц: ${formatDuration(total)}. Допустимо: ${fmtNum(allowed)} ч в месяц.`);
     if (units === 0) {
@@ -91,16 +101,14 @@ export function calcInterruption(norm: ServiceNorm, intervals: Interval[], tz: s
           : 'Допустимый лимит не превышен, снижение платы не положено.',
       );
     } else if (n.unit_hours === 1) {
-      lines.push(`Превышение: ${units} ч.`);
-      lines.push(`${units} × ${fmtPercent(n.rate_percent)} = ${fmtPercent(percent)} от платы за месяц.`);
+      lines.push(`Превышение: ${units} ч${excess - units > EPS ? ' (неполный час не засчитывается)' : ''}.`);
+      lines.push(capLine(units, n.rate_percent, percent, 'от платы за месяц'));
     } else {
       lines.push(`Превышение: ${formatDuration(excess)} → полных периодов по ${n.unit_hours} ч: ${units}.`);
-      lines.push(`${units} × ${fmtPercent(n.rate_percent)} = ${fmtPercent(percent)} от платы за месяц.`);
+      lines.push(capLine(units, n.rate_percent, percent, 'от платы за месяц'));
     }
     if (singleLimitExceeded) {
-      lines.push(
-        `Кроме того, один перерыв длился ${formatDuration(maxSingle)} — дольше допустимых ${n.single_hours} ч подряд. На сумму это не влияет, но это ещё одно нарушение.`,
-      );
+      lines.push(`Продолжительность одного перерыва (${formatDuration(maxSingle)}) превысила допустимую непрерывную продолжительность ${singleLimit} ч.`);
     }
     months.push({ month, percent, lines, totalHours: round2(total), excessHours: round2(excess), singleLimitExceeded });
   }
@@ -186,7 +194,7 @@ export function calcHeatingTemperature(
     if (degreeHours <= 0) {
       lines.push('Температура не опускалась ниже нормы — снижение платы не положено.');
     } else {
-      lines.push(`Часов ниже нормы: ${fmtNum(m.hoursBelow, 1)}. Недобор тепла: ${fmtNum(degreeHours)} (градусы ниже нормы × часы).`);
+      lines.push(`Часов ниже нормы: ${fmtNum(m.hoursBelow, 2)}. Сумма отклонений: ${fmtNum(degreeHours)} (по каждому часу: на сколько градусов ниже нормы).`);
       lines.push(`${fmtNum(degreeHours)} × ${fmtPercent(t.rate_percent_per_degree_hour)} = ${fmtPercent(percent)} от платы за отопление.`);
     }
     months.push({ month, percent, lines, totalHours: round2(m.hoursBelow) });
@@ -228,6 +236,7 @@ export function calcHotWaterTemperature(norm: ServiceNorm, readings: Reading[], 
     );
     if (stepHours > 0) {
       lines.push(`За каждые ${t.step_c} °C сверх допуска — ${fmtPercent(t.rate_percent_per_step_hour)} за каждый час.`);
+      lines.push(`Сумма отклонений: ${fmtNum(stepHours)} (по каждому часу: сколько полных шагов по ${t.step_c} °C ниже допуска).`);
       lines.push(`${fmtNum(stepHours)} × ${fmtPercent(t.rate_percent_per_step_hour)} = ${fmtPercent(percent)} от платы за горячую воду.`);
     }
     if (m.coldHours > 0) {
@@ -262,6 +271,21 @@ export function calculate(norm: ServiceNorm, input: CalcInput, tz: string): Calc
 export function refundAmount(bill: number, percent: number): number {
   const p = Math.min(100, Math.max(0, percent));
   return Math.floor(Math.round(bill * 100) * p / 100 + EPS) / 100;
+}
+
+/** Данные квитанции для часов, когда горячая вода была ниже +40 °C: объём за месяц и два тарифа. */
+export type ColdTariffInput = { volume: number; hot: number; cold: number };
+
+/**
+ * Сколько вернуть за часы, когда горячая вода была ниже +40 °C: за них платят по тарифу холодной воды.
+ * Оценка: объём за месяц × доля «холодных» часов в месяце × (тариф горячей − тариф холодной), вниз до копеек.
+ */
+export function coldTariffAmount(month: string, hours: number, ct?: ColdTariffInput | null): number {
+  if (!ct || hours < 1) return 0;
+  const [y, m] = month.split('-').map(Number);
+  const monthHours = new Date(y, m, 0).getDate() * 24;
+  const raw = ct.volume * Math.min(1, hours / monthHours) * Math.max(0, ct.hot - ct.cold);
+  return Math.floor(raw * 100 + EPS) / 100;
 }
 
 export function amountLine(bill: number, percent: number): string {

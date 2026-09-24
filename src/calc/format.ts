@@ -20,15 +20,34 @@ export function fmtPercent(p: number): string {
 
 /** Разбирает сумму, которую ввёл житель: «1 200», «1200,50», «1200.5 руб». */
 export function parseRubles(text: string): number | null {
-  const cleaned = text
+  let cleaned = text
     .toLowerCase()
     .replace(/руб\.?|р\.?|₽/g, '')
-    .replace(/[\s\u00a0]/g, '')
-    .replace(',', '.');
+    .replace(/[\s\u00a0]/g, '');
+  // «1.250,50» — точка как разделитель тысяч, запятая — копейки.
+  if (cleaned.includes(',') && cleaned.includes('.')) cleaned = cleaned.replace(/\./g, '');
+  cleaned = cleaned.replace(',', '.');
   if (!/^\d+(\.\d{1,2})?$/.test(cleaned)) return null;
   const n = Number(cleaned);
   if (!Number.isFinite(n) || n <= 0 || n > 1_000_000) return null;
   return n;
+}
+
+/** ИНН: 10 или 12 цифр и верные контрольные цифры — опечатка в одной цифре ловится сразу. null — ИНН верный. */
+export function innProblem(inn: string): string | null {
+  if (!/^\d{10}(\d{2})?$/.test(inn)) return 'ИНН — 10 цифр (у ИП — 12), есть в квитанции';
+  const d = inn.split('').map(Number);
+  const check = (coef: number[]) => (coef.reduce((s, k, i) => s + k * d[i], 0) % 11) % 10;
+  const ok =
+    inn.length === 10
+      ? check([2, 4, 10, 3, 5, 9, 4, 6, 8]) === d[9]
+      : check([7, 2, 4, 10, 3, 5, 9, 4, 6, 8]) === d[10] && check([3, 7, 2, 4, 10, 3, 5, 9, 4, 6, 8]) === d[11];
+  return ok ? null : 'В ИНН ошибка — проверьте цифры по квитанции';
+}
+
+/** Знак температуры: «+18 °C», «−5 °C» (а не «+-5»). */
+export function fmtTemp(t: number): string {
+  return `${t < 0 ? '−' : '+'}${fmtNum(Math.abs(t), 1)} °C`;
 }
 
 /** Разбирает температуру: «15», «+15,5», «15°». */
