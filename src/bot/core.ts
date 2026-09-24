@@ -167,6 +167,11 @@ export class Vernem {
     return `https://max.ru/${this.cfg.botUsername}?start=j_${code}`;
   }
 
+  /** Ссылка «у меня тоже» для соседей; без ника бота (офлайн-демо) её не построить. */
+  joinLink(c: CaseBundle): string | null {
+    return this.cfg.botUsername ? this.deepLink(c.incident.code) : null;
+  }
+
   private tz(houseId?: number | null) {
     return (houseId && this.db.getHouse(houseId)?.tz) || this.cfg.defaultTz;
   }

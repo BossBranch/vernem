@@ -1,12 +1,15 @@
 import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Db, ExecutorType } from '../db/db.ts';
 import type { Norms } from '../calc/norms.ts';
 import type { AppConfig } from '../config.ts';
 import type { Vernem } from '../bot/core.ts';
-import { billsOf, claimDocFor, claimOf, loadCase, summarize } from '../services/cases.ts';
+import { actDocFor, billsOf, claimDocFor, claimOf, loadCase, summarize } from '../services/cases.ts';
+import { actFromApp, markActSigned } from '../bot/acts.ts';
+import { executorFromHouse } from '../bot/house.ts';
 import { claimToText } from '../docs/claim.ts';
 import { claimToPdf } from '../docs/pdf.ts';
 import { parseReceiptQr } from '../receipt/qr.ts';
@@ -60,6 +63,18 @@ export function createApp(deps: WebDeps) {
   });
 
   app.get('/', (_req, res) => res.redirect('/app/'));
+  // В index.html к app.js и app.css дописывается хеш содержимого: после обновления телефон
+  // гарантированно берёт новые файлы, даже если старые лежат в кэше WebView.
+  const assetVersion = createHash('sha1')
+    .update(readFileSync(resolve('public/app/app.js')))
+    .update(readFileSync(resolve('public/app/app.css')))
+    .digest('hex')
+    .slice(0, 10);
+  const indexHtml = readFileSync(resolve('public/app/index.html'), 'utf8').replace(/"(app\.(?:js|css))"/g, `"$1?v=${assetVersion}"`);
+  app.get(['/app/', '/app/index.html'], (_req, res) => {
+    res.setHeader('Cache-Control', 'no-cache');
+    res.type('html').send(indexHtml);
+  });
   app.use(
     '/app',
     express.static(resolve('public/app'), {
@@ -127,6 +142,7 @@ export function createApp(deps: WebDeps) {
       address: house?.address ?? null,
       houses: db.listUserHouses(u.id).map((h) => houseJson(u.id, h.id)),
       // Город для формы адреса: сначала города жителя, потом справочник.
+      myCities: db.userCities(u.id),
       cities: [...new Set([...db.userCities(u.id), ...CITIES.map((c) => c.name)])],
       services: SERVICE_ORDER.map((k) => ({ key: k, title: norms.services[k].title, button: norms.services[k].button, kind: norms.services[k].kind })),
       savedPersonal: !!u.save_personal,
@@ -280,7 +296,15 @@ export function createApp(deps: WebDeps) {
     const now = new Date();
     const s = summarize(db, norms, c, now);
     const claimText = c.p.ended_at ? claimToText(claimDocFor(db, norms, c, now)) : null;
-    res.json({ case: s, claimText });
+    // Получатель из карточки дома — чтобы не вписывать УК руками, если соседи её уже заполнили.
+    const info = db.houseInfo(c.house);
+    const ex = executorFromHouse(info, c.incident.service_key);
+    const executorHint = ex ? { name: ex.name, type: ex.type, inn: ex.type === 'uk' ? (info.ukInn ?? null) : null } : null;
+    // ФИО и квартира, которые житель уже вписал в акт, — чтобы не спрашивать второй раз.
+    const act = db.getActByIncident(c.incident.id);
+    const signer = act ? db.listSigners(act.id).find((x) => x.user_id === c.p.user_id) : undefined;
+    const personHint = signer ? { fio: signer.fio, flat: signer.flat } : null;
+    res.json({ case: s, claimText, executorHint, personHint });
   });
 
   api.put('/cases/:id/claim', (req: AuthedRequest, res) => {
@@ -328,16 +352,48 @@ export function createApp(deps: WebDeps) {
     res.json({ url: `${cfg.publicUrl ?? ''}${rel}`, fileName: 'Заявление_на_перерасчёт.pdf' });
   });
 
+  // ---------- акт с соседями (п. 110(1)) ----------
+  api.post('/cases/:id/act', async (req: AuthedRequest, res, next) => {
+    try {
+      const c = ownCase(req);
+      const bot = deps.bot();
+      if (!bot) throw new HttpError(503, 'Бот сейчас недоступен');
+      const fio = str(req.body?.fio, 150);
+      if (!fio || fio.length < 5 || /\d/.test(fio)) throw new HttpError(400, 'Впишите фамилию, имя и отчество');
+      const flat = str(req.body?.flat, 10) ?? null;
+      const actId = await actFromApp(bot, req.userId!, c.p.id, fio, flat);
+      if (!actId) throw new HttpError(404, 'Случай не найден');
+      res.json({ url: `${cfg.publicUrl ?? ''}${signLink(`/files/act/${actId}.pdf`, cfg.linkSecret, 600)}`, fileName: 'Акт_о_нарушении.pdf' });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  api.post('/cases/:id/act/signed', async (req: AuthedRequest, res, next) => {
+    try {
+      const c = ownCase(req);
+      const bot = deps.bot();
+      const act = db.getActByIncident(c.incident.id);
+      if (!bot || !act) throw new HttpError(404, 'Акт не найден');
+      if (!(await markActSigned(bot, req.userId!, act.id, req.body?.chair === true))) throw new HttpError(403, 'Отметить акт подписанным может тот, кто его начал');
+      res.json({ ok: true });
+    } catch (e) {
+      next(e);
+    }
+  });
+
   api.post('/cases/:id/share', async (req: AuthedRequest, res, next) => {
     try {
       const c = ownCase(req);
       const bot = deps.bot();
       if (!bot) throw new HttpError(503, 'Бот сейчас недоступен');
-      const sent = await bot.out.toUser(req.userId!, bot.cardMessage(c));
-      if (!sent.mid) throw new HttpError(502, 'MAX не вернул идентификатор сообщения');
-      db.updateParticipant(c.p.id, { last_card_mid: sent.mid });
+      const card = bot.cardMessage(c);
+      // Карточка уходит в диалог с ботом, мини-приложение пересылает её через MAX (shareMaxContent).
+      // Без MAX (офлайн, браузер) — отдаём ссылку, чтобы житель переслал её сам.
+      const sent = await bot.out.toUser(req.userId!, card).catch(() => ({ mid: undefined }) as { mid?: string });
+      if (sent.mid) db.updateParticipant(c.p.id, { last_card_mid: sent.mid });
       db.track(req.userId!, 'card_created', { incident: c.incident.id, via: 'app' });
-      res.json({ mid: sent.mid });
+      res.json({ mid: sent.mid ?? null, link: bot.joinLink(c), text: card.text.replace(/\*\*/g, '') });
     } catch (e) {
       next(e);
     }
@@ -361,6 +417,25 @@ export function createApp(deps: WebDeps) {
   app.use('/api', api);
 
   // ---------- PDF по подписанной ссылке ----------
+  app.get('/files/act/:file', async (req, res, next) => {
+    try {
+      const m = /^(\d+)\.pdf$/.exec(String(req.params.file));
+      const path = `/files/act/${req.params.file}`;
+      if (!m || !verifyLink(path, req.query.exp as string, req.query.sig as string, cfg.linkSecret)) {
+        throw new HttpError(403, 'Ссылка устарела. Нажмите «Акт (PDF)» ещё раз.');
+      }
+      const doc = actDocFor(db, norms, Number(m[1]), new Date());
+      if (!doc) throw new HttpError(404, 'Акт не найден');
+      const pdf = await claimToPdf(doc);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent('Акт_о_нарушении.pdf')}`);
+      res.setHeader('Cache-Control', 'no-store');
+      res.send(pdf);
+    } catch (e) {
+      next(e);
+    }
+  });
+
   app.get('/files/claim/:file', async (req, res, next) => {
     try {
       const m = /^(\d+)\.pdf$/.exec(String(req.params.file));

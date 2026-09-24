@@ -9,8 +9,8 @@
 
 import type { Act, ActReason, ActSigner, House, Incident } from '../db/db.ts';
 import { formatShort, MS_HOUR } from '../calc/time.ts';
-import { buildActDoc, ACT_REASON } from '../docs/act.ts';
-import { loadCase } from '../services/cases.ts';
+import { ACT_REASON } from '../docs/act.ts';
+import { actDocFor, loadCase } from '../services/cases.ts';
 import type { CaseBundle } from '../services/cases.ts';
 import type { Btn } from './types.ts';
 import type { Vernem } from './core.ts';
@@ -208,13 +208,39 @@ async function finalize(bot: Vernem, actId: number) {
 }
 
 async function sendActPdf(bot: Vernem, userId: number, actId: number) {
-  const ctx = load(bot, actId)!;
-  const readings = ctx.signers.map((s) => {
-    const p = bot.db.getParticipantFor(ctx.incident.id, s.user_id);
-    return { flat: s.flat, readings: p ? bot.db.listReadings(p.id) : [] };
-  });
-  const doc = buildActDoc({ norms: bot.norms, incident: ctx.incident, house: ctx.house, act: ctx.act, signers: ctx.signers, readings, now: bot.now() });
-  return bot.sendDocPdf(userId, doc, 'Акт (PDF):');
+  return bot.sendDocPdf(userId, actDocFor(bot.db, bot.norms, actId, bot.now())!, 'Акт (PDF):');
+}
+
+/**
+ * Акт из мини-приложения: создать (если ещё нет) и вписать жителя. Дальше всё как в чате —
+ * PDF приходит и в диалог, соседей из бота бот зовёт сам. Возвращает id акта.
+ */
+export async function actFromApp(bot: Vernem, userId: number, pid: number, fio: string, flat: string | null): Promise<number | null> {
+  const c = bot.ownCase(userId, pid);
+  if (!c) return null;
+  let act = bot.db.getActByIncident(c.incident.id);
+  if (!act) {
+    // Позвонили, но на замер никто не пришёл, — иначе не дозвонились.
+    const reason: ActReason = c.incident.evidence === 'self' && c.p.inspection !== 'no_show' ? 'no_ads' : 'no_inspection';
+    act = bot.db.createAct(c.incident.id, userId, reason);
+    bot.db.track(userId, 'act_started', { incident: c.incident.id, via: 'app' });
+  }
+  const ctx = load(bot, act.id)!;
+  if (open(ctx) && !ctx.signers.some((s) => s.user_id === userId)) await confirmSigner(bot, userId, act.id, fio, flat);
+  return act.id;
+}
+
+/** «Акт подписан на бумаге» — отмечает только тот, кто начал акт. */
+export async function markActSigned(bot: Vernem, userId: number, actId: number, chair: boolean): Promise<boolean> {
+  const ctx = load(bot, actId);
+  if (!ctx || ctx.act.initiator_user_id !== userId || !open(ctx)) return false;
+  bot.db.setActChairSigned(actId, chair ? 1 : 0);
+  bot.db.setActStatus(actId, 'signed', bot.now());
+  bot.db.track(userId, 'act_signed', { act: actId, chair });
+  for (const s of ctx.signers) {
+    if (s.user_id !== userId) await bot.safeSend(s.user_id, { text: 'Акт подписан ✅ Он попадёт в заявления всех участников.' });
+  }
+  return true;
 }
 
 export async function showAct(bot: Vernem, userId: number, actId: number) {
@@ -297,13 +323,7 @@ export async function onActButton(bot: Vernem, userId: number, action: string, a
     }
     case 'chair': {
       const ctx = load(bot, id);
-      if (!ctx || ctx.act.initiator_user_id !== userId || !open(ctx)) return bot.stale(userId);
-      bot.db.setActChairSigned(id, b === '1' ? 1 : 0);
-      bot.db.setActStatus(id, 'signed', bot.now());
-      bot.db.track(userId, 'act_signed', { act: id, chair: b === '1' });
-      for (const s of ctx.signers) {
-        if (s.user_id !== userId) await bot.safeSend(s.user_id, { text: 'Акт подписан ✅ Он попадёт в заявления всех участников.' });
-      }
+      if (!ctx || !(await markActSigned(bot, userId, id, b === '1'))) return bot.stale(userId);
       const p = bot.db.getParticipantFor(ctx.incident.id, userId);
       return bot.send(userId, {
         text: `✅ Акт подписан — он попадёт в заявления всех участников. Сфотографируйте его: оригинал понадобится.${b === '1' ? '' : '\nБез подписи председателя акт слабее, но подписи жителей всё равно подтверждают нарушение.'}`,

@@ -4,6 +4,7 @@ import type { Norms } from '../calc/norms.ts';
 import { buildClaim, claimToText } from '../docs/claim.ts';
 import type { ClaimDoc, ClaimInput } from '../docs/claim.ts';
 import type { Act, ActSigner, Claim, Db, House, Incident, Participant, ParticipantStatus } from '../db/db.ts';
+import { buildActDoc } from '../docs/act.ts';
 
 export type CaseBundle = { p: Participant; incident: Incident; house: House };
 
@@ -131,7 +132,8 @@ export type CaseSummary = {
   claim: Claim;
   readings: { at: string; tempC: number }[];
   cardMid: string | null;
-  act: { status: Act['status']; residents: number; chair: boolean } | null;
+  /** mine — житель вписан в акт или начал его; initiator — может отметить «подписан». */
+  act: { status: Act['status']; residents: number; chair: boolean; mine: boolean; initiator: boolean } | null;
   photos: number;
   inspection: Participant['inspection'];
 };
@@ -171,14 +173,34 @@ export function summarize(db: Db, norms: Norms, c: CaseBundle, now: Date): CaseS
     claim: claimOf(c.p),
     readings: db.listReadings(c.p.id).map((r) => ({ at: r.at, tempC: r.temp_c })),
     cardMid: c.p.last_card_mid,
-    act: actSummary(db, c.incident.id),
+    act: actSummary(db, c.incident.id, c.p.user_id),
     photos: db.listPhotos(c.p.id).length,
     inspection: c.p.inspection,
   };
 }
 
-function actSummary(db: Db, incidentId: number): CaseSummary['act'] {
+function actSummary(db: Db, incidentId: number, userId: number): CaseSummary['act'] {
   const a = actOf(db, incidentId);
   if (!a) return null;
-  return { status: a.act.status, residents: a.signers.filter((s) => s.role === 'resident').length, chair: a.act.chair_signed === 1 || a.signers.some((s) => s.role === 'chair') };
+  const initiator = a.act.initiator_user_id === userId;
+  return {
+    status: a.act.status,
+    residents: a.signers.filter((s) => s.role === 'resident').length,
+    chair: a.act.chair_signed === 1 || a.signers.some((s) => s.role === 'chair'),
+    mine: initiator || a.signers.some((s) => s.user_id === userId),
+    initiator,
+  };
+}
+
+/** PDF-документ акта: подписанты из бота и их замеры температуры. */
+export function actDocFor(db: Db, norms: Norms, actId: number, now: Date): ClaimDoc | null {
+  const act = db.getAct(actId);
+  const incident = act ? db.getIncident(act.incident_id) : undefined;
+  if (!act || !incident) return null;
+  const signers = db.listSigners(act.id);
+  const readings = signers.map((s) => {
+    const p = db.getParticipantFor(incident.id, s.user_id);
+    return { flat: s.flat, readings: p ? db.listReadings(p.id) : [] };
+  });
+  return buildActDoc({ norms, incident, house: db.getHouse(incident.house_id)!, act, signers, readings, now });
 }

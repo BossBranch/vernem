@@ -203,6 +203,16 @@ h2.section { margin: 24px 0 10px; }
 .result small { color: var(--ink-2); }
 .result.new { color: var(--action); font-weight: 500; }
 .picked { font-weight: 700; font-size: 18px; margin: 16px 0 0; }
+.picked-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.picked-row .picked { margin: 4px 0 0; }
+.linklike { background: none; border: 0; padding: 4px 0; font: inherit; color: var(--action); text-decoration: underline; cursor: pointer; }
+#cityBox .chips { margin-bottom: 8px; }
+input:disabled { opacity: 0.55; }
+.hint.warn { color: var(--danger); font-weight: 500; }
+.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
+.more { margin-top: 12px; }
+.more summary { cursor: pointer; color: var(--action); font-weight: 500; padding: 6px 0; }
+#reportHere { margin: 12px 0 4px; width: 100%; }
 .copy { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
 
 /* Сообщить о проблеме: адреса-«чипы» и плитки проблем */

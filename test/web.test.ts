@@ -156,14 +156,56 @@ test('API адресов: город обязателен, поиск — тол
   });
 });
 
+test('мини-приложение: акт с соседями, подсказки из карточки дома и акта, ссылка для соседей', async () => {
+  await withServer(async (base, h) => {
+    const headers = { 'X-Max-Init-Data': initFor(11), 'Content-Type': 'application/json' };
+    await h.start(11);
+    const { house } = (await (await fetch(`${base}/api/me/houses`, { method: 'POST', headers, body: JSON.stringify({ address: 'Садовая 10', city: 'Москва' }) })).json()) as any;
+    await fetch(`${base}/api/houses/${house.id}/info`, { method: 'PUT', headers, body: JSON.stringify({ ukName: 'ООО «УК Садовая»', ukInn: '7700000001' }) });
+    const startedAt = new Date(Date.now() - 30 * 3_600_000).toISOString();
+    const { caseId } = (await (await fetch(`${base}/api/report`, { method: 'POST', headers, body: JSON.stringify({ service: 'cold_water_off', houseId: house.id, evidence: 'self', startedAt }) })).json()) as any;
+
+    // Акт: ФИО обязательны, PDF по подписанной ссылке.
+    assert.equal((await fetch(`${base}/api/cases/${caseId}/act`, { method: 'POST', headers, body: JSON.stringify({ fio: 'Ив' }) })).status, 400);
+    const act = (await (await fetch(`${base}/api/cases/${caseId}/act`, { method: 'POST', headers, body: JSON.stringify({ fio: 'Сидорова Мария Ивановна', flat: '14' }) })).json()) as any;
+    const pdf = await fetch(act.url.replace('https://example.test', base));
+    assert.equal(pdf.status, 200);
+    assert.equal(Buffer.from(await pdf.arrayBuffer()).subarray(0, 4).toString(), '%PDF');
+
+    let data = (await (await fetch(`${base}/api/cases/${caseId}`, { headers })).json()) as any;
+    assert.deepEqual(data.case.act, { status: 'collecting', residents: 1, chair: false, mine: true, initiator: true });
+    assert.deepEqual(data.executorHint, { name: 'ООО «УК Садовая»', type: 'uk', inn: '7700000001' });
+    assert.deepEqual(data.personHint, { fio: 'Сидорова Мария Ивановна', flat: '14' });
+
+    // Отметить «подписан» может только тот, кто начал акт.
+    assert.equal((await fetch(`${base}/api/cases/${caseId}/act/signed`, { method: 'POST', headers: { ...headers, 'X-Max-Init-Data': initFor(12) }, body: '{}' })).status, 404);
+    assert.equal((await fetch(`${base}/api/cases/${caseId}/act/signed`, { method: 'POST', headers, body: JSON.stringify({ chair: true }) })).status, 200);
+    await fetch(`${base}/api/cases/${caseId}/end`, { method: 'POST', headers, body: JSON.stringify({ endedAt: new Date().toISOString() }) });
+    data = (await (await fetch(`${base}/api/cases/${caseId}`, { headers })).json()) as any;
+    assert.equal(data.case.act.status, 'signed');
+    assert.match(data.claimText, /подтверждено актом.*председателем совета/);
+
+    // «Позвать соседей»: ссылка «у меня тоже» возвращается всегда — её можно переслать без MAX.
+    const share = (await (await fetch(`${base}/api/cases/${caseId}/share`, { method: 'POST', headers })).json()) as any;
+    assert.match(share.link, /^https:\/\/max\.ru\/vernem_demo_bot\?start=j_/);
+    assert.ok(share.text.includes(share.link));
+    assert.doesNotMatch(share.text, /\*\*/);
+  });
+});
+
 test('health и статика мини-приложения', async () => {
   await withServer(async (base) => {
     const health = (await (await fetch(`${base}/health`)).json()) as any;
     assert.equal(health.ok, true);
-    assert.equal(health.version, '1.0.0');
+    assert.equal(health.version, '1.0.1');
     const page = await fetch(`${base}/app/`);
     assert.equal(page.status, 200);
-    assert.match(await page.text(), /max-web-app\.js/);
+    const html = await page.text();
+    assert.match(html, /max-web-app\.js/);
+    // Хеш версии в ссылках на скрипт и стили: после обновления телефон не покажет старый интерфейс.
+    assert.match(html, /src="app\.js\?v=[0-9a-f]{10}"/);
+    assert.match(html, /href="app\.css\?v=[0-9a-f]{10}"/);
+    assert.equal(page.headers.get('cache-control'), 'no-cache');
   });
 });
 

@@ -83,6 +83,22 @@
     if (retry) $('retry').onclick = retry;
   }
 
+  /** Скачать файл по ссылке: в MAX — нативно, в браузере — переходом (ответ с attachment не уводит со страницы). */
+  function download(url, fileName) {
+    if (WebApp && WebApp.downloadFile && initData) return Promise.resolve(WebApp.downloadFile(url, fileName));
+    location.href = url;
+    return Promise.resolve();
+  }
+
+  /** Поделиться ссылкой: системное меню телефона, иначе — копия в буфер обмена. */
+  function shareLink(url, text) {
+    if (navigator.share) return navigator.share({ text: text, url: url }).catch(function () {});
+    return (navigator.clipboard ? navigator.clipboard.writeText(url) : Promise.reject()).then(
+      function () { toast('Ссылка скопирована — отправьте её соседям'); },
+      function () { window.prompt('Скопируйте ссылку и отправьте соседям:', url); }
+    );
+  }
+
   function openExternal(a) {
     a.onclick = function (e) { if (WebApp && WebApp.openLink) { e.preventDefault(); WebApp.openLink(a.href); } };
   }
@@ -128,7 +144,11 @@
           (pending > 0 ? '<li class="sub"><span class="label">Ждём в квитанции</span><span class="dots"></span><span class="sum">' + rub(Math.round(pending * 100) / 100) + '</span></li>' : '') +
           '</ul><ul class="cases">' + cases.map(caseRow).join('') + '</ul>';
       } else {
-        html += '<p class="muted">Пока пусто. Что-то сломается — нажмите «Сообщить о проблеме».</p>';
+        html += '<section class="sheet"><h2>Как это работает</h2><ol class="steps">' +
+          '<li><b>Отключили</b> — нажмите «Сообщить о проблеме» и позвоните в аварийную службу: номер заявки — главное доказательство.</li>' +
+          '<li><b>Починили</b> — нажмите «Починили», я посчитаю, сколько вам должны вернуть по закону.</li>' +
+          '<li><b>Заявление</b> — скачайте PDF и отдайте в УК. Через месяц проверим квитанцию.</li>' +
+          '</ol></section>';
       }
       html += '<footer><p>Нормы: Приложение № 1 к ПП РФ № 354, проверены ' + esc(me.normsCheckedAt.split('-').reverse().join('.')) +
         '. Расчёт ориентировочный, итог считает УК.</p><button id="delme">Удалить все мои данные</button></footer>';
@@ -145,7 +165,7 @@
     var i = h.info || {};
     return '<li><div class="house" data-id="' + h.id + '" role="button" tabindex="0">' +
       '<span class="title">🏠 ' + esc(h.address) + (h.entrance ? ', подъезд ' + esc(h.entrance) : '') + '</span>' +
-      '<span class="meta">' + (i.ukName ? 'УК: ' + esc(i.ukName) : 'Данные дома не заполнены') + ' · соседей в сети: ' + h.members + '</span>' +
+      '<span class="meta">' + (i.ukName ? 'УК: ' + esc(i.ukName) : 'Данные дома не заполнены') + ' · жителей в сети: ' + h.members + '</span>' +
       (i.adsPhone ? '<a class="phone" href="tel:' + esc(i.adsPhone.replace(/[^\d+]/g, '')) + '">📞 Аварийная служба: ' + esc(i.adsPhone) + '</a>' : '') +
       '</div></li>';
   }
@@ -166,12 +186,18 @@
   }
 
   // ---------- добавить адрес: дом выбирается из списка ----------
+  function normCity(s) { return String(s).toLowerCase().replace(/ё/g, 'е').replace(/^\s*(г\.|гор\.|город)\s*/, '').replace(/\s+/g, ' ').trim(); }
+  /** «г. химки» → «Химки», «ростов-на-дону» → «Ростов-На-Дону» (сервер всё равно приведёт к справочнику). */
+  function prettyCity(s) { return normCity(s).replace(/(^|[\s-])([а-яa-z])/g, function (m, sep, ch) { return sep + ch.toUpperCase(); }); }
+
   function renderAddHouse(next) {
     if (!me) { loadMe().then(function () { renderAddHouse(next); }).catch(function (e) { toast(e.message); }); return; }
     var cities = me.cities || [];
+    // Свой город подставляем сразу; новому жителю — выбрать кнопкой: подставленная «Москва» незаметно
+    // записала бы дом не в тот город.
+    var cityName = (me.myCities && me.myCities[0]) || '';
     var html = backLink('Назад', '') + '<h1>Добавить адрес</h1>' +
-      '<label for="city">Город</label><input id="city" list="cityList" autocomplete="off" value="' + esc(cities[0] || '') + '">' +
-      '<datalist id="cityList">' + cities.map(function (c) { return '<option value="' + esc(c) + '">'; }).join('') + '</datalist>' +
+      '<label>Город</label><div id="cityBox"></div>' +
       '<label for="q">Улица и номер дома</label><input id="q" autocomplete="off" placeholder="Например: Садовая 10">' +
       '<ul class="results" id="results"></ul>' +
       '<div id="pick" hidden><p class="picked" id="picked"></p>' +
@@ -183,24 +209,57 @@
     var chosen = null;
     var timer = null;
     var q = $('q');
-    var city = $('city');
-    q.focus();
+
     // Город входит в адрес: «Садовая 10» в Москве и в Казани — разные дома.
-    city.oninput = function () { q.oninput(); };
+    function drawCity() {
+      var box = $('cityBox');
+      if (cityName) {
+        box.innerHTML = '<div class="picked-row"><span class="picked">🏙 ' + esc(cityName) + '</span><button class="linklike" id="cityChange">Изменить</button></div>';
+        $('cityChange').onclick = function () { cityName = ''; drawCity(); $('cityQ').focus(); };
+        q.disabled = false;
+        q.placeholder = 'Например: Садовая 10';
+        q.oninput();
+        return;
+      }
+      box.innerHTML = '<div class="chips">' + cities.slice(0, 6).map(function (c) { return '<button class="chip" data-city="' + esc(c) + '">' + esc(c) + '</button>'; }).join('') + '</div>' +
+        '<input id="cityQ" autocomplete="off" placeholder="Другой город — начните вводить">' +
+        '<ul class="results" id="cityResults"></ul>';
+      q.disabled = true;
+      q.placeholder = 'Сначала выберите город';
+      $('results').innerHTML = '';
+      $('pick').hidden = true;
+      each('#cityBox .chip', function (b) { b.onclick = function () { pickCity(b.getAttribute('data-city')); }; });
+      $('cityQ').oninput = function () {
+        var t = $('cityQ').value.trim();
+        var n = normCity(t);
+        if (n.length < 2) { $('cityResults').innerHTML = ''; return; }
+        var found = cities.filter(function (c) { return normCity(c).indexOf(n) === 0; }).slice(0, 5);
+        var exact = found.some(function (c) { return normCity(c) === n; });
+        var items = found.map(function (c) { return '<li><button class="result" data-city="' + esc(c) + '">🏙 ' + esc(c) + '</button></li>'; });
+        if (!exact && !/\d/.test(t)) items.push('<li><button class="result new" data-city="' + esc(prettyCity(t)) + '">➕ Мой город — «' + esc(prettyCity(t)) + '»</button></li>');
+        $('cityResults').innerHTML = items.join('');
+        each('#cityResults .result', function (b) { b.onclick = function () { pickCity(b.getAttribute('data-city')); }; });
+      };
+    }
+    function pickCity(name) {
+      cityName = name.trim();
+      drawCity();
+      q.focus();
+    }
+
     q.oninput = function () {
       clearTimeout(timer);
       chosen = null;
       $('pick').hidden = true;
       var text = q.value.trim();
-      var cityName = city.value.trim();
+      if (!cityName) return;
       if (text.length < 2) { $('results').innerHTML = ''; return; }
-      if (cityName.length < 2) { $('results').innerHTML = '<li class="muted">Сначала укажите город</li>'; return; }
       timer = setTimeout(function () {
         api('GET', '/api/houses/search?q=' + encodeURIComponent(text) + '&city=' + encodeURIComponent(cityName)).then(function (r) {
           var items = r.houses.map(function (h) {
             return '<li><button class="result" data-id="' + h.id + '" data-address="' + esc(h.address) + '">🏠 ' + esc(h.address) + '<small>' + (h.members ? ' · соседей в сети: ' + h.members : '') + '</small></button></li>';
           });
-          if (/\d/.test(text)) items.push('<li><button class="result new" data-new="1">➕ Моего дома нет — добавить «' + esc(text) + '»</button></li>');
+          if (/\d/.test(text)) items.push('<li><button class="result new" data-new="1">➕ Моего дома нет — добавить «' + esc(cityName + ', ' + text) + '»</button></li>');
           $('results').innerHTML = items.join('') || '<li class="muted">Добавьте номер дома</li>';
           Array.prototype.forEach.call($('results').querySelectorAll('.result'), function (b) {
             b.onclick = function () {
@@ -214,6 +273,8 @@
         }).catch(function (e) { toast(e.message); });
       }, 250);
     };
+    drawCity();
+    if (cityName) q.focus();
     $('add').onclick = function () {
       if (!chosen) return;
       var done = busy($('add'), 'Добавляю…');
@@ -249,7 +310,8 @@
       var h = r.house;
       var i = h.info || {};
       var html = backLink('Главная', '') + '<h1>🏠 ' + esc(h.address) + '</h1>' +
-        '<p class="muted">Соседей в сети: ' + h.members + (i.updatedAt ? ' · данные обновлены ' + esc(when(i.updatedAt)) : '') + '</p>';
+        '<p class="muted">Жителей в сети: ' + h.members + (i.updatedAt ? ' · данные обновлены ' + esc(when(i.updatedAt)) : '') + '</p>' +
+        '<button class="btn primary" id="reportHere">🚨 Сообщить о проблеме в этом доме</button>';
 
       html += '<section class="sheet"><h2>Я и этот дом</h2>' +
         '<div class="row2"><div><label for="entrance">Подъезд</label><input id="entrance" inputmode="numeric" maxlength="4" value="' + esc(h.entrance || '') + '"></div>' +
@@ -259,15 +321,21 @@
 
       html += '<section class="sheet"><h2>Данные дома <small>из квитанции</small></h2>' +
         '<p class="muted">Заполняют жители — один раз для всех соседей. Эти данные попадут в заявления. Сверить можно в <a href="' + GIS_HOUSES + '" data-ext>ГИС ЖКХ</a>.</p>' +
-        INFO_FIELDS.map(function (f) {
-          return '<label for="f_' + f[0] + '">' + esc(f[1]) + '</label><input id="f_' + f[0] + '"' + (f[3] ? ' inputmode="' + f[3] + '"' : '') + ' placeholder="' + esc(f[2]) + '" value="' + esc(i[f[0]] || '') + '">';
-        }).join('') +
+        // Главное — три поля; остальное свёрнуто, чтобы форма не пугала.
+        INFO_FIELDS.slice(0, 3).map(infoField).join('') +
+        '<details class="more"' + (INFO_FIELDS.slice(3).some(function (f) { return i[f[0]]; }) ? ' open' : '') + '><summary>Ещё: почта и адрес УК, поставщики, жилинспекция</summary>' +
+        INFO_FIELDS.slice(3).map(infoField).join('') + '</details>' +
         '<div class="actions"><button class="btn primary" id="saveInfo">Сохранить</button></div></section>';
 
       html += '<div class="actions"><button class="btn danger" id="remove">Убрать адрес из моего списка</button></div>';
       root.innerHTML = html;
       bindBack();
       each('a[data-ext]', openExternal);
+      $('reportHere').onclick = function () { location.hash = '#report/' + h.id; };
+
+      function infoField(f) {
+        return '<label for="f_' + f[0] + '">' + esc(f[1]) + '</label><input id="f_' + f[0] + '"' + (f[3] ? ' inputmode="' + f[3] + '"' : '') + ' placeholder="' + esc(f[2]) + '" value="' + esc(i[f[0]] || '') + '">';
+      }
 
       function patch(body) {
         return api('PATCH', '/api/me/houses/' + h.id, body).then(function () { toast('Сохранено'); }).catch(function (e) { toast(e.message); });
@@ -292,15 +360,17 @@
   }
 
   // ---------- сообщить о проблеме ----------
-  function renderReport() {
+  function renderReport(houseId) {
     // Список адресов всегда свежий: его могли только что изменить на другом экране.
     loadMe().then(function () {
       if (!me.houses.length) { location.hash = '#addhouse/report'; return; }
-      var st = { houseId: me.houses.length === 1 ? me.houses[0].id : null, service: null };
+      var preset = me.houses.filter(function (h) { return h.id === houseId; })[0];
+      var st = { houseId: preset ? preset.id : me.houses.length === 1 ? me.houses[0].id : null, service: null };
       var html = backLink('Главная', '') + '<h1>Что случилось?</h1>';
       html += '<label>Где</label><div class="chips" id="houses">' + me.houses.map(function (h) {
         return '<button class="chip' + (st.houseId === h.id ? ' on' : '') + '" data-id="' + h.id + '">📍 ' + esc(h.address) + '</button>';
-      }).join('') + '</div>';
+      }).join('') + '</div>' +
+        '<p class="hint warn" id="whereHint" hidden>👆 Выберите адрес, где отключили</p>';
       html += '<label>Что</label><div class="grid" id="services">' + me.services.map(function (s) {
         return '<button class="tile" data-key="' + s.key + '" aria-label="' + esc(s.button) + '">' + (SERVICE_ICON[s.key] || '') + '<span>' + esc(s.button) + '</span></button>';
       }).join('') + '</div>';
@@ -311,7 +381,8 @@
         '<label><input type="radio" name="ev" value="written"> Написал обращение (Госуслуги Дом, ГИС ЖКХ)</label>' +
         '<label><input type="radio" name="ev" value="self"> Не дозвонился — соберу акт с соседями</label>' +
         '<div id="numberBox"><label for="number">Номер заявки или обращения</label><input id="number" maxlength="40"></div>' +
-        '<label for="started">Когда началось (для заявки — когда её приняли)</label><input id="started" type="datetime-local" value="' + localNow() + '">' +
+        '<label for="started">Когда отключили</label><input id="started" type="datetime-local" value="' + localNow() + '">' +
+        '<p class="muted hint">Если не знаете точно — время звонка в аварийную службу.</p>' +
         '</section>' +
         '<div class="actions"><button class="btn primary" id="submit">Записать</button></div></div>';
       root.innerHTML = html;
@@ -320,7 +391,11 @@
       function refresh() {
         each('#houses .chip', function (b) { b.classList.toggle('on', Number(b.getAttribute('data-id')) === st.houseId); });
         each('#services .tile', function (b) { b.classList.toggle('on', b.getAttribute('data-key') === st.service); });
+        $('whereHint').hidden = !(st.service && !st.houseId);
+        var wasHidden = $('details').hidden;
         $('details').hidden = !(st.houseId && st.service);
+        // Продолжение формы ниже экрана — прокручиваем, чтобы было видно, что делать дальше.
+        if (wasHidden && !$('details').hidden) setTimeout(function () { $('details').scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 50);
         if (!st.service) return;
         var s = me.services.filter(function (x) { return x.key === st.service; })[0];
         var h = me.houses.filter(function (x) { return x.id === st.houseId; })[0];
@@ -373,6 +448,21 @@
     root.innerHTML = '<p class="state">Загружаю…</p>';
     api('GET', '/api/cases/' + id).then(function (data) {
       var c = data.case;
+      var hint = data.executorHint;
+      // Получатель из карточки дома — если в заявлении его ещё нет.
+      if (hint && !(c.claim && c.claim.executor)) {
+        c.claim = c.claim || {};
+        c.claim.executor = hint.name;
+        c.claim.executorInn = c.claim.executorInn || hint.inn || '';
+        c.claim.executorType = hint.type;
+      }
+      var person = data.personHint;
+      if (person && !(c.claim && c.claim.fio)) {
+        c.claim = c.claim || {};
+        c.claim.fio = person.fio;
+        c.claim.flat = c.claim.flat || person.flat || '';
+      }
+      var open = c.status === 'tracking' || c.status === 'ended' || c.status === 'claim_ready';
       var html = backLink('Главная', '');
       html += '<h1>' + (SERVICE_ICON[c.service] || '') + ' ' + esc(c.serviceTitle) + '</h1>';
       html += '<p class="muted">' + esc(c.address) + ' · ' + esc(c.statusTitle) + (c.demo ? '<span class="demo-tag">демо-данные</span>' : '') + '</p>';
@@ -390,14 +480,16 @@
         (c.readings.length ? '<dt>Замеры</dt><dd class="num">' + c.readings.map(function (r) { return esc(when(r.at, c.tz)) + ': +' + String(r.tempC).replace('.', ',') + ' °C'; }).join('<br>') + '</dd>' : '') +
         (c.neighbours > 0 ? '<dt>Соседи</dt><dd>' + c.neighbours + '</dd>' : '') +
         (c.inspection ? '<dt>Проверка</dt><dd>' + esc(INSPECTION[c.inspection] || '') + '</dd>' : '') +
-        (c.act ? '<dt>Акт</dt><dd>' + esc(ACT_STATUS[c.act.status] || '') + ' · жителей: ' + c.act.residents + '</dd>' : '') +
+        (c.act ? '<dt>Акт</dt><dd>' + esc(ACT_STATUS[c.act.status] || '') + '</dd>' : '') +
         (c.photos > 0 ? '<dt>Фото</dt><dd class="num">' + c.photos + '</dd>' : '') +
         '</dl>' +
-        (c.evidence === 'self' && !c.act ? '<p class="muted hint">📄 Без номера заявки нужен акт — доказательство, что услуги не было. В чате с ботом нажмите «📄 Акт с соседями»: пришлю PDF, соседи его подпишут.</p>' : '') +
         '</section>';
 
+      if (open && (c.evidence === 'self' || c.inspection === 'no_show' || (c.act && c.act.mine))) html += actSection(c);
+
       if (c.endedAt) {
-        html += '<section class="sheet"><h2>Деньги <small>' + esc(c.basis) + '</small></h2>' + (c.estimate > 0 ? '<p class="total">Положено ≈ ' + rub(c.estimate) + '</p>' : '') + '<ul class="formula">';
+        html += '<section class="sheet"><h2>Деньги <small>' + esc(c.basis) + '</small></h2><p class="total" id="liveTotal"' + (c.estimate > 0 ? '' : ' hidden') + '>Положено ≈ ' + rub(c.estimate) + '</p>' +
+          (c.estimate > 0 || !c.months.some(function (m) { return m.percent > 0; }) ? '' : '<p class="muted hint" id="liveHint">Впишите ниже, сколько начислено за услугу, — покажу сумму в рублях.</p>') + '<ul class="formula">';
         c.months.forEach(function (m) {
           if (c.months.length > 1) html += '<li class="month">' + esc(monthTitle(m.month)) + '</li>';
           m.lines.forEach(function (l) { html += '<li>' + esc(l) + '</li>'; });
@@ -405,6 +497,11 @@
         html += '</ul><p class="source muted">Источник: <a href="' + esc(c.basisUrl) + '" data-ext>' + esc(c.basis) + ' к ПП РФ № 354</a>. Итог считает УК.</p></section>';
       }
 
+      if (c.status === 'claim_ready') {
+        html += '<section class="sheet"><h2>Что дальше</h2><ol class="steps">' +
+          '<li>Распечатайте заявление в 2 экземплярах и отдайте в УК — на своём попросите отметку о приёме. Или отправьте PDF через «Госуслуги Дом».</li>' +
+          '<li>Через месяц проверьте квитанцию — я напомню в чате с ботом.</li></ol></section>';
+      }
       if (c.endedAt && c.status !== 'closed') html += claimForm(c);
 
       html += '<div class="actions">';
@@ -421,6 +518,29 @@
     if (c.evidence === 'ads' && c.adsNumber) return 'заявка № ' + c.adsNumber + (c.role === 'neighbour' ? ' (по дому)' : '');
     if (c.evidence === 'written') return 'обращение' + (c.adsNumber ? ' № ' + c.adsNumber : '');
     return c.act && c.act.status === 'signed' ? 'акт с соседями' : 'без номера заявки';
+  }
+
+  /** Акт с соседями: доказательство, если нет номера заявки или УК не пришла на замер. */
+  function actSection(c) {
+    var a = c.act;
+    var html = '<section class="sheet"><h2>📄 Акт с соседями <small>доказательство</small></h2>';
+    if (a && a.status === 'signed') {
+      return html + '<p>✅ Акт подписан' + (a.chair ? ' жителями и председателем совета дома' : '') + '. Он указан в приложениях к заявлению — приложите его копию.</p>' +
+        '<button class="btn" id="actPdf">📄 Акт (PDF)</button></section>';
+    }
+    html += '<p class="muted hint">Акт доказывает, что услуги не было. Распечатайте его и попросите расписаться 2+ соседей и председателя совета дома. Потом акт прикладывают к заявлению.</p>';
+    if (a && a.mine) {
+      html += '<button class="btn" id="actPdf">📄 Акт для подписи (PDF)</button>';
+      if (a.initiator) {
+        html += '<label><input type="checkbox" id="actChair"> Председатель совета дома тоже подписал</label>' +
+          '<div class="actions"><button class="btn primary" id="actSigned">✅ Акт подписан на бумаге</button></div>';
+      }
+      return html + '</section>';
+    }
+    var cl = c.claim || {};
+    return html + '<div class="row2"><div><label for="actFio">Ваши ФИО</label><input id="actFio" autocomplete="name" value="' + esc(cl.fio || '') + '"></div>' +
+      '<div><label for="actFlat">Квартира</label><input id="actFlat" value="' + esc(cl.flat || '') + '"></div></div>' +
+      '<div class="actions"><button class="btn primary" id="actPdf">📄 Получить акт для подписи (PDF)</button></div></section>';
   }
 
   function claimForm(c) {
@@ -479,6 +599,23 @@
       }).catch(function (e) { haptic('error'); toast(e.message); done(); });
     };
 
+    // Сумма в рублях — сразу, пока житель вписывает начисление из квитанции.
+    each('.bill', function (el) {
+      el.addEventListener('input', function () {
+        var sum = 0;
+        c.months.forEach(function (m) {
+          var inp = $('bill_' + m.month);
+          var bill = inp ? parseFloat(inp.value.replace(/\s/g, '').replace(',', '.')) : m.bill;
+          if (m.percent > 0 && bill > 0) sum += Math.round(bill * m.percent) / 100;
+        });
+        var t = $('liveTotal');
+        if (!t) return;
+        t.hidden = !(sum > 0);
+        t.textContent = 'Положено ≈ ' + rub(Math.round(sum * 100) / 100);
+        if ($('liveHint')) $('liveHint').hidden = sum > 0;
+      });
+    });
+
     var pdfBtn = $('pdf');
     if (pdfBtn) pdfBtn.onclick = function () {
       var done = busy(pdfBtn, 'Готовлю PDF…');
@@ -486,11 +623,38 @@
         return api('POST', '/api/cases/' + c.id + '/pdf-link');
       }).then(function (r) {
         track('app_pdf');
-        if (WebApp && WebApp.downloadFile && initData) {
-          return Promise.resolve(WebApp.downloadFile(r.url, r.fileName)).then(function () { toast('Заявление скачивается'); });
-        }
-        window.open(r.url, '_blank');
+        return download(r.url, r.fileName).then(function () {
+          toast('Заявление скачивается');
+          // Статус дела сменился на «заявление готово» — показываем, что делать дальше.
+          if (c.status !== 'claim_ready') setTimeout(function () { renderCase(c.id); }, 1200);
+        });
       }).catch(function (e) { toast(e && e.message ? e.message : 'Не удалось скачать PDF'); }).then(done);
+    };
+
+    var actBtn = $('actPdf');
+    if (actBtn) actBtn.onclick = function () {
+      var fio = $('actFio') ? $('actFio').value.trim() : '';
+      var flat = $('actFlat') ? $('actFlat').value.trim() : '';
+      if ($('actFio') && fio.split(/\s+/).length < 2) { toast('Впишите фамилию, имя и отчество'); $('actFio').focus(); return; }
+      var done = busy(actBtn, 'Готовлю акт…');
+      api('POST', '/api/cases/' + c.id + '/act', { fio: fio || (c.claim && c.claim.fio) || 'не указано', flat: flat || undefined }).then(function (r) {
+        track('app_act');
+        return download(r.url, r.fileName).then(function () {
+          toast('Акт скачивается — распечатайте и соберите подписи');
+          if (!(c.act && c.act.mine)) setTimeout(function () { renderCase(c.id); }, 1200);
+        });
+      }).catch(function (e) { toast(e.message); }).then(done);
+    };
+
+    var signedBtn = $('actSigned');
+    if (signedBtn) signedBtn.onclick = function () {
+      var done = busy(signedBtn, 'Сохраняю…');
+      api('POST', '/api/cases/' + c.id + '/act/signed', { chair: $('actChair').checked }).then(function () {
+        haptic('success');
+        track('app_act_signed');
+        toast('Акт подписан — он попадёт в ваше заявление');
+        renderCase(c.id);
+      }).catch(function (e) { toast(e.message); done(); });
     };
 
     var scanBtn = $('scan');
@@ -520,11 +684,12 @@
       var done = busy(shareBtn, 'Готовлю карточку…');
       api('POST', '/api/cases/' + c.id + '/share').then(function (r) {
         track('app_share');
-        if (WebApp && WebApp.shareMaxContent && initData) {
+        if (r.mid && WebApp && WebApp.shareMaxContent && initData) {
           // Бот уже прислал карточку в диалог; пересылаем её в домовой чат через нативный экран MAX.
           return Promise.resolve(WebApp.shareMaxContent({ mid: r.mid, chatType: 'DIALOG' })).then(function () { haptic('success'); });
         }
-        toast('Карточка в чате с ботом — перешлите её соседям');
+        if (r.link) return shareLink(r.link, r.text);
+        toast(r.mid ? 'Карточка в чате с ботом — перешлите её соседям' : 'Бот не подключён — в демо-режиме ссылку для соседей не создать');
       }).catch(function (e) { toast(e && e.message ? e.message : 'Не удалось поделиться'); }).then(done);
     };
   }
@@ -536,7 +701,7 @@
     if ((m = /^#case\/(\d+)$/.exec(h))) return renderCase(Number(m[1]), false);
     if ((m = /^#house\/(\d+)$/.exec(h))) return renderHouse(Number(m[1]));
     if ((m = /^#addhouse(\/report)?$/.exec(h))) return renderAddHouse(m[1] ? 'report' : null);
-    if (h === '#report') return renderReport();
+    if ((m = /^#report(?:\/(\d+))?$/.exec(h))) return renderReport(m[1] ? Number(m[1]) : null);
     renderHome();
   }
 
