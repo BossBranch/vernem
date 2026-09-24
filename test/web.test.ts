@@ -534,7 +534,8 @@ test('кто принял заявку — в заявлении; после п�
     const day = (shift: number) => new Date(Date.now() + shift).toLocaleDateString('sv-SE', { timeZone: 'Europe/Moscow' });
     const bad = await fetch(`${base}/api/cases/${pid}/submitted`, { method: 'POST', headers, body: JSON.stringify({ date: day(24 * 3_600_000) }) });
     assert.equal(bad.status, 400, 'завтрашняя дата подачи — ошибка');
-    const ok = (await (await fetch(`${base}/api/cases/${pid}/submitted`, { method: 'POST', headers, body: JSON.stringify({ date: day(0) }) })).json()) as any;
+    // Приложение шлёт «сегодня, 12:00» — до полудня это не «будущее»: сравниваем по дню.
+    const ok = (await (await fetch(`${base}/api/cases/${pid}/submitted`, { method: 'POST', headers, body: JSON.stringify({ date: `${day(0)}T12:00:00` }) })).json()) as any;
     assert.match(ok.case.statusTitle, /^Подано — ждём квитанцию за [а-я]+ \d{4}$/);
   });
 });
@@ -543,7 +544,7 @@ test('health и статика мини-приложения', async () => {
   await withServer(async (base) => {
     const health = (await (await fetch(`${base}/health`)).json()) as any;
     assert.equal(health.ok, true);
-    assert.equal(health.version, '1.0.6');
+    assert.equal(health.version, '1.0.7');
     const page = await fetch(`${base}/app/`);
     assert.equal(page.status, 200);
     const html = await page.text();

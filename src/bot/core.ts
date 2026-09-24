@@ -1372,7 +1372,7 @@ export class Vernem {
   private askExecutorType(userId: number, pid: number) {
     const c = this.ownCase(userId, pid)!;
     const norm = this.norms.services[c.incident.service_key];
-    const rows: Btn[][] = [[cb('УК / ТСЖ', `ex:${pid}:uk`), cb('Ресурсоснабжающей', `ex:${pid}:rso`)]];
+    const rows: Btn[][] = [[cb('УК / ТСЖ', `ex:${pid}:uk`), cb('Поставщику (Теплосеть и т. п.)', `ex:${pid}:rso`)]];
     if (c.incident.service_key === 'waste_off') rows.push([cb('Региональному оператору ТКО', `ex:${pid}:rop`)]);
     rows.push([cb('Не знаю', `ex:${pid}:unknown`)]);
     return this.send(userId, {

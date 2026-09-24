@@ -405,7 +405,7 @@ export function createApp(deps: WebDeps) {
     const houseContacts = { ukName: info.ukName ?? null, ukEmail: info.ukEmail ?? null, ukAddress: info.ukAddress ?? null, adsPhone: info.adsPhone ?? null };
     // Подписант акта — чтобы мини-приложение предупредило, если ФИО в заявлении не совпадают с актом.
     const actSigner = signer ? { fio: signer.fio, flat: signer.flat, signed: act?.status === 'signed' } : null;
-    res.json({ case: s, claimText, executorHint, personHint, houseContacts, actSigner, savedPersonal: !!u?.save_personal });
+    res.json({ case: s, claimText, executorHint, personHint, houseContacts, actSigner, savedPersonal: !!u?.save_personal, botConnected: !!cfg.token });
   });
 
   api.put('/cases/:id/claim', (req: AuthedRequest, res) => {
@@ -531,7 +531,7 @@ export function createApp(deps: WebDeps) {
     if (!date || Number.isNaN(date.getTime())) throw fieldError('submittedAt', 'Укажите дату подачи');
     // «Сегодня» — по часовому поясу дома: подать заявление завтрашним днём нельзя.
     const today = new Date().toLocaleDateString('sv-SE', { timeZone: c.house.tz });
-    if (/^\d{4}-\d{2}-\d{2}$/.test(raw!) ? raw! > today : date.getTime() > Date.now()) throw fieldError('submittedAt', 'Эта дата ещё не наступила');
+    if (/^\d{4}-\d{2}-\d{2}/.test(raw!) ? raw!.slice(0, 10) > today : date.getTime() > Date.now()) throw fieldError('submittedAt', 'Эта дата ещё не наступила');
     if (date.getTime() < new Date(c.p.started_at).getTime() - 24 * 3_600_000) throw fieldError('submittedAt', 'Заявление не могли подать раньше отключения');
     const created = claimOf(c.p).createdAt;
     if (created && raw!.slice(0, 10) < new Date(created).toLocaleDateString('sv-SE', { timeZone: c.house.tz })) {
