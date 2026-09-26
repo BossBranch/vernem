@@ -281,8 +281,13 @@ export class Vernem {
     const c = this.ownCase(userId, pid);
     if (!c) return 'Дело не найдено';
     if (c.p.status === 'refunded') return 'Перерасчёт уже получен — время не меняем';
-    const start = startedAt ?? new Date(c.p.started_at);
-    const end = endedAt ?? (c.p.ended_at ? new Date(c.p.ended_at) : null);
+    // Поле времени в приложении без секунд: то же время до минуты — не изменение, храним прежнее точное.
+    const sameMinute = (a: Date, b: Date) => Math.floor(a.getTime() / 60_000) === Math.floor(b.getTime() / 60_000);
+    const oldStart = new Date(c.p.started_at);
+    const oldEnd = c.p.ended_at ? new Date(c.p.ended_at) : null;
+    const start = startedAt && !sameMinute(startedAt, oldStart) ? startedAt : oldStart;
+    const end = endedAt && !(oldEnd && sameMinute(endedAt, oldEnd)) ? endedAt : oldEnd;
+    if (start === oldStart && end === oldEnd) return null;
     const now = this.now().getTime();
     if (start.getTime() > now + 5 * 60_000) return 'Время начала ещё не наступило';
     if (now - start.getTime() > 366 * 24 * MS_HOUR) return 'Это было больше года назад — такое проще решать через жилищную инспекцию';
@@ -1507,11 +1512,13 @@ export class Vernem {
     // Без номера заявки и без подписанного акта заявление слабое — говорим прямо и даём кнопку акта.
     const act = this.db.getActByIncident(c.incident.id);
     const weak = c.incident.evidence === 'self' && !c.p.own_ads_number && act?.status !== 'signed';
-    const rows: Btn[][] = weak ? actButtons(this, fresh) : [];
+    const lateNumber = c.incident.evidence === 'self' && !!c.p.own_ads_number && act?.status !== 'signed';
+    const rows: Btn[][] = weak || lateNumber ? actButtons(this, fresh) : [];
     rows.push([cb('👥 Позвать соседей', `nb:${pid}`), cb('⬅️ Меню', 'menu')]);
     return this.send(userId, {
       text: [
         weak ? '⚠️ В заявлении нет доказательства — ни номера заявки, ни акта. Подпишите акт с соседями и приложите его.' : '',
+        lateNumber ? '⚠️ Номер заявки получен позже начала: время до звонка подтвердит только акт с соседями.' : '',
         act?.status === 'signed' ? '📎 Акт указан в приложениях — приложите его копию.' : '',
         SEND_HOWTO,
         save ? '' : 'ФИО и квартиру из базы удалил — они остались только в PDF.',

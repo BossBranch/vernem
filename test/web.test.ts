@@ -540,11 +540,31 @@ test('кто принял заявку — в заявлении; после п�
   });
 });
 
+test('исправить время: то же время без секунд — не изменение; огромная сумма — понятная ошибка', async () => {
+  await withServer(async (base, h) => {
+    const headers = { 'X-Max-Init-Data': initFor(71), 'Content-Type': 'application/json' };
+    const pid = await demoCase(h, 71);
+    await fetch(`${base}/api/cases/${pid}/claim`, { method: 'PUT', headers, body: JSON.stringify({ fio: 'Орлова Анна Петровна' }) });
+    await fetch(`${base}/api/cases/${pid}/pdf-link`, { method: 'POST', headers });
+    const before = h.db.getParticipant(pid)!;
+    // Поле времени в приложении без секунд: отправляем начало и окончание, обрезанные до минуты.
+    const minute = (iso: string) => new Date(Math.floor(new Date(iso).getTime() / 60_000) * 60_000).toISOString();
+    const r = await fetch(`${base}/api/cases/${pid}/times`, { method: 'PATCH', headers, body: JSON.stringify({ startedAt: minute(before.started_at), endedAt: minute(before.ended_at!) }) });
+    assert.equal(r.status, 200);
+    const data = (await r.json()) as any;
+    assert.equal(data.case.claimOutdated, false, 'заявление не устарело');
+    assert.equal(h.db.getParticipant(pid)!.started_at, before.started_at, 'точное время не перезаписано');
+
+    const big = (await (await fetch(`${base}/api/cases/${pid}/claim`, { method: 'PUT', headers, body: JSON.stringify({ bills: { [data.case.months[0].month]: '99999999' } }) })).json()) as any;
+    assert.match(Object.values(big.fields ?? {}).join(' '), /меньше 100 000 ₽/);
+  });
+});
+
 test('health и статика мини-приложения', async () => {
   await withServer(async (base) => {
     const health = (await (await fetch(`${base}/health`)).json()) as any;
     assert.equal(health.ok, true);
-    assert.equal(health.version, '1.0.7');
+    assert.equal(health.version, '1.0.8');
     const page = await fetch(`${base}/app/`);
     assert.equal(page.status, 200);
     const html = await page.text();

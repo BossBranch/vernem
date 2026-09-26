@@ -260,6 +260,8 @@ input[type='radio'] { width: 22px; height: 22px; min-height: 0; flex: 0 0 auto; 
 .money-summary { font-size: 1.05em; margin: 4px 0 8px; }
 details.sheet > summary { padding: 10px 0; min-height: 44px; }
 .step-gap { margin-bottom: 16px; }
+/* Атрибут hidden сильнее любого display у классов (.actions — grid). */
+[hidden] { display: none !important; }
 .chip {
   font: inherit;
   color: var(--ink);

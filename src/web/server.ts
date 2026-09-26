@@ -74,6 +74,10 @@ const innError = innProblem;
 /** Сумма из квитанции: число больше нуля и разумного размера. */
 function billError(raw: string): { amount: number } | { error: string } {
   const amount = parseRubles(raw);
+  // parseRubles отсекает всё больше миллиона — это не «не число», а слишком большая сумма.
+  if (amount === null && /^\s*[1-9][\d\s\u00a0]*([.,]\d+)?\s*(₽|руб\.?|р\.?)?\s*$/i.test(raw)) {
+    return { error: 'Проверьте сумму: плата за одну услугу за месяц обычно меньше 100 000 ₽' };
+  }
   if (amount === null) return { error: 'Сумма — число больше нуля, например 1200 или 1 250,50' };
   if (amount > 100_000) return { error: 'Проверьте сумму: плата за одну услугу за месяц обычно меньше 100 000 ₽' };
   return { amount };
@@ -169,7 +173,7 @@ export function createApp(deps: WebDeps) {
   const ownCase = (req: AuthedRequest) => {
     const id = Number(req.params.id);
     const c = Number.isInteger(id) ? loadCase(db, id) : null;
-    if (!c || c.p.user_id !== req.userId) throw new HttpError(404, 'Случай не найден');
+    if (!c || c.p.user_id !== req.userId) throw new HttpError(404, 'Дело не найдено');
     return c;
   };
 
@@ -568,7 +572,7 @@ export function createApp(deps: WebDeps) {
       }
       const flat = str(req.body?.flat, 10) ?? null;
       const actId = await actFromApp(bot, req.userId!, c.p.id, fio, flat);
-      if (!actId) throw new HttpError(404, 'Случай не найден');
+      if (!actId) throw new HttpError(404, 'Дело не найдено');
       res.json({ url: `${cfg.publicUrl ?? ''}${signLink(`/files/act/${actId}.pdf`, cfg.linkSecret, 600)}`, fileName: actDocFor(db, norms, actId, new Date())?.fileName ?? 'Акт.pdf' });
     } catch (e) {
       next(e);
@@ -650,7 +654,9 @@ export function createApp(deps: WebDeps) {
       const action = req.body?.action === 'undo' ? 'undo' : req.body?.refunded === true || req.body?.action === 'yes' ? 'yes' : 'no';
       let amount: number | null = null;
       if (action === 'yes' && req.body?.amount !== undefined && req.body.amount !== '') {
-        if (/^\s*0+([.,]0+)?\s*(₽|руб\.?)?\s*$/i.test(String(req.body.amount))) throw fieldError('refundAmount', 'Если не вернули ничего — это «Не сделали»');
+        if (/^\s*0+([.,]0+)?\s*(₽|руб\.?)?\s*$/i.test(String(req.body.amount))) {
+          throw fieldError('refundAmount', c.p.status === 'refunded' ? 'Если не вернули ничего — нажмите «Снять отметку «вернули»», потом «Не сделали»' : 'Если не вернули ничего — нажмите «Не сделали»');
+        }
         amount = parseRubles(String(req.body.amount));
         if (amount === null) throw fieldError('refundAmount', 'Сумма — число, например 115 или 115,20');
         if (amount > 1_000_000) throw fieldError('refundAmount', 'Проверьте сумму — это больше миллиона');
