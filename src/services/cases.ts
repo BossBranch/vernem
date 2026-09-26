@@ -141,7 +141,9 @@ export function claimSnapshot(db: Db, norms: Norms, c: CaseBundle, now: Date): s
   // v — доказательства в тексте заявления: подписанный акт, проверка исполнителя, номер заявки.
   const act = db.getActByIncident(c.incident.id);
   const v = [act?.status === 'signed' ? 1 : 0, c.p.inspection ?? '', c.p.own_ads_number ?? c.incident.ads_number ?? ''].join('|');
-  return JSON.stringify({ s: c.p.started_at, e: c.p.ended_at, m: calc.months.map((m) => [m.month, m.percent]), v });
+  // b — плата из квитанции и тарифы: от них сумма в рублях в заявлении.
+  const b = JSON.stringify([Object.entries(billsOf(c.p)).sort(), Object.entries(claimOf(c.p).coldTariff ?? {}).sort()]);
+  return JSON.stringify({ s: c.p.started_at, e: c.p.ended_at, m: calc.months.map((m) => [m.month, m.percent]), v, b });
 }
 
 /** Меньше часа «холодной» горячей воды — копейки; заявление ради этого не делаем. */
@@ -312,8 +314,8 @@ export type CaseSummary = {
 export function snapshotChanged(issued: string, current: string): boolean {
   const old = JSON.parse(issued);
   const cur = JSON.parse(current);
-  // Заявления, выданные до версии 1.0.5, доказательства в снимке не хранят — сравниваем без них.
-  if (!('v' in old)) delete cur.v;
+  // Старые снимки хранят меньше полей (до 1.0.5 — без доказательств, до 1.0.9 — без платы): сравниваем только то, что в них есть.
+  for (const k of Object.keys(cur)) if (!(k in old)) delete cur[k];
   return JSON.stringify(old) !== JSON.stringify(cur);
 }
 

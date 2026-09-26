@@ -38,6 +38,10 @@ export const CITIES: City[] = [
   { name: 'Якутск', tz: 'Asia/Yakutsk' },
   { name: 'Мурманск', tz: 'Europe/Moscow' },
   { name: 'Архангельск', tz: 'Europe/Moscow' },
+  { name: 'Орёл', tz: 'Europe/Moscow' },
+  // Короткие названия: новый город короче 4 букв не принимается («Сам» — недописанная «Самара»).
+  { name: 'Обь', tz: 'Asia/Novosibirsk' },
+  { name: 'Бор', tz: 'Europe/Moscow' },
 ];
 
 /** Как города называют в разговоре. */
@@ -112,6 +116,14 @@ export function resolveCity(text: string, defaultTz: string): City | null {
   if (known) return known;
   // «Сам», «Мо» — недописанное название, а не новый город. Короткие настоящие («Уфа») есть в справочнике.
   if (norm.replace(/[^а-яa-z]/g, '').length < 4) return null;
-  const name = norm.replace(/(^|[\s-])([а-яa-z])/gu, (_m, sep: string, ch: string) => sep + ch.toUpperCase());
+  // Название — как написал житель, с «ё» («Королёв»), но с заглавной буквы.
+  const shown = text
+    .toLowerCase()
+    .replace(/["«»]/g, ' ')
+    .replace(/^\s*(город|г\.?|гор\.?)\s+/u, '')
+    .replace(/\s*-\s*/g, '-')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const name = shown.replace(/(^|[\s-])([а-яёa-z])/gu, (_m, sep: string, ch: string) => sep + ch.toUpperCase());
   return { name, tz: defaultTz };
 }

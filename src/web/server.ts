@@ -344,8 +344,9 @@ export function createApp(deps: WebDeps) {
       const numberRaw = typeof b.number === 'string' ? b.number.trim() : '';
       if (evidence !== 'self' && numberRaw.length > 60) throw fieldError('number', 'Номер слишком длинный — до 60 знаков');
       if (evidence !== 'self' && !str(b.number, 60)) {
-        throw fieldError('number', evidence === 'written' ? 'Впишите номер обращения — он есть в «Госуслугах Дом» или ГИС ЖКХ' : 'Впишите номер заявки или выберите «Не дозвонились»');
+        throw fieldError('number', evidence === 'written' ? 'Впишите номер обращения — он есть в «Госуслугах Дом» или ГИС ЖКХ' : 'Впишите номер заявки или выберите «Звонил(а), но не ответили»');
       }
+      if (evidence !== 'self' && !/[\p{L}\d]/u.test(numberRaw)) throw fieldError('number', 'Номер — цифры или буквы, например 4512 или А-17');
       const r = await bot.reportFromApp(req.userId!, {
         houseId: b.houseId,
         service: b.service,
@@ -489,7 +490,11 @@ export function createApp(deps: WebDeps) {
       db.updateParticipant(c.p.id, { bills: JSON.stringify(bills) });
     }
     // «Запомнить мои данные» — ФИО, квартира и лицевой счёт подставятся в следующие заявления.
-    if (b.remember === true) db.savePerson(req.userId!, c.house.id, claim);
+    if (b.remember === true) {
+      // Пустое поле в этом заявлении не стирает сохранённое для следующих.
+      const prev = db.personFor(req.userId!, c.house.id);
+      db.savePerson(req.userId!, c.house.id, { fio: claim.fio || prev.fio, flat: claim.flat || prev.flat, account: claim.account || prev.account });
+    }
     if (b.remember === false && db.getUser(req.userId!)?.save_personal) db.forgetPerson(req.userId!);
     // Акт ещё не подписан — житель в нём должен называться так же, как в заявлении.
     const act = db.getActByIncident(c.incident.id);

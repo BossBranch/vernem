@@ -305,6 +305,9 @@ test('строгая проверка: документы не противор�
     assert.equal((await check('Питер')).name, 'Санкт-Петербург');
     assert.equal((await check('Масква')).suggestion, 'Москва');
     assert.equal((await check('Сам')).name, null);
+    // Короткие настоящие города — из справочника; «ё» в новом городе не теряется.
+    assert.deepEqual([(await check('Обь')).name, (await check('Обь')).inList], ['Обь', true]);
+    assert.equal((await check('г. Королёв')).name, 'Королёв');
 
     // Квартира в строке адреса — не отдельный дом; улица с заглавной буквы.
     const a = await add({ address: 'тверская д. 7 кв 15', city: 'Москва' });
@@ -557,6 +560,21 @@ test('исправить время: то же время без секунд �
 
     const big = (await (await fetch(`${base}/api/cases/${pid}/claim`, { method: 'PUT', headers, body: JSON.stringify({ bills: { [data.case.months[0].month]: '99999999' } }) })).json()) as any;
     assert.match(Object.values(big.fields ?? {}).join(' '), /меньше 100 000 ₽/);
+
+    // Сменили плату после скачивания — сумма в PDF другая: заявление устарело.
+    const rebilled = (await (await fetch(`${base}/api/cases/${pid}/claim`, { method: 'PUT', headers, body: JSON.stringify({ fio: 'Орлова Анна Петровна', bills: { [data.case.months[0].month]: '2000' } }) })).json()) as any;
+    assert.equal(rebilled.case.claimOutdated, true);
+
+    // «Запомнить» с пустым ФИО в этом заявлении не стирает сохранённое для следующих.
+    await fetch(`${base}/api/cases/${pid}/claim`, { method: 'PUT', headers, body: JSON.stringify({ fio: 'Орлова Анна Петровна', flat: '7', remember: true }) });
+    await fetch(`${base}/api/cases/${pid}/claim`, { method: 'PUT', headers, body: JSON.stringify({ fio: '', flat: '7', remember: true }) });
+    assert.equal(h.db.getUser(71)!.fio, 'Орлова Анна Петровна');
+
+    // Номер заявки без единой буквы или цифры — не номер.
+    const houseId = h.db.listUserHouses(71)[0]?.id ?? (await (await fetch(`${base}/api/me/houses`, { method: 'POST', headers, body: JSON.stringify({ address: 'Лесная 9', city: 'Москва' }) })).json() as any).house.id;
+    const bad = await fetch(`${base}/api/report`, { method: 'POST', headers, body: JSON.stringify({ houseId, service: 'cold_water_off', evidence: 'ads', number: '!!!', startedAt: new Date().toISOString() }) });
+    assert.equal(bad.status, 400);
+    assert.match(((await bad.json()) as any).fields.number, /цифры или буквы/);
   });
 });
 
@@ -564,7 +582,7 @@ test('health и статика мини-приложения', async () => {
   await withServer(async (base) => {
     const health = (await (await fetch(`${base}/health`)).json()) as any;
     assert.equal(health.ok, true);
-    assert.equal(health.version, '1.0.8');
+    assert.equal(health.version, '1.0.9');
     const page = await fetch(`${base}/app/`);
     assert.equal(page.status, 200);
     const html = await page.text();

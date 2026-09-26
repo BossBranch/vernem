@@ -854,7 +854,7 @@ export class Vernem {
 
   private async onNumber(userId: number, text: string, draft: Draft) {
     const number = clean(text).slice(0, 40);
-    if (!number) return this.send(userId, { text: 'Напишите номер обращения цифрами или буквами.' });
+    if (!number || !/[\p{L}\d]/u.test(number)) return this.send(userId, { text: 'Напишите номер обращения цифрами или буквами.' });
     return this.continueDraft(userId, { ...draft, number });
   }
 
