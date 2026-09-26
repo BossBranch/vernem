@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { Harness } from '../src/sim/harness.ts';
 import { fromLocal } from '../src/calc/time.ts';
-import { calcFor, claimTextFor, loadCase, summarize } from '../src/services/cases.ts';
+import { actDocFor, calcFor, claimDocFor, claimTextFor, loadCase, summarize } from '../src/services/cases.ts';
+import { claimToPdf } from '../src/docs/pdf.ts';
 import { buildActDoc } from '../src/docs/act.ts';
 
 const TZ = 'Europe/Moscow';
@@ -698,7 +699,7 @@ test('акт в одиночку: заявление без доказатель
   assert.equal(h.db.getAct(act.id)!.status, 'signed');
   const doc = claimText(h, 1);
   assert.match(doc, /подписанным потребителями без участия исполнителя/);
-  assert.match(doc, /Дозвониться в аварийно-диспетчерскую службу исполнителя не удалось, хотя она обязана ответить на звонок не позднее чем через 5 минут \(п\. 13 .*№ 416\)\. Время начала нарушения указано в акте\./);
+  assert.match(doc, /Сообщение в аварийно-диспетчерскую службу исполнителя не удалось зарегистрировать: на звонок не ответили или не назвали регистрационный номер, хотя номер и время регистрации сообщения обязаны сообщить потребителю \(п\. 106 Правил\), а на звонок — ответить не позднее чем через 5 минут \(п\. 13 .*№ 416\)\. Время начала нарушения указано в акте\./);
   // Заявление выдали до подписи акта — в нём акта нет: его надо скачать заново.
   assert.equal(summarize(h.db, h.bot.norms, loadCase(h.db, pid)!, h.now()).claimOutdated, true, 'подписанный акт делает выданное заявление устаревшим');
   h.close();
@@ -726,6 +727,7 @@ test('демо 2: не дозвонились — акт с двумя демо-
   // Демо-соседи — не жители бота: им ничего не отправляется.
   assert.ok(!h.out.log.some((r) => r.to === 'user' && r.id < 0));
   await h.press(1, 'К делу');
+  await h.advance(2 * H); // воду дали через 2 часа после того, как составили акт
   await h.press(1, 'Воду дали');
   await h.press(1, 'Только что');
   await h.text(1, '600');
@@ -738,9 +740,16 @@ test('демо 2: не дозвонились — акт с двумя демо-
   await h.press(1, 'Не сохранять');
   const doc = claimText(h, 1);
   assert.match(doc, /ДЕМОНСТРАЦИОННЫЕ ДАННЫЕ/);
-  assert.match(doc, /Дозвониться в аварийно-диспетчерскую службу исполнителя не удалось/);
+  assert.match(doc, /Сообщение в аварийно-диспетчерскую службу исполнителя не удалось зарегистрировать/);
   assert.match(doc, /подтверждено актом от .* и председателем совета многоквартирного дома без участия исполнителя \(п\. 110\(1\) Правил\)/);
   assert.match(doc, /Копия акта о нарушении качества/);
+  // Акт составили до «Воду дали»: скачанная позже копия совпадает с подписанной бумагой.
+  const actText = actDocFor(h.db, h.bot.norms, act.id, h.now())!.facts.join(' ');
+  assert.match(actText, /на момент составления акта не устранено/);
+  assert.doesNotMatch(actText, / по \d{2}\.\d{2}\.\d{4}/);
+  // Заявление с актом в приложениях — на одном листе: отметка о принятии не уезжает на второй.
+  const pdf = await claimToPdf(claimDocFor(h.db, h.bot.norms, loadCase(h.db, h.db.listUserParticipants(1)[0].id)!, h.now()));
+  assert.equal((pdf.toString('latin1').match(/\/Type \/Page[^s]/g) ?? []).length, 1, 'одна страница');
   h.close();
 });
 

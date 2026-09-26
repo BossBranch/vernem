@@ -35,12 +35,14 @@ export function buildActDoc(input: ActDocInput): ClaimDoc {
   const tz = house.tz;
   const serviceName = norm.title.replace(/\s*\(.*\)$/, '');
   const start = new Date(incident.started_at);
+  // Скачанная позже копия должна совпадать с подписанной бумагой: окончание пишем, только если оно было известно при составлении.
+  const endedAtAct = incident.ended_at && new Date(incident.ended_at).getTime() <= new Date(act.created_at).getTime() ? new Date(incident.ended_at) : null;
   const what = norm.kind === 'interruption' ? 'коммунальная услуга не предоставляется' : `${norm.kind === 'heating_temperature' ? 'температура воздуха в жилых помещениях' : 'температура горячей воды'} ниже нормативной`;
 
   const facts = [
     `Адрес: ${docAddress(house)}${incident.entrance ? `, подъезд ${incident.entrance}` : ''}.`,
     `Коммунальная услуга: «${serviceName}».`,
-    `Нарушение: ${what} с ${formatDateTime(start, tz)}${incident.ended_at ? ` по ${formatDateTime(new Date(incident.ended_at), tz)}` : ' — на момент составления акта не устранено'}.`,
+    `Нарушение: ${what} с ${formatDateTime(start, tz)}${endedAtAct ? ` по ${formatDateTime(endedAtAct, tz)}` : ' — на момент составления акта не устранено'}.`,
   ];
   const measured = readings.filter((r) => r.readings.length);
   if (measured.length) {

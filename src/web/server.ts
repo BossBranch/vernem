@@ -344,7 +344,7 @@ export function createApp(deps: WebDeps) {
       const numberRaw = typeof b.number === 'string' ? b.number.trim() : '';
       if (evidence !== 'self' && numberRaw.length > 60) throw fieldError('number', 'Номер слишком длинный — до 60 знаков');
       if (evidence !== 'self' && !str(b.number, 60)) {
-        throw fieldError('number', evidence === 'written' ? 'Впишите номер обращения — он есть в «Госуслугах Дом» или ГИС ЖКХ' : 'Впишите номер заявки или выберите «Звонил(а), но не ответили»');
+        throw fieldError('number', evidence === 'written' ? 'Впишите номер обращения — он есть в «Госуслугах Дом» или ГИС ЖКХ' : 'Впишите номер заявки или выберите «Номера нет»');
       }
       if (evidence !== 'self' && !/[\p{L}\d]/u.test(numberRaw)) throw fieldError('number', 'Номер — цифры или буквы, например 4512 или А-17');
       const r = await bot.reportFromApp(req.userId!, {
@@ -662,9 +662,12 @@ export function createApp(deps: WebDeps) {
         if (/^\s*0+([.,]0+)?\s*(₽|руб\.?)?\s*$/i.test(String(req.body.amount))) {
           throw fieldError('refundAmount', c.p.status === 'refunded' ? 'Если не вернули ничего — нажмите «Снять отметку «вернули»», потом «Не сделали»' : 'Если не вернули ничего — нажмите «Не сделали»');
         }
-        amount = parseRubles(String(req.body.amount));
+        const rawAmount = String(req.body.amount);
+        amount = parseRubles(rawAmount);
+        // parseRubles отсекает всё больше миллиона: «2000000» — не «не число», а слишком большая сумма.
+        const tooBig = (amount !== null && amount > 100_000) || (amount === null && /^\s*[1-9][\d\s\u00a0]*([.,]\d+)?\s*(₽|руб\.?|р\.?)?\s*$/i.test(rawAmount));
+        if (tooBig) throw fieldError('refundAmount', 'Проверьте сумму: перерасчёт по одной услуге обычно меньше 100 000 ₽');
         if (amount === null) throw fieldError('refundAmount', 'Сумма — число, например 115 или 115,20');
-        if (amount > 1_000_000) throw fieldError('refundAmount', 'Проверьте сумму — это больше миллиона');
       }
       const err = await bot.receiptFromApp(req.userId!, c.p.id, action, amount);
       if (err) throw new HttpError(422, err);

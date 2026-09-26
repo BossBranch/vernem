@@ -24,7 +24,8 @@ h.db.setUserHouse(userId, demoHouse.id, { entrance: '2', flat: '42' });
 h.db.setHouseInfo(demoHouse.id, {
   ukName: 'ООО «УК Пример» (демо)',
   ukInn: '7700000009',
-  adsPhone: '+7 000 000-00-00 (демо)',
+  // Без «(демо)»: иначе проверка телефона не даст сохранить карточку демо-дома. Демо видно по адресу и УК.
+  adsPhone: '+7 000 000-00-00',
   rsoHeat: 'УК',
   rsoWater: 'УК',
   updatedAt: h.now().toISOString(),

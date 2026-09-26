@@ -239,8 +239,9 @@ export class Vernem {
     // Ответ про лифт — свойство дома: лимит перерыва света одинаков для всех дел этого дома.
     if (r.service === 'electricity_off' && r.variant) {
       const house = this.db.getHouse(r.houseId)!;
+      // В форме один вариант «Нет или не знаю» — «Нет» за весь дом по нему не ставим, только «Да».
       const two = r.variant === 'two_sources';
-      if (this.db.houseInfo(house).twoPowerSources !== two) {
+      if (two && this.db.houseInfo(house).twoPowerSources !== true) {
         this.db.setHouseInfo(r.houseId, { ...this.db.houseInfo(house), twoPowerSources: two });
         this.recheckPowerCases(r.houseId);
       }

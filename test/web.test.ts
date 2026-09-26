@@ -578,11 +578,35 @@ test('исправить время: то же время без секунд �
   });
 });
 
+test('лифт «не знаю» не ставит «Нет» всему дому; огромная сумма возврата — ошибка', async () => {
+  await withServer(async (base, h) => {
+    const headers = { 'X-Max-Init-Data': initFor(81), 'Content-Type': 'application/json' };
+    await h.start(81);
+    const { house } = (await (await fetch(`${base}/api/me/houses`, { method: 'POST', headers, body: JSON.stringify({ address: 'Мира 21', city: 'Москва' }) })).json()) as any;
+    const report = (body: object) => fetch(`${base}/api/report`, { method: 'POST', headers, body: JSON.stringify({ houseId: house.id, service: 'electricity_off', evidence: 'ads', number: '5', ...body }) }).then((r) => r.json() as any);
+    const info = () => h.db.houseInfo(h.db.getHouse(house.id)!).twoPowerSources;
+    const first = await report({ variant: 'one_source', startedAt: new Date(Date.now() - 30 * 3_600_000).toISOString() });
+    assert.equal(info(), undefined, '«Нет или не знаю» — ответ за дом не записан');
+    await fetch(`${base}/api/cases/${first.caseId}/end`, { method: 'POST', headers, body: JSON.stringify({ endedAt: new Date(Date.now() - 26 * 3_600_000).toISOString() }) });
+    await report({ variant: 'two_sources', startedAt: new Date(Date.now() - 2 * 3_600_000).toISOString() });
+    assert.equal(info(), true, '«Да» — записан');
+
+    // Сумма возврата больше 100 000 ₽ по одной услуге — почти наверняка опечатка.
+    await fetch(`${base}/api/cases/${first.caseId}/claim`, { method: 'PUT', headers, body: JSON.stringify({ fio: 'Мирова Анна Петровна', bills: { [new Date(Date.now() - 30 * 3_600_000).toISOString().slice(0, 7)]: '900' } }) });
+    await fetch(`${base}/api/cases/${first.caseId}/pdf-link`, { method: 'POST', headers });
+    for (const amount of ['115200', '2000000']) {
+      const r = await fetch(`${base}/api/cases/${first.caseId}/receipt`, { method: 'POST', headers, body: JSON.stringify({ action: 'yes', amount }) });
+      assert.equal(r.status, 400, amount);
+      assert.match(((await r.json()) as any).fields.refundAmount, /меньше 100 000 ₽/);
+    }
+  });
+});
+
 test('health и статика мини-приложения', async () => {
   await withServer(async (base) => {
     const health = (await (await fetch(`${base}/health`)).json()) as any;
     assert.equal(health.ok, true);
-    assert.equal(health.version, '1.0.9');
+    assert.equal(health.version, '1.0.10');
     const page = await fetch(`${base}/app/`);
     assert.equal(page.status, 200);
     const html = await page.text();
