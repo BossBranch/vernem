@@ -228,7 +228,7 @@ export function buildClaim(input: ClaimInput): ClaimDoc {
     const allowed = allowedMonthlyHours(norm.interruption, incident.variant);
     const unit = norm.interruption.unit_hours === 1 ? 'каждый час' : `каждые ${norm.interruption.unit_hours} ч`;
     normLines.push(
-      `Согласно ${norm.item} к Правилам предоставления коммунальных услуг (утв. ПП РФ от 06.05.2011 № 354) допустимая продолжительность перерыва составляет ${fmtNum(allowed)} ч суммарно в течение месяца; за ${unit} превышения размер платы за месяц снижается на ${fmtPercent(norm.interruption.rate_percent)}.`,
+      `Согласно ${norm.item} к Правилам предоставления коммунальных услуг (утв. ПП РФ от 06.05.2011 № 354) допустимая продолжительность перерыва составляет ${fmtNum(allowed)} ч суммарно в течение месяца${incident.service_key === 'electricity_off' && incident.variant === 'two_sources' ? ' (при наличии двух независимых взаимно резервирующих источников питания — многоквартирный дом с лифтом или выше 9 этажей)' : ''}; за ${unit} превышения размер платы за месяц снижается на ${fmtPercent(norm.interruption.rate_percent)}.`,
     );
   } else {
     normLines.push(

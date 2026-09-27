@@ -219,7 +219,8 @@ h2.section { margin: 28px 0 12px; }
 .ledger .sum { flex: 0 0 auto; font-weight: 700; font-variant-numeric: tabular-nums; }
 
 /* Карточки дел: иконка, прогресс из 4 шагов, «Сейчас: …» */
-.cases, .houses { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+/* minmax(0, 1fr): длинная сумма или адрес не растягивают карточку шире экрана (на 320 px была прокрутка). */
+.cases, .houses { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
 .case {
   display: grid;
   gap: 10px;
@@ -376,6 +377,7 @@ footer > button { background: none; border: 0; padding: 12px 0; min-height: 44px
 .seg button { min-height: 52px; border-radius: var(--radius-btn); border: 1.5px solid var(--line); background: var(--sheet); font: inherit; color: var(--ink); cursor: pointer; }
 .seg button.on { border: 2px solid var(--action); background: var(--action-soft); font-weight: 600; }
 .q { font-weight: 700; margin: 18px 0 8px; }
+.sheet > .q:first-child { margin-top: 0; }
 .ok { color: var(--money); }
 
 /* ---------- заметки ---------- */

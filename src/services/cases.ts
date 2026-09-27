@@ -301,7 +301,7 @@ export type CaseSummary = {
   demo: boolean;
   /** 1 — демо из бота или «есть номер», 3 — архивное демо «вернули меньше» (демо-данные мини-приложения). */
   demoKind: number;
-  months: { month: string; percent: number; lines: string[]; bill: number | null; billHint: number | null; coldTariffHours: number }[];
+  months: { month: string; percent: number; lines: string[]; bill: number | null; billHint: number | null; coldTariffHours: number; hoursBelow: number | null }[];
   serviceButton: string;
   basis: string;
   basisUrl: string;
@@ -312,7 +312,7 @@ export type CaseSummary = {
   readings: { id: number; at: string; tempC: number }[];
   cardMid: string | null;
   /** mine — житель вписан в акт или начал его; initiator — может отметить «подписан». */
-  act: { status: Act['status']; residents: number; chair: boolean; mine: boolean; initiator: boolean } | null;
+  act: { status: Act['status']; residents: number; chair: boolean; mine: boolean; initiator: boolean; demoSigners: string[] } | null;
   photos: number;
   inspection: Participant['inspection'];
   /** Заявление уже выдавали, а расчёт или время с тех пор изменились. */
@@ -320,19 +320,35 @@ export type CaseSummary = {
   extraFlats: { flat: string; account?: string; bills: Record<string, number>; estimate: number }[];
 };
 
-/** Снимок выданного заявления отличается от текущего. */
-export function snapshotChanged(issued: string, current: string): boolean {
+/**
+ * Снимок выданного заявления отличается от текущего. ignore — ключи, которые не сравниваем.
+ * Время сравниваем до минуты: в поле ввода секунд нет — вернули прежнее время, и заявление снова актуально.
+ */
+export function snapshotChanged(issued: string, current: string, ignore: string[] = []): boolean {
   const old = JSON.parse(issued);
   const cur = JSON.parse(current);
   // Старые снимки хранят меньше полей (до 1.0.5 — без доказательств, до 1.0.9 — без платы): сравниваем только то, что в них есть.
   for (const k of Object.keys(cur)) if (!(k in old)) delete cur[k];
+  for (const k of ignore) {
+    delete old[k];
+    delete cur[k];
+  }
+  for (const o of [old, cur]) for (const k of ['s', 'e']) if (typeof o[k] === 'string') o[k] = toMinute(new Date(o[k])).toISOString();
   return JSON.stringify(old) !== JSON.stringify(cur);
 }
 
+/**
+ * Что не делает выданное заявление устаревшим. После подачи — плата из квитанции: рубли в заявлении ориентировочные,
+ * требование — снизить плату на процент; из-за уточнённой платы жителю не нужно подавать заявление заново.
+ */
+export function snapshotIgnore(cl: Claim): string[] {
+  return cl.submittedAt ? ['b'] : [];
+}
+
 function claimOutdated(db: Db, norms: Norms, c: CaseBundle, now: Date): boolean {
-  const snap = claimOf(c.p).issuedSnapshot;
-  if (!snap || !c.p.ended_at) return false;
-  return snapshotChanged(snap, claimSnapshot(db, norms, c, now));
+  const cl = claimOf(c.p);
+  if (!cl.issuedSnapshot || !c.p.ended_at) return false;
+  return snapshotChanged(cl.issuedSnapshot, claimSnapshot(db, norms, c, now), snapshotIgnore(cl));
 }
 
 export function summarize(db: Db, norms: Norms, c: CaseBundle, now: Date): CaseSummary {
@@ -389,6 +405,7 @@ export function summarize(db: Db, norms: Norms, c: CaseBundle, now: Date): CaseS
       bill: bills[m.month] ?? null,
       billHint: hints[m.month] ?? null,
       coldTariffHours: m.coldTariffHours ?? 0,
+      hoursBelow: norm.kind === 'interruption' ? null : (m.totalHours ?? null),
     })),
     serviceButton: norm.button,
     basis: norm.item,
@@ -399,13 +416,13 @@ export function summarize(db: Db, norms: Norms, c: CaseBundle, now: Date): CaseS
     claim: claimOf(c.p),
     readings: db.listReadings(c.p.id).map((r) => ({ id: r.id, at: r.at, tempC: r.temp_c })),
     cardMid: c.p.last_card_mid,
-    act: actSummary(db, c.incident.id, c.p.user_id),
+    act: actSummary(db, c.incident.id, c.p.user_id, !!c.incident.demo),
     photos: db.listPhotos(c.p.id).length,
     inspection: c.p.inspection,
   };
 }
 
-function actSummary(db: Db, incidentId: number, userId: number): CaseSummary['act'] {
+function actSummary(db: Db, incidentId: number, userId: number, demo: boolean): CaseSummary['act'] {
   const a = actOf(db, incidentId);
   if (!a) return null;
   const initiator = a.act.initiator_user_id === userId;
@@ -415,6 +432,8 @@ function actSummary(db: Db, incidentId: number, userId: number): CaseSummary['ac
     chair: a.act.chair_signed === 1 || a.signers.some((s) => s.role === 'chair'),
     mine: initiator || a.signers.some((s) => s.user_id === userId),
     initiator,
+    // Только в демо: «В акте вы и ещё 2 соседа» — а где они? Показываем демо-соседей по именам, как в PDF.
+    demoSigners: demo ? a.signers.filter((s) => s.user_id < 0).map((s) => `${s.fio}${s.flat ? `, кв. ${s.flat}` : ''}`) : [],
   };
 }
 

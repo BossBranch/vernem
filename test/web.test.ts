@@ -174,7 +174,7 @@ test('мини-приложение: акт с соседями, подсказ�
     assert.equal(Buffer.from(await pdf.arrayBuffer()).subarray(0, 4).toString(), '%PDF');
 
     let data = (await (await fetch(`${base}/api/cases/${caseId}`, { headers })).json()) as any;
-    assert.deepEqual(data.case.act, { status: 'collecting', residents: 1, chair: false, mine: true, initiator: true });
+    assert.deepEqual(data.case.act, { status: 'collecting', residents: 1, chair: false, mine: true, initiator: true, demoSigners: [] });
     assert.deepEqual(data.executorHint, { name: 'ООО «УК Садовая»', type: 'uk', inn: '7700000009' });
     assert.deepEqual(data.personHint, { fio: 'Сидорова Мария Ивановна', flat: '14', account: null });
 
@@ -703,11 +703,54 @@ test('время до минуты: «ровно 4 суток» не теряю�
   });
 });
 
+test('устаревшее заявление возвращается в актуальное; плата после подачи его не портит; «кв 5» — не дом', async () => {
+  await withServer(async (base, h) => {
+    const headers = { 'X-Max-Init-Data': initFor(99), 'Content-Type': 'application/json' };
+    await h.start(99);
+    const post = (url: string, body: object = {}) => fetch(`${base}${url}`, { method: 'POST', headers, body: JSON.stringify(body) });
+    const get = async (id: number) => ((await (await fetch(`${base}/api/cases/${id}`, { headers })).json()) as any).case;
+    const put = (id: number, body: object) => fetch(`${base}/api/cases/${id}/claim`, { method: 'PUT', headers, body: JSON.stringify(body) });
+    const times = (id: number, body: object) => fetch(`${base}/api/cases/${id}/times`, { method: 'PATCH', headers, body: JSON.stringify(body) });
+    const { house } = (await (await post('/api/me/houses', { address: 'Лесная 41', city: 'Москва' })).json()) as any;
+    // Окончание с секундами — как «Только что»; в поле времени потом будет то же время без секунд.
+    const { caseId } = (await (await post('/api/report', { houseId: house.id, service: 'hot_water_off', evidence: 'ads', number: '4512', startedAt: new Date(Date.now() - 50 * 3_600_000).toISOString() })).json()) as any;
+    await post(`/api/cases/${caseId}/end`, { endedAt: new Date(Date.now() - 2 * 3_600_000).toISOString() });
+    const month = (await get(caseId)).months[0].month;
+    await put(caseId, { fio: 'Лесная Анна Петровна', bills: { [month]: '1000' } });
+    await post(`/api/cases/${caseId}/pdf-link`);
+    const endedAt = (await get(caseId)).endedAt as string;
+    const minute = (iso: string) => new Date(Math.floor(new Date(iso).getTime() / 60_000) * 60_000).toISOString();
+
+    // Сдвинули окончание — устарело; вернули прежнее (поле без секунд) — снова актуально.
+    await times(caseId, { endedAt: new Date(new Date(endedAt).getTime() - 3 * 3_600_000).toISOString() });
+    assert.equal((await get(caseId)).claimOutdated, true);
+    await times(caseId, { endedAt: minute(endedAt) });
+    assert.equal((await get(caseId)).claimOutdated, false, 'вернули прежнее время — заявление снова актуально');
+
+    // До подачи новая плата делает заявление устаревшим (в нём другие рубли), после подачи — нет.
+    await put(caseId, { fio: 'Лесная Анна Петровна', bills: { [month]: '1100' } });
+    assert.equal((await get(caseId)).claimOutdated, true);
+    await put(caseId, { fio: 'Лесная Анна Петровна', bills: { [month]: '1000' } });
+    assert.equal((await get(caseId)).claimOutdated, false);
+    const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Moscow' });
+    await post(`/api/cases/${caseId}/submitted`, { date: `${today}T12:00:00`, number: '77' });
+    await put(caseId, { fio: 'Лесная Анна Петровна', bills: { [month]: '1300' } });
+    const after = await get(caseId);
+    assert.equal(after.claimOutdated, false, 'уточнили плату после подачи — подавать заново не нужно');
+    await post(`/api/cases/${caseId}/pdf-link`);
+    assert.ok((await get(caseId)).claim.submittedAt, 'отметка «подано» не сбросилась');
+
+    // «кв 5» — не адрес дома.
+    const bad = await post('/api/me/houses', { address: 'кв 5', city: 'Казань' });
+    assert.equal(bad.status, 400);
+  });
+});
+
 test('health и статика мини-приложения', async () => {
   await withServer(async (base) => {
     const health = (await (await fetch(`${base}/health`)).json()) as any;
     assert.equal(health.ok, true);
-    assert.equal(health.version, '1.1.0');
+    assert.equal(health.version, '1.2.0');
     const page = await fetch(`${base}/app/`);
     assert.equal(page.status, 200);
     const html = await page.text();

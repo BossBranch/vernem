@@ -856,3 +856,11 @@ test('перерасчёт меньше положенного — бот пре
   assert.match(h.last(1).text, /Штраф ≈ 18,70 ₽/); // (77,40 − 40) × 50%
   h.close();
 });
+
+test('главное меню: «Открыть приложение» — первой кнопкой; «Ещё нет», а не «Нет ещё»', async () => {
+  const { mainMenu } = await import('../src/bot/ui.ts');
+  assert.equal(mainMenu({ demo: false, app: true })[0][0].text, '📱 Открыть приложение');
+  assert.equal(mainMenu({ demo: false, app: false })[0][0].text, '🚨 Что-то сломалось');
+  const src = readFileSync(new URL('../src/bot/core.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(src, /'Нет ещё'/);
+});

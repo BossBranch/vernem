@@ -24,8 +24,9 @@ export function clean(s: string | null | undefined): string {
 }
 
 export function mainMenu(opts: { demo: boolean; app: boolean }): Btn[][] {
-  const rows: Btn[][] = [[cb('🚨 Что-то сломалось', 'new')], [cb('📋 Мои дела', 'cases'), cb('🏠 Мои адреса', 'house')]];
-  if (opts.app) rows.push([app('📱 Открыть приложение')]);
+  // Приложение — первой кнопкой: в нём всё удобнее, чем в чате (решение 28.09).
+  const rows: Btn[][] = opts.app ? [[app('📱 Открыть приложение')]] : [];
+  rows.push([cb('🚨 Что-то сломалось', 'new')], [cb('📋 Мои дела', 'cases'), cb('🏠 Мои адреса', 'house')]);
   rows.push(opts.demo ? [cb('❓ Как это работает', 'how'), cb('🧪 Демо', 'demo')] : [cb('❓ Как это работает', 'how')]);
   return rows;
 }

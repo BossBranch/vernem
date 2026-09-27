@@ -261,6 +261,21 @@
     haptic('error');
     if (!first || Object.keys(fields).length > 1) toast(e && e.message ? e.message : 'Что-то пошло не так. Попробуйте ещё раз.');
   }
+  /**
+   * Подтверждение прямо на странице, под кнопкой. Системный confirm() в части WebView (iOS) молча отвечает «нет» —
+   * кнопка «Удалить» тогда просто ничего не делает. text — готовый HTML.
+   */
+  function askInline(after, text, yes, onYes, danger) {
+    each('.confirm-inline', function (x) { x.parentNode.removeChild(x); });
+    var box = document.createElement('div');
+    box.className = 'confirm-box confirm-inline';
+    box.innerHTML = '<p>' + text + '</p><div class="actions"><button class="btn ' + (danger ? 'danger-fill' : 'primary') + '" type="button">' + esc(yes) + '</button><button class="btn" type="button">Отмена</button></div>';
+    after.insertAdjacentElement('afterend', box);
+    var b = box.querySelectorAll('button');
+    b[1].onclick = function () { box.parentNode.removeChild(box); };
+    b[0].onclick = function () { box.parentNode.removeChild(box); onYes(); };
+    box.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
   function fieldErr(id, message) { var f = {}; f[id] = message; return { message: message, fields: f }; }
 
   function showError(message, retry) {
@@ -365,7 +380,7 @@
           var got = me.refunded > 0;
           hero = '<section class="sheet hero"><p class="hero-label">' + (got ? 'Вам уже вернули' : 'Положено по заявлениям') + '</p>' +
             '<p class="hero-sum">' + (got ? rub(me.refunded) : '≈ ' + rub(pending)) + '</p>' +
-            (got && pending > 0 ? '<ul class="ledger"><li><span class="label">Положено по заявлениям</span><span class="dots"></span><span class="sum">≈ ' + rub(pending) + '</span></li></ul>' : '') +
+            (got && pending > 0 ? '<ul class="ledger"><li><span class="label">Можно вернуть по открытым делам</span><span class="dots"></span><span class="sum">≈ ' + rub(pending) + '</span></li></ul>' : '') +
             // Недоплату показываем отдельной суммой: в «ждём по готовым заявлениям» она не входит.
             (less === 1
               ? '<p class="hero-note">Ещё ≈ ' + rub(shortfall(lessCases[0])) + ' недоплатили в деле «' + esc(lessCases[0].serviceButton) + ', ' + esc(period(lessCases[0])) + '» — можно потребовать.</p>'
@@ -381,7 +396,7 @@
       var howHtml = '<details class="sheet how"' + (cases.length ? '' : ' open') + '><summary><span>Как это работает — 4 шага</span>' + icon('down') + '</summary><ol class="steps">' +
         '<li><b>Отключили или холодно</b> — нажмите «Сообщить о проблеме» и позвоните в аварийную службу: номер заявки — главное доказательство. Не дозвонились — помогу собрать акт с соседями.</li>' +
         '<li><b>Починили</b> — отметьте это, я посчитаю, сколько положено вернуть по закону.</li>' +
-        '<li><b>Заявление</b> — скачайте его и отнесите в организацию, которой платите за эту услугу (она указана вверху заявления).</li>' +
+        '<li><b>Заявление</b> — скачайте его и отнесите в организацию, которой платите за эту услугу (название — в квитанции за эту услугу).</li>' +
         '<li><b>Квитанция</b> — через месяц проверьте, сделали ли перерасчёт. Не сделали — подготовлю требование выплатить вам штраф 50% и жалобу в жилищную инспекцию.</li>' +
         '</ol></details>';
 
@@ -416,7 +431,7 @@
   }
   function cap(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; }
   function infoFilled(i) { return Object.keys(i || {}).some(function (k) { return k !== 'updatedAt' && k !== 'updatedBy' && i[k]; }); }
-  function membersText(n) { return n > 1 ? 'здесь ' + n + ' ' + plural(n, ['житель', 'жителя', 'жителей']) + ' дома' : 'из соседей здесь пока только вы'; }
+  function membersText(n) { return n > 1 ? 'здесь ' + n + ' ' + plural(n, ['житель', 'жителя', 'жителей']) + ' дома' : 'в приложении из соседей пока только вы'; }
 
   /** Недоплата по делу, где вернули меньше положенного. */
   function shortfall(c) { return Math.round((c.estimate - (c.refundAmount || 0)) * 100) / 100; }
@@ -462,7 +477,7 @@
       var t = (END_TITLE[c.service] || 'Когда починят — отметьте здесь').replace(' — отметьте здесь', '');
       return { done: 1, tone: 'open', now: needAct ? 'подпишите акт с соседями' : 'отметьте, ' + t.charAt(0).toLowerCase() + t.slice(1) };
     }
-    if (needAct) return { done: c.status === 'claim_ready' && cl.submittedAt ? 3 : 2, tone: 'open', now: 'подпишите акт с соседями' };
+    if (needAct) return { done: c.status === 'claim_ready' && cl.submittedAt && !c.claimOutdated ? 3 : 2, tone: 'open', now: 'подпишите акт с соседями' };
     if (c.status === 'ended') return { done: 2, tone: 'action', now: 'скачайте заявление' };
     if (c.status === 'claim_ready') {
       if (c.claimOutdated) return { done: 2, tone: 'action', now: 'скачайте новое заявление' };
@@ -606,7 +621,9 @@
                 : h.members ? '<small>уже здесь: ' + h.members + ' ' + plural(h.members, ['житель', 'жителя', 'жителей']) + '</small>' : '') + '</span></button></li>';
           });
           // Дом с таким адресом уже в списке — «добавить новый» только запутает.
-          if (/\d/.test(text) && !r.exactId) {
+          // Улица — без квартиры: «кв 5» номера дома не содержит, «добавить дом» не предлагаем.
+          var street = stripFlat(text);
+          if (/\d/.test(street) && /[а-яёa-z]{2}/i.test(street) && !r.exactId) {
             // «кв 15» — не часть дома: в названии кнопки её нет, квартира уйдёт в своё поле.
             items.push('<li><button class="result new" data-new="1">' + icon('plus') + 'Добавить дом «' + esc(cityName + ', ' + stripFlat(text)) + '»</button></li>');
             if (!r.houses.length) items.push('<li class="muted small">Дома ещё нет в списке — значит, вы первые из соседей. Добавьте его: следующие найдут дом по этому адресу.</li>');
@@ -669,7 +686,7 @@
       var i = h.info || {};
       var html = backLink('Главная', '') +
         '<div class="case-title"><span class="ic big">' + icon('home') + '</span><div><h1>' + esc(h.address) + '</h1>' +
-        '<p class="muted">' + (h.members > 1 ? 'Здесь уже ' + h.members + ' ' + plural(h.members, ['житель', 'жителя', 'жителей']) + ' этого дома, вместе с вами' : 'Из соседей здесь пока только вы') + '</p></div></div>' +
+        '<p class="muted">' + (h.members > 1 ? 'Здесь уже ' + h.members + ' ' + plural(h.members, ['житель', 'жителя', 'жителей']) + ' этого дома, вместе с вами' : 'В приложении из соседей пока только вы') + '</p></div></div>' +
         '<button class="btn primary big" id="reportHere">' + icon('alert') + 'Сообщить о проблеме здесь</button>';
 
       html += '<section class="sheet"><h2>Я в этом доме</h2>' +
@@ -765,8 +782,9 @@
       each('[data-info]', function (el) { el.addEventListener('change', function () { saveInfo(null); }); });
       $('twoPower').addEventListener('change', function () { saveInfo(null); });
       $('remove').onclick = function () {
-        if (!confirm('Убрать «' + h.address + '» из вашего списка? Дела по этому адресу сохранятся.')) return;
-        api('DELETE', '/api/me/houses/' + h.id).then(function () { toast('Адрес убран'); home(); }).catch(function (e) { toast(e.message); });
+        askInline($('remove'), 'Убрать «' + esc(h.address) + '» из вашего списка? Дела по этому адресу сохранятся.', 'Да, убрать', function () {
+          api('DELETE', '/api/me/houses/' + h.id).then(function () { toast('Адрес убран'); home(); }).catch(function (e) { toast(e.message); });
+        }, true);
       };
     }).catch(function (e) { showError(e.message, e.status === 404 ? null : function () { renderHouse(id); }); });
   }
@@ -812,7 +830,7 @@
         '<button class="chip" type="button" data-ago="2880">2 дня назад</button><button class="chip" type="button" data-ago="10080">Неделю назад</button></div>' +
         '<input id="started" type="datetime-local" max="' + localNow() + '" aria-describedby="startedHint">' +
         '<p class="muted hint" id="startedHint"></p><div id="whenExtra"></div></div>' +
-        '<div class="actions" id="submitBox"><button class="btn primary big" id="submit">Записать проблему</button></div></div>';
+        '<div class="actions" id="submitBox"><button class="btn primary big" id="submit">Записать проблему</button><p class="field-error" id="submitErr" hidden></p></div></div>';
       root.innerHTML = html;
       bindBack();
 
@@ -964,7 +982,7 @@
       $('started').oninput = function () { each('#startChips .chip', function (x) { x.classList.remove('on'); }); };
       refresh();
 
-      $('submit').onclick = function () {
+      $('submit').onclick = function (_e, sure) {
         var ev = evidence();
         if (!ev) return;
         var body = {
@@ -986,8 +1004,11 @@
         if ($('temp') && !body.temp) errs.temp = 'Впишите, сколько градусов показал термометр';
         if (Object.keys(errs).length) { showErrors({ message: 'Заполните отмеченные поля', fields: errs }); return; }
         // Больше месяца — чаще всего опечатка в дате. Не запрещаем, но переспрашиваем.
-        if (Date.now() - new Date(body.startedAt).getTime() > 31 * 24 * 3600000 &&
-          !confirm('Начало — ' + new Date(body.startedAt).toLocaleDateString('ru-RU') + ', больше месяца назад. Всё верно?')) return;
+        if (!sure && Date.now() - new Date(body.startedAt).getTime() > 31 * 24 * 3600000) {
+          askInline($('submitBox'), 'Начало — ' + new Date(body.startedAt).toLocaleDateString('ru-RU') + ', больше месяца назад. Всё верно?', 'Да, всё верно', function () { $('submit').onclick(null, true); });
+          return;
+        }
+        $('submitErr').hidden = true;
         var done = busy($('submit'), 'Записываю…');
         api('POST', '/api/report', body).then(function (r) {
           haptic('success');
@@ -998,7 +1019,13 @@
           else toast(!r.botConnected ? 'Записал.' : r.neighbours > 0 ? 'Записал. Спрошу соседей в сети: «у вас тоже?»' : 'Записал. Позовите соседей — вместе проще доказать.');
           // Без записи в истории: «назад» из дела ведёт на главную, а не обратно в форму.
           location.replace(location.pathname + location.search + '#case/' + r.caseId);
-        }).catch(function (e) { showErrors(e); }).then(done);
+        }).catch(function (e) {
+          // Ошибка без поля (уже открыто связанное дело, пересечение часов) — под кнопкой, а не только всплывающим сообщением.
+          if (e.fields) { showErrors(e); return; }
+          $('submitErr').textContent = e.message;
+          $('submitErr').hidden = false;
+          haptic('error');
+        }).then(done);
       };
     }).catch(function (e) { showError(e.message, function () { renderReport(houseId); }); });
   }
@@ -1044,7 +1071,7 @@
 
       // Номер получили позже начала, акта нет: время до звонка ничем не подтверждено.
       var lateNumber = open && c.startEvidence === 'self' && c.evidence !== 'self' && !(c.act && c.act.status === 'signed');
-      if (lateNumber) html += warn('Номер заявки получен позже начала отключения. Проще всего — нажмите «Исправить время» ниже и поставьте время звонка. Считать с самого начала отключения можно, только если соседи подпишут акт (ниже).');
+      if (lateNumber) html += warn('По закону считают со звонка: поправьте начало в «Исправить время» ниже — или подпишите акт с соседями, тогда посчитаем с начала отключения.');
       // Главное действие — в блоке «Сейчас» наверху. Нет доказательства — сначала акт.
       var actFirst = needActFirst(c);
       // Сначала акт — предупреждение о новом заявлении не наверху, а в «Потом»: скачивать его стоит уже с подписанным актом.
@@ -1109,6 +1136,8 @@
         (c.act && c.act.status === 'signed' ? 'Акт подписан — отметьте «' + esc(endName(c)) + '», и он попадёт в заявление.' : 'Нажмите ниже «Да, с председателем» или «Да, без председателя», потом «' + esc(endName(c)) + '» — акт попадёт в заявление.');
     } else if (refundedLess(c)) {
       t = '<b>Демо 3: УК вернула меньше положенного.</b> Ниже — документы, чтобы потребовать остальное.';
+    } else if (c.demoKind === 3 && c.status === 'refused') {
+      t = '<b>Демо 3: перерасчёт не сделали.</b> Ниже — требование и жалоба в инспекцию. Всё-таки вернули — нажмите «Отметить, что вернули».';
     } else if (c.demoKind === 3 && c.status !== 'refunded') {
       // Сняли отметку «вернули» — это всё ещё демо 3, а не «демо 1».
       t = '<b>Демо 3: пример, где вернули меньше положенного.</b> Нажмите ниже «Перерасчёт сделали» и впишите, например, 60 ₽ — появятся документы, чтобы потребовать остальное.';
@@ -1177,7 +1206,9 @@
       var val = m.bill || m.billHint;
       var mp = m.month.split('-');
       var what = BILL_NAME[c.service] || 'эту услугу';
-      html += '<label for="bill_' + m.month + '">Сколько начислено за ' + esc(what) + ' в ' + MONTHS_PREP[Number(mp[1]) - 1] + ' ' + mp[0] + ', ₽</label>' +
+      // Квитанции за текущий месяц ещё нет — просим последнюю, а не «за сентябрь», которой у жителя нет.
+      var fresh = m.month >= monthKeyOf(new Date().toISOString());
+      html += '<label for="bill_' + m.month + '">' + (fresh ? 'Сколько начислено за ' + esc(what) + ' за месяц, ₽ — из последней квитанции' : 'Сколько начислено за ' + esc(what) + ' в ' + MONTHS_PREP[Number(mp[1]) - 1] + ' ' + mp[0] + ', ₽') + '</label>' +
         '<input id="bill_' + m.month + '" data-month="' + m.month + '" class="bill" inputmode="decimal" placeholder="Сумма по этой услуге" value="' + (val ? String(val).replace('.', ',') : '') + '">' +
         (!m.bill && m.billHint ? '<p class="muted hint">Подставил из вашего другого дела за этот месяц — проверьте.</p>'
           : '<p class="muted hint">Если в квитанции несколько строк про ' + esc(what) + ' — сложите их.</p>');
@@ -1247,8 +1278,9 @@
   function screenLines(m) {
     var ls = m.lines.filter(screenLine);
     var formula = /^(Часов ниже нормы|Сумма отклонений|[\d,]+ × )/;
-    if (m.percent === 0 && !(m.coldTariffHours >= 1) && ls.some(function (l) { return formula.test(l); })) {
-      ls = ls.filter(function (l) { return !formula.test(l); }).concat(['Пока снижения нет — ниже нормы было слишком недолго.']);
+    var short = m.hoursBelow != null && m.hoursBelow < 1;
+    if ((m.percent === 0 || short) && !(m.coldTariffHours >= 1) && ls.some(function (l) { return formula.test(l); })) {
+      ls = ls.filter(function (l) { return !formula.test(l); }).concat([short ? 'Пока ниже нормы меньше часа — посчитаю, когда наберётся хотя бы час.' : 'Пока снижения нет — ниже нормы было слишком недолго.']);
     }
     return ls;
   }
@@ -1281,9 +1313,12 @@
     var cold = c.months.some(function (m) { return m.coldTariffHours >= 1; });
     // Температура: деньги зависят от замеров, а не от того, сколько прошло времени.
     if (c.kind !== 'interruption') {
-      if (!paid.length) return cold ? 'Вода была холоднее +40 °C — за эти часы горячую воду должны посчитать по цене холодной.' : c.endedAt ? 'По замерам снижения платы не набралось.' : 'Пока по замерам снижения не набралось. Меряйте дальше: каждый замер ниже нормы — доказательство.';
+      if (!paid.length) return cold ? 'Вода была холоднее +40 °C — за эти часы горячую воду должны посчитать по цене холодной.' : c.endedAt ? 'По замерам снижения платы не набралось.' : 'Пока по замерам снижения не набралось. Меряйте раз в день: каждый замер подтверждает, что так всё это время.';
+      // Ниже нормы меньше часа — «0,01%» только путает: считаем, когда наберётся хотя бы час.
+      var below = c.months.reduce(function (s, m) { return s + (m.hoursBelow || 0); }, 0);
+      if (!c.endedAt && below < 1) return 'Пока ниже нормы меньше часа — посчитаю, когда наберётся хотя бы час. Меряйте раз в день: каждый замер подтверждает, что так всё это время.';
       return 'По замерам плату ' + (paid.length === 1 ? 'за ' + monthTitle(paid[0].month) + ' ' : '') + 'должны снизить' + (paid.length === 1 ? ' на ' + pct(paid[0].percent) : ': ' + paid.map(function (m) { return 'за ' + monthTitle(m.month) + ' — на ' + pct(m.percent); }).join(', ')) +
-        (c.endedAt ? '.' : '. Меряйте дальше — каждый замер ниже нормы добавляет.');
+        (c.endedAt ? '.' : '. Меряйте раз в день: каждый замер подтверждает, что так всё это время.');
     }
     var what = c.endedAt ? (LACK_WAS[c.service] || 'Услуги не было') + ' ' + fmtHours(hours) : (LACK_NOW[c.service] || 'Услуги нет') + ' уже ' + fmtHours(hours);
     if (!paid.length) {
@@ -1380,11 +1415,12 @@
           ? 'В акте вы и ещё ' + (a.residents - 1) + ' ' + plural(a.residents - 1, ['сосед', 'соседа', 'соседей']) + ' (демо). Распечатайте — расписаться на бумаге нужно всем.'
           : 'В акте уже вы и ещё ' + (a.residents - 1) + ' ' + plural(a.residents - 1, ['сосед', 'соседа', 'соседей']) + ' — они откликнулись в боте, их строки есть в PDF. Расписаться на бумаге нужно всем, и им тоже.') + '</p>' : '') +
         '<p class="strong">' + esc(s.fio || '') + (s.flat ? ', кв. ' + esc(s.flat) : '') + ' (вы)</p>' +
+        (a.demoSigners || []).map(function (n) { return '<p class="strong">' + esc(n) + ' (демо)</p>'; }).join('') +
         '<button class="linklike" id="actEdit">Исправить</button>' +
         '<div id="actEditBox" hidden><label for="actFio">Ваши ФИО</label><input id="actFio" autocomplete="name" value="' + esc(s.fio || '') + '">' +
         '<label for="actFlat">Квартира</label><input id="actFlat" maxlength="10" value="' + esc(s.flat || '') + '">' +
         '<div class="actions"><button class="btn" id="actSave">Сохранить и скачать акт</button></div></div></div>' +
-        '<div class="actions"><button class="btn" id="actPdf">' + icon('doc') + 'Акт для подписи (PDF)</button></div>';
+        '<div class="actions"><button class="btn" id="actPdf">' + icon('doc') + 'Скачать акт (PDF)</button></div>';
       if (a.initiator) {
         inner += '<p class="sub-h">Подписали на бумаге вы и хотя бы один сосед?</p>' +
           '<div class="actions stack"><button class="btn" id="actSigned" data-chair="1">Да, с председателем</button>' +
@@ -1395,9 +1431,9 @@
       inner = '<p class="muted hint">Фамилия и имя обязательны: без них подпись в акте не засчитают.</p>' +
         '<label for="actFio">Ваши ФИО</label><input id="actFio" autocomplete="name" value="' + esc(cl.fio || '') + '">' +
         '<label for="actFlat">Квартира</label><input id="actFlat" maxlength="10" value="' + esc(cl.flat || '') + '">' +
-        '<div class="actions"><button class="btn primary" id="actPdf">' + icon('doc') + 'Получить акт для подписи (PDF)</button></div>';
+        '<div class="actions"><button class="btn primary" id="actPdf">' + icon('doc') + 'Скачать акт (PDF)</button></div>';
     }
-    if (now && !c.demo) inner += '<p class="muted hint">Дозвонились позже — на главной нажмите «Сообщить о проблеме», выберите тот же адрес и проблему, отметьте «Дозвонились» и впишите номер: он добавится в это дело.</p>';
+    if (now && !c.demo) inner += '<p class="muted hint">Дозвонились позже — сообщите о проблеме ещё раз с номером заявки: он добавится в это дело.</p>';
     return now
       ? '<section class="now"><p class="kicker">Сейчас</p><h2>Подпишите акт с соседями</h2>' + intro + inner + '</section>'
       : '<section class="sheet"><h2>Акт с соседями <small>доказательство</small></h2>' + intro + inner + '</section>';
@@ -1433,7 +1469,7 @@
       // Подсказка — у кнопки, а не вторым серым абзацем перед первым полем.
       '<p class="muted hint">Пустые поля можно вписать от руки после печати. Всё, что вы вписали, сохраняется само.</p>' +
       '<p class="muted hint" id="claimStatus"></p>' +
-      '<div class="actions"><button class="btn' + (mode === 'fold' ? '' : ' primary big') + '" id="pdf">' + icon('doc') + 'Скачать заявление (PDF)</button></div>';
+      '<div class="actions"><button class="btn' + (mode === 'fold' ? '' : ' primary big') + '" id="pdf">' + icon('doc') + ((c.extraFlats || []).length ? 'Скачать заявление: ' + ((c.claim || {}).flat ? 'кв. ' + esc(c.claim.flat) : 'ваша квартира') : 'Скачать заявление (PDF)') + '</button></div>';
     if (mode === 'fold') {
       return '<details class="sheet fold" id="claimBox"><summary><span>Исправить данные заявления</span>' + icon('down') + '</summary>' + claimMoneyInputs(c) + body + '</details>';
     }
@@ -1477,9 +1513,10 @@
   }
 
   /** Шаг «Что дальше»: номер в кружке, заголовок и пояснение. kind: o — следующий, g — позже. */
-  function nstep(n, title, text, kind) {
+  /** between — кнопки между заголовком и пояснением: главное действие не уезжает за длинный текст. */
+  function nstep(n, title, text, kind, between) {
     return '<div class="nstep">' + (n ? '<span class="n' + (kind ? ' ' + kind : '') + '">' + n + '</span>' : '') +
-      '<div><b>' + title + '</b>' + (text ? '<span class="muted">' + text + '</span>' : '') + '</div></div>';
+      '<div><b>' + title + '</b>' + (between || '') + (text ? '<span class="muted">' + text + '</span>' : '') + '</div></div>';
   }
 
   /** Куда нести заявление — той организации, что в шапке, а не всегда в УК. */
@@ -1504,13 +1541,13 @@
     // Заявление устарело — скачать новое прямо в этом шаге (одна кнопка, без отдельной плашки сверху).
     if (c.claimOutdated && later) return nstep(1, 'Подайте ' + what, text);
     if (c.claimOutdated) {
-      return nstep(1, (flats.length ? 'Скачайте новые ' : 'Скачайте новое ') + what, 'Данные изменились (плата, время, акт или получатель) — старое заявление уже не подходит. ' + text) +
-        '<div class="actions step-gap"><button class="btn primary" id="pdfOutdated">' + icon('doc') + 'Скачать новое заявление</button></div>';
+      return nstep(1, (flats.length ? 'Скачайте новые ' : 'Скачайте новое ') + what, 'Данные изменились (плата, время, акт или получатель) — подайте новое заявление вместо прежнего. ' + text, '',
+        '<div class="actions step-gap"><button class="btn primary" id="pdfOutdated">' + icon('doc') + 'Скачать новое заявление</button></div>');
     }
-    return nstep(1, 'Подайте ' + what, text) +
-      // Кнопка обычная, чтобы не отвлекать от шага «Отметьте, когда подали».
-      '<div class="actions step-gap"><button class="btn" id="pdfTop">' + icon('doc') + (flats.length ? 'Заявление: ' + own : 'Скачать заявление (PDF)') + '</button>' +
-      flats.map(function (f, i) { return '<button class="btn" data-xf-pdf="' + i + '">' + icon('doc') + 'Заявление: кв. ' + esc(f.flat) + '</button>'; }).join('') + '</div>';
+    // Кнопка обычная (не главная), чтобы не отвлекать от шага «Отметьте, когда подали», но сразу под заголовком.
+    return nstep(1, 'Подайте ' + what, text, '',
+      '<div class="actions step-gap"><button class="btn" id="pdfTop">' + icon('doc') + (flats.length ? 'Скачать заявление: ' + own : 'Скачать заявление (PDF)') + '</button>' +
+      flats.map(function (f, i) { return '<button class="btn" data-xf-pdf="' + i + '">' + icon('doc') + 'Скачать заявление: кв. ' + esc(f.flat) + '</button>'; }).join('') + '</div>');
   }
 
   function submittedForm(c) {
@@ -1553,7 +1590,7 @@
       html += '<p class="done">' + icon('check') + 'Подано ' + esc(day(cl.submittedAt, c.tz)) + (cl.incomingNumber ? ', вх. № ' + esc(cl.incomingNumber) : '') + ' <button class="linklike" id="subEdit">Изменить</button></p>' +
         '<div id="subBox" hidden>' + submittedFields(cl, c) + '</div><div class="hr"></div>';
     } else if (c.claimOutdated) {
-      html += (cl.submittedAt ? '<p class="muted">Старое заявление подали ' + esc(day(cl.submittedAt, c.tz)) + (cl.incomingNumber ? ' (вх. № ' + esc(cl.incomingNumber) + ')' : '') + ' — оно уже не подходит.</p>' : '') +
+      html += (cl.submittedAt ? '<p class="muted">Старое заявление подали ' + esc(day(cl.submittedAt, c.tz)) + (cl.incomingNumber ? ' (вх. № ' + esc(cl.incomingNumber) + ')' : '') + '.</p>' : '') +
         whereToSubmit(c, later) + '<div class="hr"></div>' +
         // Отметить подачу — уже для нового заявления, после скачивания.
         nstep(2, 'Отметьте, когда подадите новое', 'Поле для даты появится после скачивания.', 'g') + '<div class="hr"></div>';
@@ -1609,11 +1646,11 @@
       (partial ? '<p class="hero-note">По расчёту положено ≈ ' + rub(c.estimate) + '. Остальное можно потребовать:</p>' +
         ((c.claim || {}).submittedAt ? '' : '<p class="note">Укажите, когда подали заявление, — дата попадёт в требование и жалобу.</p>') + submittedForm(c) +
         escalationButtons(c) : '') +
-      '<details class="more"' + (c.refundAmount ? '' : ' open') + '><summary>Исправить сумму или снять отметку</summary>' +
+      '<details class="more"' + (c.refundAmount ? '' : ' open') + '><summary>Исправить сумму или отменить «вернули»</summary>' +
       '<label for="refundAmount">Сколько вернули, ₽</label><input id="refundAmount" inputmode="decimal" value="' + (c.refundAmount ? String(c.refundAmount).replace('.', ',') : '') + '">' +
       '<div class="actions"><button class="btn" id="refundYes">Сохранить сумму</button></div>' +
-      '<button class="linklike" id="refundUndo">Снять отметку «вернули»</button></details>' +
-      '<div class="actions"><button class="btn" id="pdf">' + icon('doc') + 'Заявление (PDF)</button></div></section>';
+      '<button class="linklike" id="refundUndo">Отменить «вернули»</button></details>' +
+      '<div class="actions"><button class="btn" id="pdf">' + icon('doc') + 'Скачать заявление (PDF)</button></div></section>';
   }
 
   function formValues() {
@@ -1629,6 +1666,8 @@
     return { coldTariff: coldTariff, adsOperator: $('adsOperator') ? v('adsOperator') : undefined, executor: v('executor'), executorInn: v('inn'), executorType: v('etype'), fio: v('fio'), flat: v('flat'), account: v('account'), bills: bills, remember: $('remember') ? $('remember').checked : undefined };
   }
 
+  /** ИНН, очищенный при смене получателя, по делу: {name, inn}. */
+  var clearedInn = {};
   function bindCase(c) {
     each('a[data-ext]', openExternal);
     var dirty = false;
@@ -1657,12 +1696,13 @@
           clearErrors();
           // Сменили получателя или плату в уже скачанном заявлении — говорим сразу, а не при следующем открытии.
           var nc = (data && data.case) || {};
-          var outdated = c.status === 'claim_ready' && !c.claimOutdated && nc.claimOutdated;
+          // Устарело — или, наоборот, вернули прежние данные и заявление снова совпадает со скачанным.
+          var outdated = c.status === 'claim_ready' && !!c.claimOutdated !== !!nc.claimOutdated;
           // Получатель виден и наверху («Подайте … в …», «Что записано») — сменили его ещё раз, перерисовываем тоже.
           var recipient = c.status === 'claim_ready' && ((nc.claim || {}).executor || '') !== ((c.claim || {}).executor || '');
           if ($('claimStatus')) $('claimStatus').textContent = '✓ Сохранено';
           if (outdated || recipient) {
-            toast('Сохранено. ' + innNote + (nc.claimOutdated ? 'Скачанное раньше заявление устарело — скачайте новое.' : ''));
+            toast('Сохранено. ' + innNote + (nc.claimOutdated ? 'Скачанное раньше заявление устарело — скачайте новое.' : 'Заявление снова совпадает со скачанным.'));
             renderCase(c.id, false, false, true);
           } else if (innNote) toast(innNote + 'ИНН нового можно вписать в «Дополнительно».');
           innNote = '';
@@ -1677,11 +1717,19 @@
     // Сообщение про ИНН — вместе с «Сохранено» после автосохранения: два всплывающих подряд затирали друг друга.
     var innNote = '';
     if ($('inn')) $('inn').addEventListener('input', function () { innFor = $('executor').value.trim(); });
+    // Очищенный ИНН помним (и после перерисовки экрана): вернули прежнего получателя — возвращаем и его ИНН,
+    // иначе заявление так и осталось бы «устаревшим».
     if ($('executor')) $('executor').addEventListener('change', function () {
       var name = $('executor').value.trim();
+      var cleared = clearedInn[c.id];
       if ($('inn').value.trim() && name !== innFor) {
+        clearedInn[c.id] = { name: innFor, inn: $('inn').value.trim() };
         $('inn').value = '';
         innNote = 'ИНН прежнего получателя убрал из заявления. ';
+      } else if (!$('inn').value.trim() && cleared && name === cleared.name) {
+        $('inn').value = cleared.inn;
+        delete clearedInn[c.id];
+        innNote = '';
       }
       innFor = name;
     });
@@ -1729,7 +1777,8 @@
         // Квитанции за текущий месяц ещё нет — подсказка в той же строке, а не второй подряд.
         var thisMonth = monthKeyOf(new Date().toISOString());
         var fresh = c.months.filter(function (m) { return m.percent > 0 && m.month >= thisMonth && $('bill_' + m.month) && !parseMoney($('bill_' + m.month).value); })[0];
-        var prev = fresh ? ' (квитанции за ' + monthTitle(fresh.month).split(' ')[0] + ' ещё нет — возьмите прошлую)' : '';
+        // Подпись поля уже говорит «из последней квитанции» — второй раз не повторяем.
+        var prev = '';
         var firstBill = root.querySelector('.bill');
         var inFold = !!(firstBill && firstBill.closest('#claimBox'));
         note.textContent = !(anyInputs && missing.length) ? ''
@@ -1761,8 +1810,9 @@
     each('[data-xf-del]', function (b) {
       b.onclick = function () {
         var i = Number(b.getAttribute('data-xf-del'));
-        if (!confirm('Убрать кв. ' + baseFlats[i].flat + ' из этого дела?')) return;
-        saveFlats(baseFlats.filter(function (_, j) { return j !== i; }));
+        askInline(b.closest('.xf-row') || b, 'Убрать кв. ' + esc(baseFlats[i].flat) + ' из этого дела?', 'Да, убрать', function () {
+          saveFlats(baseFlats.filter(function (_, j) { return j !== i; }));
+        }, true);
       };
     });
     each('[data-xf-pdf]', function (b) {
@@ -1804,8 +1854,9 @@
     };
     each('.reading-del', function (b) {
       b.onclick = function () {
-        if (!confirm('Удалить этот замер?')) return;
-        api('DELETE', '/api/cases/' + c.id + '/readings/' + b.getAttribute('data-reading')).then(function () { toast('Замер удалён'); renderCase(c.id); }).catch(function (e) { toast(e.message); });
+        askInline(b.closest('.facts') || b, 'Удалить замер ' + esc(b.parentNode.textContent.replace('✕', '').trim()) + '?', 'Да, удалить', function () {
+          api('DELETE', '/api/cases/' + c.id + '/readings/' + b.getAttribute('data-reading')).then(function () { toast('Замер удалён'); renderCase(c.id); }).catch(function (e) { toast(e.message); });
+        }, true);
       };
     });
 
@@ -1844,17 +1895,21 @@
     if (delBtn) delBtn.onclick = function () {
       var extra = c.status === 'refunded' && c.refundAmount ? ' Сумма ' + rub(c.refundAmount) + ' уйдёт из итога «Вернули».' : '';
       var what = c.status === 'tracking' || c.status === 'ended' ? 'вместе с расчётом' : 'вместе с расчётом и заявлением';
-      if (!confirm('Удалить это дело ' + what + '? Отменить будет нельзя.' + extra)) return;
-      api('DELETE', '/api/cases/' + c.id).then(function () { toast('Дело удалено'); home(); }).catch(function (e) { toast(e.message); });
+      askInline(delBtn, 'Удалить это дело ' + what + '? Отменить будет нельзя.' + extra, 'Да, удалить дело', function () {
+        api('DELETE', '/api/cases/' + c.id).then(function () { toast('Дело удалено'); home(); }).catch(function (e) { toast(e.message); });
+      }, true);
     };
 
-    function refund(action) {
+    function refund(action, btn, sure) {
       var amount = $('refundAmount') ? $('refundAmount').value.trim() : '';
       var n = parseMoney(amount);
-      // Сумма сильно больше расчёта — скорее опечатка: переспрашиваем, прежде чем она уйдёт в итог.
-      if (action === 'yes' && n !== null && c.estimate > 0 && n > Math.max(c.estimate * 3, c.estimate + 500)) {
-        if (!confirm('Вы вписали ' + rub(n) + ', а по расчёту положено ≈ ' + rub(c.estimate) + '. Всё верно?')) return;
+      // Сумма сильно больше расчёта — скорее опечатка: переспрашиваем на странице, прежде чем она уйдёт в итог.
+      if (!sure && action === 'yes' && n !== null && c.estimate > 0 && n > Math.max(c.estimate * 3, c.estimate + 500)) {
+        askInline(btn, 'Вы вписали ' + rub(n) + ', а по расчёту положено ≈ ' + rub(c.estimate) + '. Всё верно?', 'Да, всё верно', function () { refund(action, btn, true); });
+        return;
       }
+      // Кнопка занята, пока идёт запрос: двойное нажатие не отправит два запроса.
+      var done = btn ? busy(btn, 'Сохраняю…') : function () {};
       return api('POST', '/api/cases/' + c.id + '/receipt', { action: action, amount: amount }).then(function () {
         haptic('success');
         track('app_refund_' + action);
@@ -1863,11 +1918,11 @@
           ? (partial ? 'Записал: вернули ' + rub(n) + ' из ≈ ' + rub(c.estimate) + '. Остальное можно потребовать' : n ? 'Отлично! Записал: вернули ' + rub(n) : 'Записал, что вернули. Сумму можно вписать позже')
           : action === 'no' ? 'Понял. Документы, чтобы довести дело до денег, — вверху' : 'Отметку сняли');
         renderCase(c.id);
-      }).catch(function (e) { showErrors(e); });
+      }).catch(function (e) { showErrors(e); done(); });
     }
-    if ($('refundYes')) $('refundYes').onclick = function () { refund('yes'); };
-    if ($('refundNo')) $('refundNo').onclick = function () { refund('no'); };
-    if ($('refundUndo')) $('refundUndo').onclick = function () { refund('undo'); };
+    if ($('refundYes')) $('refundYes').onclick = function () { refund('yes', $('refundYes')); };
+    if ($('refundNo')) $('refundNo').onclick = function () { refund('no', $('refundNo')); };
+    if ($('refundUndo')) $('refundUndo').onclick = function () { refund('undo', $('refundUndo')); };
 
     if ($('subEdit')) $('subEdit').onclick = function () { $('subBox').hidden = !$('subBox').hidden; };
     var subTimer = null;
@@ -1880,10 +1935,12 @@
           if (number && $('subStatus')) $('subStatus').textContent = 'Укажите дату подачи — без неё номер не сохранится.';
           return;
         }
-        api('POST', '/api/cases/' + c.id + '/submitted', { date: $('submittedAt').value + 'T12:00:00', number: number || undefined }).then(function () {
+        api('POST', '/api/cases/' + c.id + '/submitted', { date: $('submittedAt').value + 'T12:00:00', number: number || undefined }).then(function (data) {
           clearErrors();
           var d = $('submittedAt').value.split('-');
-          toast('Записал: подано ' + d[2] + '.' + d[1] + '.' + d[0] + (number ? ', вх. № ' + number : ''));
+          // Сервер убирает «вх. №» из начала номера — показываем, как сохранено.
+          var saved = ((data && data.case && data.case.claim) || {}).incomingNumber;
+          toast('Записал: подано ' + d[2] + '.' + d[1] + '.' + d[0] + (saved ? ', вх. № ' + saved : ''));
           // Шаги, полоса и статус меняются сразу, а не после перезагрузки.
           renderCase(c.id, false, false, true);
         }).catch(function (e) { showErrors(e); });
@@ -1896,7 +1953,12 @@
         var done = busy(b, 'Готовлю документ…');
         api('POST', '/api/cases/' + c.id + '/escalation-link', { kind: b.getAttribute('data-esc') }).then(function (r) {
           track('app_escalation');
-          return download(r.url, r.fileName).then(function () { toast('Документ скачивается — впишите пустые поля и отправьте'); });
+          var kind = b.getAttribute('data-esc');
+          return download(r.url, r.fileName).then(function () {
+            toast(kind === 'fine' ? 'Требование скачивается — впишите пустые поля и отнесите туда же, куда подавали заявление.'
+              : kind === 'gji' ? 'Жалоба скачивается — впишите пустые поля и отправьте в жилищную инспекцию (адрес — на её сайте).'
+                : 'Заявление скачивается — впишите пустые поля и отправьте в общество защиты прав потребителей.');
+          });
         }).catch(function (e) { toast(e.message); }).then(done);
       };
     });
@@ -1960,8 +2022,9 @@
     });
     var unsignBtn = $('actUnsigned');
     if (unsignBtn) unsignBtn.onclick = function () {
-      if (!confirm('Снять отметку «подписан»? Если вы уже скачали заявление с актом, его придётся скачать заново.')) return;
-      api('POST', '/api/cases/' + c.id + '/act/unsigned').then(function () { toast('Отметку сняли'); renderCase(c.id); }).catch(function (e) { toast(e.message); });
+      askInline(unsignBtn, 'Снять отметку «подписан»? Если вы уже скачали заявление с актом, его придётся скачать заново.', 'Да, снять', function () {
+        api('POST', '/api/cases/' + c.id + '/act/unsigned').then(function () { toast('Отметку сняли'); renderCase(c.id); }).catch(function (e) { toast(e.message); });
+      });
     };
 
     var scanBtn = $('scan');

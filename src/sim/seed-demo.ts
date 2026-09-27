@@ -45,7 +45,13 @@ await h.text(userId, 'Демо Иван Иванович');
 await h.text(userId, '42');
 await h.press(userId, 'Пропустить');
 await h.press(userId, 'Запомнить');
-await h.advance(31 * 24 * H);
+// Подали на следующий день — дата и входящий номер попадут в требование и жалобу (без пустых «___»).
+await h.advance(24 * H);
+{
+  const p = h.db.listUserParticipants(userId)[0];
+  h.db.updateParticipant(p.id, { claim: JSON.stringify({ ...JSON.parse(p.claim!), submittedAt: h.now().toISOString(), incomingNumber: 'ДЕМО-118' }) });
+}
+await h.advance(30 * 24 * H);
 await h.press(userId, 'Да, вернули');
 await h.text(userId, '60');
 // Метка «демо 3» — по виду демо, а не по статусу: сняли отметку «вернули» — дело всё равно «демо 3».

@@ -52,7 +52,7 @@ import {
   hasMoney,
   loadCase,
   claimSnapshot,
-  snapshotChanged,
+  snapshotChanged, snapshotIgnore,
   relatedOverlap,
 } from '../services/cases.ts';
 import type { CaseBundle } from '../services/cases.ts';
@@ -232,7 +232,7 @@ export class Vernem {
     const related = RELATED[r.service];
     const relatedOpen = related ? this.db.findOpenIncident(r.houseId, related) : undefined;
     if (related && relatedOpen && this.db.getParticipantFor(relatedOpen.id, userId)) {
-      return { error: `У вас уже открыто «${this.norms.services[related].button}» по этому адресу. Сначала отметьте в том деле, что починили, — потом сообщите о новой проблеме.` };
+      return { error: `У вас уже открыто «${this.norms.services[related].button}» по этому адресу. Сначала отметьте в том деле время окончания — с этого времени начнётся новое дело.` };
     }
     const overlap = relatedOverlap(this.db, this.norms, userId, r.houseId, r.service, r.startedAt, null);
     if (overlap) return { error: `За это время уже есть дело ${overlap}. Одни и те же часы нельзя оплатить дважды — укажите время позже.` };
@@ -453,7 +453,7 @@ export class Vernem {
     if (!c || c.p.status === 'ended' || c.p.status === 'tracking' || c.p.status === 'closed') return false;
     const cl = claimOf(c.p);
     const snap = claimSnapshot(this.db, this.norms, c, this.now());
-    if (cl.issuedSnapshot && !snapshotChanged(cl.issuedSnapshot, snap)) return false;
+    if (cl.issuedSnapshot && !snapshotChanged(cl.issuedSnapshot, snap, snapshotIgnore(cl))) return false;
     const changed = !!cl.issuedSnapshot;
     const { submittedAt, incomingNumber, ...rest } = cl;
     const next = changed ? { ...rest, createdAt: this.now().toISOString(), issuedSnapshot: snap } : { ...cl, issuedSnapshot: snap };
@@ -1038,7 +1038,7 @@ export class Vernem {
       norm.kind === 'interruption'
         ? `${ICON[c.incident.service_key]} Починили? ${norm.title}, ${c.house.address} — уже ${formatDuration(hours)}.`
         : `${ICON[c.incident.service_key]} Стало тепло? ${c.house.address} — уже ${formatDuration(hours)}. Если нет, пришлите новый замер: так сумма будет точнее.`;
-    const buttons: Btn[][] = [[cb(norm.kind === 'interruption' ? '✅ Да, восстановили' : '✅ Да, тепло', `rest:${pid}:y`), cb('Нет ещё', `rest:${pid}:n`)]];
+    const buttons: Btn[][] = [[cb(norm.kind === 'interruption' ? '✅ Да, восстановили' : '✅ Да, тепло', `rest:${pid}:y`), cb('Ещё нет', `rest:${pid}:n`)]];
     if (norm.kind !== 'interruption') buttons.push([cb('🌡 Новый замер', `tmp:${pid}`)]);
     await this.safeSend(c.p.user_id, { text: q, buttons });
     this.scheduleRestoredCheck(c.p, tz);
@@ -1110,7 +1110,7 @@ export class Vernem {
       if (other.id === c.p.id || other.status !== 'tracking') continue;
       await this.safeSend(other.user_id, {
         text: `${ICON[c.incident.service_key]} Сосед отметил: починили в ${formatShort(endedAt, c.house.tz)}. У вас тоже?`,
-        buttons: [[cb('✅ Да', `same:${other.id}:y`), cb('Нет ещё', `same:${other.id}:n`)]],
+        buttons: [[cb('✅ Да', `same:${other.id}:y`), cb('Ещё нет', `same:${other.id}:n`)]],
       });
     }
   }

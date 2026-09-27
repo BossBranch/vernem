@@ -18,7 +18,7 @@ import { parseReceiptQr } from '../receipt/qr.ts';
 import { signLink, validateInitData, verifyLink } from './auth.ts';
 import { SERVICE_ORDER } from '../calc/norms.ts';
 import { CITIES, resolveCity, suggestCity } from '../calc/cities.ts';
-import { flatFromAddress } from '../db/db.ts';
+import { flatFromAddress, tidyStreet } from '../db/db.ts';
 import { fmtTemp, innProblem, parseRubles } from '../calc/format.ts';
 
 export type WebDeps = {
@@ -250,7 +250,9 @@ export function createApp(deps: WebDeps) {
       houseId = h.id;
     } else {
       const address = str(b.address, 200);
-      if (!address || address.length < 3 || !/\d/.test(address)) throw fieldError('q', 'Нужны улица и номер дома, например «Садовая 10»');
+      // Проверяем улицу без квартиры: «кв 5» — не дом (раньше создавался дом с пустой улицей).
+      const street = address ? tidyStreet(address) : '';
+      if (!address || street.length < 3 || !/\d/.test(street) || !/[\p{L}]{2}/u.test(street)) throw fieldError('q', 'Нужны улица и номер дома, например «Садовая 10»');
       const city = resolveCity(str(b.city, 60) ?? '', cfg.defaultTz);
       if (!city) throw new HttpError(400, 'Укажите город');
       houseId = db.upsertHouse(address, city.tz, 0, city.name).id;
