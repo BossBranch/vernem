@@ -93,6 +93,8 @@ trap finish EXIT
 
 mkdir -p "$BACKUP_DIR"
 backup="$BACKUP_DIR/vernem-$(date -u +%Y%m%dT%H%M%SZ).db"
+# VACUUM INTO refuses to overwrite a file left by a previous interrupted deployment.
+cleanup_temp_backup
 docker compose exec -T app node --disable-warning=ExperimentalWarning -e \
   "new (require('node:sqlite').DatabaseSync)('/app/data/vernem.db').exec(\"VACUUM INTO '/app/data/backup.db'\")"
 docker compose cp app:/app/data/backup.db "$backup"
