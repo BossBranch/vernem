@@ -46,9 +46,9 @@ if (( available_mb < MIN_FREE_MB )); then
 fi
 
 git fetch --prune origin main
-git cat-file -e "${SHA}^{commit}"
-if ! git merge-base --is-ancestor "$SHA" origin/main; then
-  echo "Refusing to deploy a commit outside origin/main" >&2
+main_sha=$(git rev-parse origin/main)
+if [[ $SHA != $main_sha ]]; then
+  echo "Refusing to deploy anything except current origin/main ($main_sha)" >&2
   exit 65
 fi
 
@@ -68,7 +68,6 @@ cleanup_temp_backup() {
 }
 
 rollback() {
-  local exit_code=$1
   if (( checked_out )); then
     git checkout -B production "$OLD_REF" || true
   fi
@@ -77,17 +76,20 @@ rollback() {
     docker image tag "$OLD_IMAGE" vernem-bot:current || true
     docker compose --profile https up -d --no-deps --force-recreate app || true
   fi
+}
+
+finish() {
+  local exit_code=$?
+  trap - EXIT
+  cleanup_temp_backup
+  if (( exit_code != 0 )); then
+    echo "Deployment failed with exit code $exit_code" >&2
+    rollback
+  fi
   exit "$exit_code"
 }
 
-on_error() {
-  local exit_code=$?
-  trap - ERR
-  rollback "$exit_code"
-}
-
-trap on_error ERR
-trap cleanup_temp_backup EXIT
+trap finish EXIT
 
 mkdir -p "$BACKUP_DIR"
 backup="$BACKUP_DIR/vernem-$(date -u +%Y%m%dT%H%M%SZ).db"
@@ -96,6 +98,11 @@ docker compose exec -T app node --disable-warning=ExperimentalWarning -e \
 docker compose cp app:/app/data/backup.db "$backup"
 chmod 600 "$backup"
 cleanup_temp_backup
+
+mapfile -t old_backups < <(ls -1t "$BACKUP_DIR"/vernem-*.db 2>/dev/null | tail -n +$((KEEP_BACKUPS + 1)))
+if (( ${#old_backups[@]} )); then
+  rm -f -- "${old_backups[@]}"
+fi
 
 docker image tag "$OLD_IMAGE" vernem-bot:rollback
 git checkout -B production "$SHA"
@@ -106,6 +113,10 @@ docker compose --profile https up -d --no-deps --force-recreate app
 
 for _ in {1..36}; do
   new_app_id=$(docker compose --profile https ps -q app)
+  if [[ -z $new_app_id ]]; then
+    sleep 5
+    continue
+  fi
   status=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$new_app_id")
   if [[ $status == healthy ]]; then
     break
@@ -134,13 +145,8 @@ if [[ $health != *'"ok":true'* ]]; then
   exit 70
 fi
 
-mapfile -t old_backups < <(ls -1t "$BACKUP_DIR"/vernem-*.db 2>/dev/null | tail -n +$((KEEP_BACKUPS + 1)))
-if (( ${#old_backups[@]} )); then
-  rm -f -- "${old_backups[@]}"
-fi
-
-docker image prune --force
-docker builder prune --force --keep-storage "$MAX_BUILD_CACHE"
-df -h /
-docker system df
+docker image prune --force || echo "Warning: dangling image cleanup failed" >&2
+docker builder prune --force --keep-storage "$MAX_BUILD_CACHE" || echo "Warning: build cache cleanup failed" >&2
+df -h / || echo "Warning: disk report failed" >&2
+docker system df || echo "Warning: Docker disk report failed" >&2
 echo "Deployment complete: $SHA"

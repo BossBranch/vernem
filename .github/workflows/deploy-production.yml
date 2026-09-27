@@ -3,11 +3,6 @@ name: Deploy Production
 on:
   workflow_dispatch:
     inputs:
-      ref:
-        description: Commit SHA or main to deploy
-        required: true
-        default: main
-        type: string
       confirm:
         description: Type DEPLOY to confirm production deployment
         required: true
@@ -22,18 +17,25 @@ concurrency:
 
 jobs:
   verify:
-    if: inputs.confirm == 'DEPLOY'
+    timeout-minutes: 20
     runs-on: ubuntu-24.04
     outputs:
       sha: ${{ steps.commit.outputs.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Require main branch
+        run: test "$GITHUB_REF" = refs/heads/main
+      - name: Require explicit confirmation
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: test "$CONFIRM" = DEPLOY
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ inputs.ref }}
+          ref: main
           fetch-depth: 0
+          persist-credentials: false
       - id: commit
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22.23.2
           cache: npm
@@ -45,28 +47,35 @@ jobs:
 
   deploy:
     needs: verify
+    timeout-minutes: 15
     runs-on: ubuntu-24.04
     environment: production
     steps:
-      - name: Configure SSH
+      - name: Deploy verified current main
         env:
+          SHA: ${{ needs.verify.outputs.sha }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
           VPS_SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          VPS_USER: ${{ secrets.VPS_USER }}
         run: |
+          [[ $VPS_HOST =~ ^[A-Za-z0-9.-]+$ ]]
+          [[ $VPS_PORT =~ ^[0-9]{1,5}$ ]]
+          (( 10#$VPS_PORT >= 1 && 10#$VPS_PORT <= 65535 ))
+          [[ $VPS_USER =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]
+          [[ -n $VPS_KNOWN_HOSTS && -n $VPS_SSH_PRIVATE_KEY ]]
           install -m 700 -d ~/.ssh
+          trap 'rm -f ~/.ssh/id_ed25519 ~/.ssh/known_hosts' EXIT
           printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
           printf '%s\n' "$VPS_SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-      - name: Deploy verified commit
-        env:
-          VPS_HOST: ${{ secrets.VPS_HOST }}
-          VPS_PORT: ${{ secrets.VPS_PORT }}
-          VPS_USER: ${{ secrets.VPS_USER }}
-          SHA: ${{ needs.verify.outputs.sha }}
-        run: |
           ssh -i ~/.ssh/id_ed25519 \
             -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes \
+            -o ConnectTimeout=20 \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=10 \
             -p "$VPS_PORT" \
             "$VPS_USER@$VPS_HOST" \
             "deploy $SHA"

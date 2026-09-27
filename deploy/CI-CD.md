@@ -93,13 +93,12 @@ Fingerprint на компьютере должен совпасть с fingerpri
 
 Закоммитьте и отправьте workflow. Вкладка **Actions** должна показать успешный workflow `CI` для `main`.
 
-Для production откройте **Actions -> Deploy Production -> Run workflow**:
+Для production откройте **Actions -> Deploy Production -> Run workflow**, выберите branch `main`:
 
-1. В `ref` оставьте `main` или укажите конкретный commit SHA из `main`.
-2. В `confirm` введите `DEPLOY`.
-3. Запустите workflow.
+1. В `confirm` введите `DEPLOY`.
+2. Запустите workflow.
 
-Скрипт VPS откажется от commit вне `origin/main`, от параллельного запуска, от грязной рабочей копии, от свободного места менее 2 ГБ или от неработающего текущего контейнера.
+Workflow всегда разворачивает текущий `main`. Скрипт VPS откажется от неактуального commit, параллельного запуска, грязной рабочей копии, свободного места менее 2 ГБ или неработающего текущего контейнера.
 
 После deployment проверьте:
 
@@ -111,6 +110,6 @@ docker image ls vernem-bot
 
 ## 6. Обслуживание
 
-Скрипт держит текущий образ `vernem-bot:current`, один `vernem-bot:rollback`, 14 резервных копий SQLite в `/opt/vernem-backups` и build cache до 1 ГБ. Он не удаляет Docker volumes.
+Скрипт держит текущий образ `vernem-bot:current`, один `vernem-bot:rollback`, 14 резервных копий SQLite в `/opt/vernem-backups` и build cache до 1 ГБ. Он не удаляет Docker volumes. При неуспешной проверке автоматически откатываются код и образ; SQLite автоматически не заменяется backup-файлом, потому что новая версия могла уже записать данные. В текущем проекте миграции аддитивны; для будущей несовместимой миграции нужен отдельный план восстановления БД.
 
 Если менялись `deploy/deploy-vernem` или `deploy/vernem-ssh-wrapper`, установите обновлённые файлы под `root` повторно командами из шага 2. После дедлайна удалите public key GitHub Actions из `authorized_keys` или отключите workflow deployment. Это не остановит работающий бот.
