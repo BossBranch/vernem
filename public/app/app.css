@@ -387,6 +387,9 @@ footer > button { background: none; border: 0; padding: 12px 0; min-height: 44px
 .note.warn > .i { color: var(--danger); }
 /* Демо-плашка — пояснение для показа, а не часть дела: нейтральная, пунктиром, не путается с жёлтым «Сейчас». */
 .note.demo { background: transparent; border: 1.5px dashed var(--line); }
+/* Горячая и холодная вода — одна капля, разводим цветом. */
+.tile[data-key='hot_water_off'] > .i { color: var(--open); }
+.tile[data-key='cold_water_off'] > .i { color: var(--action); }
 p.note, div.note { display: flex; }
 .note > div { flex: 1 1 auto; }
 

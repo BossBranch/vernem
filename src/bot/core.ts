@@ -14,7 +14,7 @@ import type { Db, Evidence, ExecutorType, Incident, Participant, PhotoKind, Remi
 import type { HeatingTempNorm, HotWaterTempNorm, Norms, ServiceKey } from '../calc/norms.ts';
 import { SERVICE_ORDER } from '../calc/norms.ts';
 import { fmtNum, fmtPercent, fmtRub, parseRubles, parseTemperature, plural } from '../calc/format.ts';
-import { formatDuration, formatShort, hoursBetween, localParts, fromLocal, monthTitle, parseLocalInput, MS_HOUR, monthKey, monthGenitive } from '../calc/time.ts';
+import { formatDuration, formatShort, hoursBetween, localParts, fromLocal, monthTitle, parseLocalInput, MS_HOUR, monthKey, monthGenitive, toMinute } from '../calc/time.ts';
 import { claimToPdf } from '../docs/pdf.ts';
 import { refundAmount } from '../calc/engine.ts';
 import { claimToText } from '../docs/claim.ts';
@@ -242,7 +242,7 @@ export class Vernem {
       const house = this.db.getHouse(r.houseId)!;
       const two = r.variant === 'two_sources';
       if (this.db.houseInfo(house).twoPowerSources !== two) {
-        this.db.setHouseInfo(r.houseId, { ...this.db.houseInfo(house), twoPowerSources: two });
+        this.db.setHouseInfo(r.houseId, { ...this.db.houseInfo(house), twoPowerSources: two, updatedAt: this.now().toISOString(), updatedBy: userId });
         this.recheckPowerCases(r.houseId);
       }
     }
@@ -302,6 +302,12 @@ export class Vernem {
     const act = this.db.getActByIncident(c.incident.id);
     if (act?.status === 'signed' && start.getTime() !== new Date(c.p.started_at).getTime()) {
       return 'Акт уже подписан с этим временем начала. Чтобы изменить время, снимите отметку «подписан» и подпишите исправленный акт.';
+    }
+    // Окончание жителя, который задаёт время отключения, попадает и в акт — сверяем с подписанным.
+    const endInAct = c.p.role === 'reporter' && !!c.incident.ended_at && c.incident.ended_at === c.p.ended_at;
+    if (end && oldEnd && end !== oldEnd && endInAct) {
+      const actProblem = this.actEndProblem(c, end);
+      if (actProblem) return actProblem;
     }
     this.db.updateParticipant(pid, { started_at: start.toISOString(), ...(end && c.p.ended_at ? { ended_at: end.toISOString() } : {}) });
     // Кто сообщил первым, тот и задаёт время отключения — оно же попадает в акт.
@@ -402,6 +408,26 @@ export class Vernem {
     return null;
   }
 
+  /**
+   * Подписанный акт уже на бумаге. Окончание отключения (время дела, оно же попадает в акт) не должно ему противоречить:
+   * если в акте окончание записано — не меняем его; если записано «на момент составления не устранено» — окончание
+   * не может быть раньше составления акта. Иначе PDF акта разойдётся с подписанной бумагой.
+   */
+  actEndProblem(c: CaseBundle, end: Date): string | null {
+    const act = this.db.getActByIncident(c.incident.id);
+    if (act?.status !== 'signed') return null;
+    const created = new Date(act.created_at);
+    const tz = c.house.tz;
+    const incEnd = c.incident.ended_at ? new Date(c.incident.ended_at) : null;
+    if (incEnd && incEnd.getTime() <= created.getTime()) {
+      return `Окончание (${formatShort(incEnd, tz)}) записано в подписанном акте. Чтобы изменить его, снимите отметку «подписан» и подпишите исправленный акт.`;
+    }
+    if (end.getTime() <= created.getTime()) {
+      return `В подписанном акте записано, что на ${formatShort(created, tz)} услуга ещё не восстановлена — окончание не может быть раньше. Если это ошибка, снимите отметку «подписан» и подпишите исправленный акт.`;
+    }
+    return null;
+  }
+
   /** «Починили» из мини-приложения. */
   async endFromApp(userId: number, pid: number, endedAt: Date): Promise<string | null> {
     const c = this.ownCase(userId, pid);
@@ -411,6 +437,9 @@ export class Vernem {
     if (endedAt.getTime() > this.now().getTime() + 5 * 60_000) return 'Это время ещё не наступило';
     const overlap = relatedOverlap(this.db, this.norms, userId, c.house.id, c.incident.service_key, new Date(c.p.started_at), endedAt, pid);
     if (overlap) return `За это время уже есть дело ${overlap}. Одни и те же часы нельзя оплатить дважды — исправьте время.`;
+    // Окончание попадёт в акт, только если отключение ещё открыто (первый, кто отметил «починили»).
+    const actProblem = c.incident.ended_at ? null : this.actEndProblem(c, endedAt);
+    if (actProblem) return actProblem;
     await this.setEnded(userId, c, endedAt);
     return null;
   }
@@ -1057,6 +1086,8 @@ export class Vernem {
         buttons: [...timeButtons(`te:${c.p.id}`, 'end'), backRow()],
       });
     }
+    const actProblem = c.incident.ended_at ? null : this.actEndProblem(c, endedAt);
+    if (actProblem) return this.send(userId, { text: actProblem, buttons: [...timeButtons(`te:${c.p.id}`, 'end'), backRow()] });
     this.db.updateParticipant(c.p.id, { ended_at: endedAt.toISOString(), status: 'ended' });
     this.db.cancelReminders(c.p.id, 'ask_restored');
     this.db.setState(userId, 'idle');
@@ -1358,7 +1389,7 @@ export class Vernem {
     const totalPercent = calc.months.reduce((s, m) => s + m.percent, 0);
     const lines = [
       est.sum > 0 ? `💰 **Положено ≈ ${fmtRub(est.sum)}**${est.complete ? '' : ' (+ месяцы без суммы)'}` : `💰 **Положено снижение платы на ${fmtPercent(Math.round(totalPercent * 100) / 100)}**`,
-      `${norm.title}: ${formatShort(start, tz)} – ${formatShort(end, tz)} (${formatDuration(hoursBetween(start, end))})${adsNumber ? `, ${c.incident.evidence === 'ads' ? 'заявка' : 'обращение'} № ${clean(adsNumber)}` : ''}.`,
+      `${norm.title}: ${formatShort(start, tz)} – ${formatShort(end, tz)} (${formatDuration(hoursBetween(toMinute(start), toMinute(end)))})${adsNumber ? `, ${c.incident.evidence === 'ads' ? 'заявка' : 'обращение'} № ${clean(adsNumber)}` : ''}.`,
     ];
     for (const m of calc.months) {
       if (calc.months.length > 1) lines.push(`_${monthTitle(m.month)}_`);

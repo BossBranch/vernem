@@ -699,6 +699,11 @@ export class Db {
   }
 
   /** «Ещё не починили»: снова открыть отключение, если его закрыли по ошибке. */
+  /** Вид демо-отключения: 3 — архивное «вернули меньше» в демо-данных мини-приложения (метка «демо 3» не зависит от статуса). */
+  setIncidentDemo(id: number, kind: number) {
+    this.db.prepare('UPDATE incidents SET demo = ? WHERE id = ?').run(kind, id);
+  }
+
   reopenIncident(id: number) {
     this.db.prepare('UPDATE incidents SET ended_at = NULL WHERE id = ?').run(id);
   }

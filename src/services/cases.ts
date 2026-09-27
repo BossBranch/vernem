@@ -2,7 +2,7 @@ import { calculate, coldTariffAmount, refundAmount } from '../calc/engine.ts';
 import type { CalcInput, CalcResult, Interval, MonthCalc } from '../calc/engine.ts';
 import { fmtPercent } from '../calc/format.ts';
 import { allowedMonthlyHours } from '../calc/norms.ts';
-import { formatShort, monthKey, monthTitle } from '../calc/time.ts';
+import { formatShort, monthKey, monthTitle, toMinute } from '../calc/time.ts';
 import type { Norms } from '../calc/norms.ts';
 import { buildClaim, claimTo, claimToText } from '../docs/claim.ts';
 import type { ClaimDoc, ClaimInput } from '../docs/claim.ts';
@@ -30,9 +30,9 @@ function variantFor(db: Db, c: CaseBundle): string | null {
 
 export function calcInputFor(db: Db, norms: Norms, c: CaseBundle, now: Date): CalcInput {
   const norm = norms.services[c.incident.service_key];
-  const end = c.p.ended_at ? new Date(c.p.ended_at) : now;
+  const end = toMinute(c.p.ended_at ? new Date(c.p.ended_at) : now);
   if (norm.kind === 'interruption') {
-    return { kind: 'interruption', intervals: [{ start: new Date(c.p.started_at), end }], variant: variantFor(db, c) };
+    return { kind: 'interruption', intervals: [{ start: toMinute(new Date(c.p.started_at)), end }], variant: variantFor(db, c) };
   }
   // Замеры до начала дела не считаем (начало могли исправить позже).
   const start = new Date(c.p.started_at).getTime();
@@ -63,7 +63,7 @@ function earlierOutages(db: Db, c: CaseBundle): Interval[] {
       const inc = db.getIncident(o.incident_id);
       return !!inc && inc.service_key === c.incident.service_key && inc.house_id === c.incident.house_id;
     })
-    .map((o) => ({ start: new Date(o.started_at), end: new Date(o.ended_at!) }));
+    .map((o) => ({ start: toMinute(new Date(o.started_at)), end: toMinute(new Date(o.ended_at!)) }));
 }
 
 export function calcFor(db: Db, norms: Norms, c: CaseBundle, now: Date): CalcResult {
@@ -147,7 +147,10 @@ export function claimSnapshot(db: Db, norms: Norms, c: CaseBundle, now: Date): s
   // «Не сохранять» стирает ФИО из дела, а снимок остаётся.
   const cl = claimOf(c.p);
   const r = JSON.stringify([claimTo(cl, norms.services[c.incident.service_key]), cl.executorType === 'uk' || !cl.executorType]);
-  return JSON.stringify({ s: c.p.started_at, e: c.p.ended_at, m: calc.months.map((m) => [m.month, m.percent]), v, b, r });
+  // ch — подписал ли акт председатель: от этого зависит фраза об акте в заявлении («…и председателем совета дома»).
+  // Отдельным ключом, а не в v: у старых снимков v другого вида, и они бы все разом «устарели».
+  const ch = act?.status === 'signed' && (act.chair_signed === 1 || db.listSigners(act.id).some((s) => s.role === 'chair')) ? 1 : 0;
+  return JSON.stringify({ s: c.p.started_at, e: c.p.ended_at, m: calc.months.map((m) => [m.month, m.percent]), v, b, r, ch });
 }
 
 /** Меньше часа «холодной» горячей воды — копейки; заявление ради этого не делаем. */
@@ -296,6 +299,8 @@ export type CaseSummary = {
   role: string;
   neighbours: number;
   demo: boolean;
+  /** 1 — демо из бота или «есть номер», 3 — архивное демо «вернули меньше» (демо-данные мини-приложения). */
+  demoKind: number;
   months: { month: string; percent: number; lines: string[]; bill: number | null; billHint: number | null; coldTariffHours: number }[];
   serviceButton: string;
   basis: string;
@@ -354,7 +359,9 @@ export function summarize(db: Db, norms: Norms, c: CaseBundle, now: Date): CaseS
         ? `Подано — ждём квитанцию за ${monthTitle(monthKey(new Date(claim.submittedAt), c.house.tz))}`
         : c.p.status === 'closed' && c.p.ended_at && !hasMoney(calc)
           ? norm.kind === 'interruption'
-            ? 'Денег не положено — отключение было коротким'
+            ? c.incident.service_key === 'waste_off'
+              ? 'Денег не положено — перерыв был коротким'
+              : 'Денег не положено — отключение было коротким'
             : 'Денег не положено — отклонение было недолгим'
           : statusTitle(c.p.status, norm.kind, c.incident.service_key),
     kind: norm.kind,
@@ -374,6 +381,7 @@ export function summarize(db: Db, norms: Norms, c: CaseBundle, now: Date): CaseS
     role: c.p.role,
     neighbours: db.listParticipants(c.incident.id).length - 1,
     demo: !!c.incident.demo,
+    demoKind: c.incident.demo ?? 0,
     months: calc.months.map((m) => ({
       month: m.month,
       percent: m.percent,

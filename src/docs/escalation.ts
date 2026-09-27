@@ -117,7 +117,8 @@ export function buildFineDemand(input: ClaimInput, opts: EscalationOpts): ClaimD
     // в требовании к исполнителю они только ослабили бы позицию.
     note: 'Суммы рассчитаны ориентировочно по данным потребителя и Приложению № 1 к Правилам.',
     signature: base.signature,
-    receipt: RECEIPT_BLOCK,
+    // Это не заявление, а требование — «Документ принял».
+    receipt: RECEIPT_BLOCK.map((l) => l.replace('Заявление принял', 'Документ принял')),
     total: m.fine ?? 0,
     fileName: docFileName('Требование', input.norms.services[input.incident.service_key].button, input.now, input.house.tz),
   };

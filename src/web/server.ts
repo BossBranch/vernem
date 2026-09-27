@@ -413,7 +413,7 @@ export function createApp(deps: WebDeps) {
     const person = db.personFor(c.p.user_id, c.house.id);
     const saved = person.fio || person.flat ? person : null;
     const personHint = signer ? { fio: signer.fio, flat: signer.flat ?? saved?.flat ?? null, account: saved?.account ?? null } : saved;
-    const houseContacts = { ukName: info.ukName ?? null, ukEmail: info.ukEmail ?? null, ukAddress: info.ukAddress ?? null, adsPhone: info.adsPhone ?? null };
+    const houseContacts = { ukName: info.ukName ?? null, ukEmail: info.ukEmail ?? null, ukAddress: info.ukAddress ?? null, adsPhone: info.adsPhone ?? null, twoPowerSources: info.twoPowerSources ?? null };
     // Подписант акта — чтобы мини-приложение предупредило, если ФИО в заявлении не совпадают с актом.
     const actSigner = signer ? { fio: signer.fio, flat: signer.flat, signed: act?.status === 'signed' } : null;
     res.json({ case: s, claimText, executorHint, personHint, houseContacts, actSigner, savedPersonal: !!u?.save_personal, botConnected: !!cfg.token });

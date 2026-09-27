@@ -646,11 +646,68 @@ test('сменили получателя после скачивания — з
   });
 });
 
+test('подписанный акт: председатель входит в снимок заявления, окончание не противоречит акту', async () => {
+  await withServer(async (base, h) => {
+    const headers = { 'X-Max-Init-Data': initFor(97), 'Content-Type': 'application/json' };
+    await h.start(97);
+    const post = (url: string, body: object = {}) => fetch(`${base}${url}`, { method: 'POST', headers, body: JSON.stringify(body) });
+    const get = async (id: number) => ((await (await fetch(`${base}/api/cases/${id}`, { headers })).json()) as any);
+    const hours = (n: number) => new Date(Date.now() - n * 3_600_000).toISOString();
+    const { house } = (await (await post('/api/me/houses', { address: 'Лесная 21', city: 'Москва', flat: '3' })).json()) as any;
+    const { caseId } = (await (await post('/api/report', { houseId: house.id, service: 'cold_water_off', evidence: 'self', startedAt: hours(30) })).json()) as any;
+
+    // Акт составлен и подписан, пока воды нет: в нём «на момент составления не устранено».
+    assert.equal((await post(`/api/cases/${caseId}/act`, { fio: 'Лесная Анна Петровна', flat: '3' })).status, 200);
+    assert.equal((await post(`/api/cases/${caseId}/act/signed`, { chair: true })).status, 200);
+    const early = await post(`/api/cases/${caseId}/end`, { endedAt: hours(2) });
+    assert.equal(early.status, 422, 'окончание раньше составления подписанного акта');
+    assert.match(((await early.json()) as any).error, /ещё не восстановлена/);
+    assert.equal((await post(`/api/cases/${caseId}/end`, { endedAt: new Date().toISOString() })).status, 200);
+    // Исправить окончание на время раньше акта — тоже нельзя.
+    const moved = await fetch(`${base}/api/cases/${caseId}/times`, { method: 'PATCH', headers, body: JSON.stringify({ endedAt: hours(3) }) });
+    assert.equal(moved.status, 422);
+    assert.match(((await moved.json()) as any).error, /ещё не восстановлена/);
+
+    // Заявление скачано с «…и председателем»; потом ответ про председателя поменяли — заявление устарело.
+    await fetch(`${base}/api/cases/${caseId}/claim`, { method: 'PUT', headers, body: JSON.stringify({ fio: 'Лесная Анна Петровна', flat: '3' }) });
+    await post(`/api/cases/${caseId}/pdf-link`);
+    assert.match((await get(caseId)).claimText, /и председателем совета многоквартирного дома/);
+    assert.equal((await get(caseId)).case.claimOutdated, false);
+    await post(`/api/cases/${caseId}/act/unsigned`);
+    await post(`/api/cases/${caseId}/act/signed`, { chair: false });
+    const after = await get(caseId);
+    assert.doesNotMatch(after.claimText, /и председателем/);
+    assert.equal(after.case.claimOutdated, true, 'без председателя — скачанное заявление устарело');
+  });
+});
+
+test('время до минуты: «ровно 4 суток» не теряют час из-за секунд в сохранённом начале', async () => {
+  await withServer(async (base, h) => {
+    const headers = { 'X-Max-Init-Data': initFor(98), 'Content-Type': 'application/json' };
+    await h.start(98);
+    const post = (url: string, body: object = {}) => fetch(`${base}${url}`, { method: 'POST', headers, body: JSON.stringify(body) });
+    const { house } = (await (await post('/api/me/houses', { address: 'Лесная 31', city: 'Москва' })).json()) as any;
+    // Начало с секундами — как «Только что» в форме; окончание из поля времени — ровно минуты, через 4 суток.
+    const minute = Math.floor((Date.now() - 100 * 3_600_000) / 60_000) * 60_000;
+    const startedAt = new Date(minute + 58_263).toISOString();
+    const { caseId } = (await (await post('/api/report', { houseId: house.id, service: 'hot_water_off', evidence: 'ads', number: '4512', startedAt })).json()) as any;
+    await post(`/api/cases/${caseId}/end`, { endedAt: new Date(minute + 90 * 3_600_000).toISOString() });
+    // Исправили окончание в поле без секунд — ровно 96 ч от начала (по минутам).
+    const patched = await fetch(`${base}/api/cases/${caseId}/times`, { method: 'PATCH', headers, body: JSON.stringify({ endedAt: new Date(minute + 96 * 3_600_000).toISOString() }) });
+    assert.equal(patched.status, 200);
+    const put = (await (await fetch(`${base}/api/cases/${caseId}/claim`, { method: 'PUT', headers, body: JSON.stringify({ fio: 'Лесная Анна Петровна' }) })).json()) as any;
+    // 96 ч − 8 ч допустимых = 88 ч × 0,15% = 13,2% (а не 87 ч и 13,05%).
+    assert.equal(put.case.months.reduce((s: number, m: any) => s + m.percent, 0), 13.2);
+    assert.match(put.claimText, /\(4 суток\) коммунальная услуга/);
+    assert.match(put.case.months.map((m: any) => m.lines.join(' ')).join(' '), /Перерыв за месяц: \d+ ч \(/);
+  });
+});
+
 test('health и статика мини-приложения', async () => {
   await withServer(async (base) => {
     const health = (await (await fetch(`${base}/health`)).json()) as any;
     assert.equal(health.ok, true);
-    assert.equal(health.version, '1.0.12');
+    assert.equal(health.version, '1.1.0');
     const page = await fetch(`${base}/app/`);
     assert.equal(page.status, 200);
     const html = await page.text();

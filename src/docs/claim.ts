@@ -8,7 +8,7 @@ import { coldTariffAmount, refundAmount } from '../calc/engine.ts';
 import type { Norms, ServiceNorm } from '../calc/norms.ts';
 import { allowedMonthlyHours } from '../calc/norms.ts';
 import { fmtNum, fmtPercent, fmtRub, fmtTemp } from '../calc/format.ts';
-import { formatDate, formatDateTime, formatDuration, hoursBetween, monthPrepositional, monthTitle } from '../calc/time.ts';
+import { formatDate, formatDateTime, formatDuration, hoursBetween, monthPrepositional, monthTitle, toMinute } from '../calc/time.ts';
 import type { Act, ActSigner, Claim, House, Incident, Participant, Photo, Reading } from '../db/db.ts';
 
 /**
@@ -201,7 +201,7 @@ export function buildClaim(input: ClaimInput): ClaimDoc {
   const facts: string[] = [];
   if (calc.kind === 'interruption') {
     facts.push(
-      `С ${formatDateTime(start, tz)} по ${formatDateTime(end, tz)} (${formatDuration(hoursBetween(start, end))}) коммунальная услуга «${serviceName}» не предоставлялась (перерыв в предоставлении).`,
+      `С ${formatDateTime(start, tz)} по ${formatDateTime(end, tz)} (${formatDuration(hoursBetween(toMinute(start), toMinute(end)))}) коммунальная услуга «${serviceName}» не предоставлялась (перерыв в предоставлении).`,
     );
   } else if (calc.kind === 'heating_temperature') {
     const t = norm.temperature as { norm_c: number; corner_norm_c: number };

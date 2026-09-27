@@ -93,7 +93,8 @@ export function calcInterruption(norm: ServiceNorm, intervals: Interval[], tz: s
     const singleLimit = n.single_hours_warm !== undefined && warm ? n.single_hours_warm : n.single_hours;
     const singleLimitExceeded = singleLimit !== undefined && maxSingle > singleLimit + EPS;
     const lines: string[] = [];
-    lines.push(`Перерыв за месяц: ${formatDuration(total)}. Допустимо: ${fmtNum(allowed)} ч в месяц.`);
+    // От суток и больше — ещё и в часах: «Допустимо: 8 ч», «Превышение: 64 ч» считаются от часов, а не от «3 суток».
+    lines.push(`Перерыв за месяц: ${total >= 24 ? `${fmtNum(Math.round(total * 100) / 100)} ч (${formatDuration(total)})` : formatDuration(total)}. Допустимо: ${fmtNum(allowed)} ч в месяц.`);
     if (units === 0) {
       lines.push(
         excess > 0

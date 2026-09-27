@@ -37,7 +37,11 @@ export function buildActDoc(input: ActDocInput): ClaimDoc {
   const start = new Date(incident.started_at);
   // Скачанная позже копия должна совпадать с подписанной бумагой: окончание пишем, только если оно было известно при составлении.
   const endedAtAct = incident.ended_at && new Date(incident.ended_at).getTime() <= new Date(act.created_at).getTime() ? new Date(incident.ended_at) : null;
-  const what = norm.kind === 'interruption' ? 'коммунальная услуга не предоставляется' : `${norm.kind === 'heating_temperature' ? 'температура воздуха в жилых помещениях' : 'температура горячей воды'} ниже нормативной`;
+  // «не предоставляется с … по …» — неграмотно: с окончанием — прошедшее время.
+  const what =
+    norm.kind === 'interruption'
+      ? `коммунальная услуга ${endedAtAct ? 'не предоставлялась' : 'не предоставляется'}`
+      : `${norm.kind === 'heating_temperature' ? 'температура воздуха в жилых помещениях' : 'температура горячей воды'} ${endedAtAct ? 'была ' : ''}ниже нормативной`;
 
   const facts = [
     `Адрес: ${docAddress(house)}${incident.entrance ? `, подъезд ${incident.entrance}` : ''}.`,

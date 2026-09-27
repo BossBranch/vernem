@@ -48,6 +48,8 @@ await h.press(userId, 'Запомнить');
 await h.advance(31 * 24 * H);
 await h.press(userId, 'Да, вернули');
 await h.text(userId, '60');
+// Метка «демо 3» — по виду демо, а не по статусу: сняли отметку «вернули» — дело всё равно «демо 3».
+h.db.setIncidentDemo(h.db.listUserParticipants(userId)[0].incident_id, 3);
 
 // 2. Демо 1 — есть номер заявки: горячая вода 5 дней назад, заявление готово
 // (другой месяц, чем архив, — расчёты не складываются).

@@ -202,6 +202,14 @@ export function hoursBetween(a: Date, b: Date): number {
   return (b.getTime() - a.getTime()) / MS_HOUR;
 }
 
+/**
+ * Время до минуты. На экране и в полях ввода секунд нет, а хранится время с секундами: без округления
+ * «с 19.09 19:46 по 23.09 19:46» считалось бы как 3 суток 23 ч 59 мин — и терялся бы полный час превышения.
+ */
+export function toMinute(d: Date): Date {
+  return new Date(Math.floor(d.getTime() / 60_000) * 60_000);
+}
+
 /** «3 ч 20 мин» */
 export function formatDuration(hours: number): string {
   // «3 суток», а не «3 сут»: сокращение жителю непонятно.
