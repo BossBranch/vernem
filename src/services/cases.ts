@@ -4,7 +4,7 @@ import { fmtPercent } from '../calc/format.ts';
 import { allowedMonthlyHours } from '../calc/norms.ts';
 import { formatShort, monthKey, monthTitle } from '../calc/time.ts';
 import type { Norms } from '../calc/norms.ts';
-import { buildClaim, claimToText } from '../docs/claim.ts';
+import { buildClaim, claimTo, claimToText } from '../docs/claim.ts';
 import type { ClaimDoc, ClaimInput } from '../docs/claim.ts';
 import type { Act, ActSigner, Claim, Db, House, Incident, Participant, ParticipantStatus } from '../db/db.ts';
 import { buildActDoc } from '../docs/act.ts';
@@ -143,7 +143,11 @@ export function claimSnapshot(db: Db, norms: Norms, c: CaseBundle, now: Date): s
   const v = [act?.status === 'signed' ? 1 : 0, c.p.inspection ?? '', c.p.own_ads_number ?? c.incident.ads_number ?? ''].join('|');
   // b — плата из квитанции и тарифы: от них сумма в рублях в заявлении.
   const b = JSON.stringify([Object.entries(billsOf(c.p)).sort(), Object.entries(claimOf(c.p).coldTariff ?? {}).sort()]);
-  return JSON.stringify({ s: c.p.started_at, e: c.p.ended_at, m: calc.months.map((m) => [m.month, m.percent]), v, b });
+  // r — кому адресовано: шапка (название, ИНН, тип получателя) и абзац про УК. Персональных данных в снимке нет:
+  // «Не сохранять» стирает ФИО из дела, а снимок остаётся.
+  const cl = claimOf(c.p);
+  const r = JSON.stringify([claimTo(cl, norms.services[c.incident.service_key]), cl.executorType === 'uk' || !cl.executorType]);
+  return JSON.stringify({ s: c.p.started_at, e: c.p.ended_at, m: calc.months.map((m) => [m.month, m.percent]), v, b, r });
 }
 
 /** Меньше часа «холодной» горячей воды — копейки; заявление ради этого не делаем. */

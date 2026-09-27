@@ -108,6 +108,8 @@ a[href^='tel:'], a[href^='mailto:'] { color: var(--action); font-weight: 500; te
 .now.tone-action .kicker { color: var(--action); }
 .now > h2 { font-size: 22px; line-height: 1.2; margin: 0 0 10px; }
 .now input, .now select { background: var(--sheet); }
+/* Подпись-заголовок у обычной карточки («Потом» под блоком «Сейчас»). */
+.sheet > .kicker { font-size: 14px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-2); margin: 0 0 4px; }
 
 /* ---------- кнопки ---------- */
 .btn {
@@ -156,7 +158,8 @@ input, select {
   font: inherit;
   font-size: 17px;
   color: var(--ink);
-  background: var(--paper);
+  /* Белое поле — видно, что в него можно писать; серо-бежевое казалось неактивным. */
+  background: var(--sheet);
   border: 1.5px solid var(--field);
   border-radius: var(--radius-control);
   padding: 10px 14px;
@@ -172,7 +175,7 @@ input[type='checkbox'], input[type='radio'] { width: 24px; height: 24px; min-hei
 .row2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0 12px; }
 /* Самые узкие телефоны: поле даты и времени не помещается в половину ширины. */
 @media (max-width: 359px) { .row2 { grid-template-columns: minmax(0, 1fr); } }
-.check-row { display: flex !important; align-items: center; justify-content: space-between; gap: 12px; background: var(--paper); border-radius: var(--radius-btn); padding: 12px 14px; margin: 14px 0 !important; color: var(--ink) !important; font-size: 17px !important; cursor: pointer; }
+.check-row { display: flex !important; align-items: center; justify-content: flex-start; gap: 12px; background: var(--paper); border-radius: var(--radius-btn); padding: 12px 14px; margin: 14px 0 !important; color: var(--ink) !important; font-size: 17px !important; cursor: pointer; }
 .check-row input { width: 26px; height: 26px; }
 .search { position: relative; }
 .search .i { position: absolute; left: 14px; top: 50%; transform: translateY(-50%); color: var(--ink-2); pointer-events: none; }
@@ -381,6 +384,8 @@ footer > button { background: none; border: 0; padding: 12px 0; min-height: 44px
 .note .actions { margin-top: 10px; }
 .note.warn { background: color-mix(in srgb, var(--danger) 8%, var(--sheet)); border-color: color-mix(in srgb, var(--danger) 35%, transparent); }
 .note.warn > .i { color: var(--danger); }
+/* Демо-плашка — пояснение для показа, а не часть дела: нейтральная, пунктиром, не путается с жёлтым «Сейчас». */
+.note.demo { background: transparent; border: 1.5px dashed var(--line); }
 p.note, div.note { display: flex; }
 .note > div { flex: 1 1 auto; }
 

@@ -349,7 +349,7 @@ export async function onActButton(bot: Vernem, userId: number, action: string, a
       if (!ctx || ctx.act.initiator_user_id !== userId) return bot.stale(userId);
       if (!open(ctx)) return showAct(bot, userId, id);
       return bot.send(userId, {
-        text: 'На бумаге подписали хотя бы 2 жителя (вместе с вами)?',
+        text: 'На бумаге подписали вы и хотя бы один сосед?',
         buttons: [[cb('✅ Да, и председатель', `ak:chair:${id}:1`)], [cb('✅ Да, без председателя', `ak:chair:${id}:0`)], [cb('Ещё нет', `ak:st:${id}`)]],
       });
     }

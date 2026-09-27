@@ -574,7 +574,7 @@ test('исправить время: то же время без секунд �
     const houseId = h.db.listUserHouses(71)[0]?.id ?? (await (await fetch(`${base}/api/me/houses`, { method: 'POST', headers, body: JSON.stringify({ address: 'Лесная 9', city: 'Москва' }) })).json() as any).house.id;
     const bad = await fetch(`${base}/api/report`, { method: 'POST', headers, body: JSON.stringify({ houseId, service: 'cold_water_off', evidence: 'ads', number: '!!!', startedAt: new Date().toISOString() }) });
     assert.equal(bad.status, 400);
-    assert.match(((await bad.json()) as any).fields.number, /цифры или буквы/);
+    assert.match(((await bad.json()) as any).fields.number, /должны быть цифры/);
   });
 });
 
@@ -602,11 +602,34 @@ test('лифт «не знаю» не ставит «Нет» всему дом�
   });
 });
 
+test('сменили получателя после скачивания — заявление устарело; «не назвали» — не номер заявки', async () => {
+  await withServer(async (base, h) => {
+    const headers = { 'X-Max-Init-Data': initFor(91), 'Content-Type': 'application/json' };
+    const pid = await demoCase(h, 91);
+    const put = (body: object) => fetch(`${base}/api/cases/${pid}/claim`, { method: 'PUT', headers, body: JSON.stringify(body) }).then((r) => r.json() as any);
+    const uk = { fio: 'Орлова Анна Петровна', executor: 'ООО «УК Пример»', executorType: 'uk', executorInn: '7700000009' };
+    await put(uk);
+    await fetch(`${base}/api/cases/${pid}/pdf-link`, { method: 'POST', headers });
+    assert.equal((await put(uk)).case.claimOutdated, false, 'те же данные — заявление не устарело');
+    // В скачанном PDF — УК; сменили получателя (ИНН прежнего приложение очищает) — PDF надо скачать заново.
+    const other = await put({ ...uk, executor: 'АО «Газпром межрегионгаз»', executorType: 'rso', executorInn: '' });
+    assert.equal(other.case.claimOutdated, true, 'другой получатель — скачанное заявление устарело');
+    assert.match(other.claimText, /Руководителю АО «Газпром межрегионгаз»/);
+    assert.doesNotMatch(other.claimText, /ИНН 7700000009/);
+
+    // «не назвали» в поле номера — не номер: в заявлении было бы «зарегистрировано под № не назвали».
+    const { house } = (await (await fetch(`${base}/api/me/houses`, { method: 'POST', headers, body: JSON.stringify({ address: 'Лесная 11', city: 'Москва' }) })).json()) as any;
+    const bad = await fetch(`${base}/api/report`, { method: 'POST', headers, body: JSON.stringify({ houseId: house.id, service: 'cold_water_off', evidence: 'ads', number: 'не назвали', startedAt: new Date().toISOString() }) });
+    assert.equal(bad.status, 400);
+    assert.match(((await bad.json()) as any).fields.number, /выберите «Номера нет»/);
+  });
+});
+
 test('health и статика мини-приложения', async () => {
   await withServer(async (base) => {
     const health = (await (await fetch(`${base}/health`)).json()) as any;
     assert.equal(health.ok, true);
-    assert.equal(health.version, '1.0.10');
+    assert.equal(health.version, '1.0.11');
     const page = await fetch(`${base}/app/`);
     assert.equal(page.status, 200);
     const html = await page.text();

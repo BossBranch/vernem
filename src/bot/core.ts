@@ -855,7 +855,13 @@ export class Vernem {
 
   private async onNumber(userId: number, text: string, draft: Draft) {
     const number = clean(text).slice(0, 40);
-    if (!number || !/[\p{L}\d]/u.test(number)) return this.send(userId, { text: 'Напишите номер обращения цифрами или буквами.' });
+    // В номере всегда есть цифры: «не назвали» — не номер, в заявлении он выглядел бы как «№ не назвали».
+    if (!number || !/\d/.test(number)) {
+      return this.send(userId, {
+        text: 'В номере должны быть цифры, например 4512 или А-17. Номера не дали — нажмите «Номера нет».',
+        buttons: [[cb('Номера нет', 'fb:nonum')], backRow()],
+      });
+    }
     return this.continueDraft(userId, { ...draft, number });
   }
 

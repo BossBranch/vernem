@@ -178,8 +178,14 @@ export function showAddresses(bot: Vernem, userId: number) {
 }
 
 /**
- * Кто делает перерасчёт по услуге — по карточке дома: поставщик услуги, а если он не указан
- * или указан как «УК» — управляющая организация. null — данных нет, спросим жителя.
+ * Услуги, за которые обычно платят напрямую поставщику, а не УК: мусор — региональному оператору,
+ * газ и свет — газовой и энергосбытовой компании. Поставщик не указан — УК в заявление не подставляем.
+ */
+const DIRECT_SUPPLIER: ReadonlySet<ServiceKey> = new Set<ServiceKey>(['waste_off', 'gas_off', 'electricity_off']);
+
+/**
+ * Кто делает перерасчёт по услуге — по карточке дома: поставщик услуги, а если он указан как «УК»
+ * (или не указан — кроме мусора, газа и света) — управляющая организация. null — данных нет, спросим жителя.
  */
 export function executorFromHouse(info: HouseInfo, service: ServiceKey): { name: string; type: ExecutorType } | null {
   const bySupplier: Partial<Record<ServiceKey, string | undefined>> = {
@@ -194,7 +200,9 @@ export function executorFromHouse(info: HouseInfo, service: ServiceKey): { name:
     waste_off: info.rop,
   };
   const supplier = bySupplier[service]?.trim();
-  if (supplier && !/^(ук|тсж|жск|управляющая)/i.test(supplier)) return { name: supplier, type: service === 'waste_off' ? 'rop' : 'rso' };
+  const viaUk = !!supplier && /^(ук|тсж|жск|управляющая)/i.test(supplier);
+  if (supplier && !viaUk) return { name: supplier, type: service === 'waste_off' ? 'rop' : 'rso' };
+  if (!supplier && DIRECT_SUPPLIER.has(service)) return null;
   if (info.ukName) return { name: info.ukName, type: 'uk' };
   return null;
 }

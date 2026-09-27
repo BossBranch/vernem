@@ -346,7 +346,10 @@ export function createApp(deps: WebDeps) {
       if (evidence !== 'self' && !str(b.number, 60)) {
         throw fieldError('number', evidence === 'written' ? 'Впишите номер обращения — он есть в «Госуслугах Дом» или ГИС ЖКХ' : 'Впишите номер заявки или выберите «Номера нет»');
       }
-      if (evidence !== 'self' && !/[\p{L}\d]/u.test(numberRaw)) throw fieldError('number', 'Номер — цифры или буквы, например 4512 или А-17');
+      // В номере всегда есть цифры: «не назвали» или «нет» — это не номер, для них есть вариант «Номера нет».
+      if (evidence !== 'self' && !/\d/.test(numberRaw)) {
+        throw fieldError('number', 'В номере должны быть цифры, например 4512 или А-17. Номера не дали — выберите «Номера нет»');
+      }
       const r = await bot.reportFromApp(req.userId!, {
         houseId: b.houseId,
         service: b.service,
@@ -762,7 +765,7 @@ export function createApp(deps: WebDeps) {
       const m = /^(\d+)\.pdf$/.exec(String(req.params.file));
       const path = `/files/act/${req.params.file}`;
       if (!m || !verifyLink(path, req.query.exp as string, req.query.sig as string, cfg.linkSecret)) {
-        throw new HttpError(403, 'Ссылка устарела. Нажмите «Акт (PDF)» ещё раз.');
+        throw new HttpError(403, 'Ссылка устарела. Нажмите кнопку скачивания акта ещё раз.');
       }
       const doc = actDocFor(db, norms, Number(m[1]), new Date());
       if (!doc) throw new HttpError(404, 'Акт не найден');
@@ -781,7 +784,7 @@ export function createApp(deps: WebDeps) {
       const m = /^(\d+)(?:-(\d+))?\.pdf$/.exec(String(req.params.file));
       const path = `/files/claim/${req.params.file}`;
       if (!m || !verifyLink(path, req.query.exp as string, req.query.sig as string, cfg.linkSecret)) {
-        throw new HttpError(403, 'Ссылка устарела. Нажмите «Скачать PDF» ещё раз.');
+        throw new HttpError(403, 'Ссылка устарела. Нажмите кнопку скачивания ещё раз.');
       }
       const c = loadCase(db, Number(m[1]));
       if (!c || !c.p.ended_at) throw new HttpError(404, 'Заявление не найдено');

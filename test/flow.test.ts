@@ -306,6 +306,15 @@ test('карточка дома: данные из квитанции, теле�
   h.close();
 });
 
+test('получатель из карточки дома: за мусор, газ и свет без поставщика УК не подставляется', async () => {
+  const { executorFromHouse } = await import('../src/bot/house.ts');
+  const info = { ukName: 'ООО «УК Пример»', ukInn: '7700000009' };
+  for (const s of ['waste_off', 'gas_off', 'electricity_off'] as const) assert.equal(executorFromHouse(info, s), null, s);
+  assert.deepEqual(executorFromHouse(info, 'hot_water_off'), { name: 'ООО «УК Пример»', type: 'uk' });
+  assert.deepEqual(executorFromHouse({ ...info, rsoPower: 'УК' }, 'electricity_off'), { name: 'ООО «УК Пример»', type: 'uk' });
+  assert.deepEqual(executorFromHouse({ ...info, rop: 'ООО «Экоцентр»' }, 'waste_off'), { name: 'ООО «Экоцентр»', type: 'rop' });
+});
+
 test('отопление: угловая комната, +15 °C, новый замер, расчёт', async () => {
   const h = new Harness({ start: START });
   await h.start(1);
@@ -413,6 +422,10 @@ test('ошибки ввода не ломают сценарий', async () => {
   assert.match(textOf(h, 1), /Нужны улица и номер дома/);
   await typeAddress(h, 1, 'Садовая 10');
   await h.press(1, 'Позвонил');
+  // «не назвали» — не номер: бот просит цифры и сразу даёт кнопку «Номера нет».
+  await h.text(1, 'не назвали');
+  assert.match(h.last(1).text, /В номере должны быть цифры/);
+  assert.ok(lastButtons(h, 1).some((b) => b.text === 'Номера нет'));
   await h.text(1, '99');
   await h.press(1, 'Ввести время');
   await h.text(1, '25:99');
@@ -646,7 +659,7 @@ test('акт без исполнителя: бот сам собирает со�
   }
 
   await h.press(1, 'Акт подписан');
-  assert.match(h.last(1).text, /подписали хотя бы 2 жителя/);
+  assert.match(h.last(1).text, /подписали вы и хотя бы один сосед/);
   await h.press(1, 'Да, и председатель');
   assert.equal(h.db.getAct(act.id)!.status, 'signed');
   assert.equal(h.db.getAct(act.id)!.chair_signed, 1);
