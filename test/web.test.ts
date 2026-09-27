@@ -209,12 +209,24 @@ test('проверка ввода: все ошибки формы сразу и 
     assert.equal(again.already, true);
     const search = (await (await fetch(`${base}/api/houses/search?q=${encodeURIComponent('ленина 1')}&city=Москва`, { headers })).json()) as any;
     assert.equal(search.exactId, house.id, 'точное совпадение — «добавить новый» не предлагаем');
+    // Квартира в строке поиска — не часть адреса: дом находится и его можно выбрать (раньше — тупик «Добавьте номер дома»).
+    const withFlat = (await (await fetch(`${base}/api/houses/search?q=${encodeURIComponent('ленина 1 кв 20')}&city=Москва`, { headers })).json()) as any;
+    assert.deepEqual(withFlat.houses.map((x: any) => x.id), [house.id]);
+    assert.equal(withFlat.exactId, house.id);
 
     // Телефон со словами ломает «позвонить» у всех соседей — не сохраняем. Ошибки — все сразу.
     const info = await fetch(`${base}/api/houses/${house.id}/info`, { method: 'PUT', headers, body: JSON.stringify({ adsPhone: 'звоните', ukInn: 'абв123', ukEmail: 'почта' }) });
     assert.equal(info.status, 400);
     assert.deepEqual(Object.keys(((await info.json()) as any).fields).sort(), ['adsPhone', 'ukEmail', 'ukInn']);
     assert.equal((await fetch(`${base}/api/houses/${house.id}/info`, { method: 'PUT', headers, body: JSON.stringify({ adsPhone: '+7 (495) 123-45-67' }) })).status, 200);
+    // Опечатка в ИНН не стирает остальное: верные поля сохраняются, поле с ошибкой остаётся прежним.
+    const partial = await fetch(`${base}/api/houses/${house.id}/info`, { method: 'PUT', headers, body: JSON.stringify({ adsPhone: '+7 495 000-11-22', ukName: 'ООО «УК Мира»', ukInn: '7700000001' }) });
+    assert.equal(partial.status, 400);
+    assert.deepEqual(Object.keys(((await partial.json()) as any).fields), ['ukInn']);
+    const saved = h.db.houseInfo(h.db.getHouse(house.id)!);
+    assert.equal(saved.adsPhone, '+7 495 000-11-22');
+    assert.equal(saved.ukName, 'ООО «УК Мира»');
+    assert.equal(saved.ukInn, undefined);
   });
 });
 
@@ -578,18 +590,27 @@ test('исправить время: то же время без секунд �
   });
 });
 
-test('лифт «не знаю» не ставит «Нет» всему дому; огромная сумма возврата — ошибка', async () => {
+test('лифт: «не знаю» не ставит ответ всему дому, «да» и «нет» ставят; текст заявления совпадает с расчётом; огромная сумма возврата — ошибка', async () => {
   await withServer(async (base, h) => {
     const headers = { 'X-Max-Init-Data': initFor(81), 'Content-Type': 'application/json' };
     await h.start(81);
     const { house } = (await (await fetch(`${base}/api/me/houses`, { method: 'POST', headers, body: JSON.stringify({ address: 'Мира 21', city: 'Москва' }) })).json()) as any;
     const report = (body: object) => fetch(`${base}/api/report`, { method: 'POST', headers, body: JSON.stringify({ houseId: house.id, service: 'electricity_off', evidence: 'ads', number: '5', ...body }) }).then((r) => r.json() as any);
     const info = () => h.db.houseInfo(h.db.getHouse(house.id)!).twoPowerSources;
-    const first = await report({ variant: 'one_source', startedAt: new Date(Date.now() - 30 * 3_600_000).toISOString() });
-    assert.equal(info(), undefined, '«Нет или не знаю» — ответ за дом не записан');
+    // «Не знаю» — варианта нет: ответ за дом не записан, считаем по строгому лимиту 24 ч.
+    const first = await report({ startedAt: new Date(Date.now() - 30 * 3_600_000).toISOString() });
+    assert.equal(info(), undefined, '«Не знаю» — ответ за дом не записан');
     await fetch(`${base}/api/cases/${first.caseId}/end`, { method: 'POST', headers, body: JSON.stringify({ endedAt: new Date(Date.now() - 26 * 3_600_000).toISOString() }) });
     await report({ variant: 'two_sources', startedAt: new Date(Date.now() - 2 * 3_600_000).toISOString() });
     assert.equal(info(), true, '«Да» — записан');
+    // Текст заявления и расчёт — по одному ответу (карточка дома), даже если дело открывали с «Не знаю».
+    const put1 = (await (await fetch(`${base}/api/cases/${first.caseId}/claim`, { method: 'PUT', headers, body: JSON.stringify({ fio: 'Мирова Анна Петровна' }) })).json()) as any;
+    assert.match(put1.claimText, /составляет 2 ч суммарно в течение месяца/);
+    assert.match(put1.case.months[0].lines.join(' '), /Допустимо: 2 ч в месяц/);
+    // «Нет» из формы — тоже ответ за дом.
+    const { house: other } = (await (await fetch(`${base}/api/me/houses`, { method: 'POST', headers, body: JSON.stringify({ address: 'Мира 23', city: 'Москва' }) })).json()) as any;
+    await fetch(`${base}/api/report`, { method: 'POST', headers, body: JSON.stringify({ houseId: other.id, service: 'electricity_off', evidence: 'ads', number: '6', variant: 'one_source', startedAt: new Date(Date.now() - 3_600_000).toISOString() }) });
+    assert.equal(h.db.houseInfo(h.db.getHouse(other.id)!).twoPowerSources, false, '«Нет» — записан');
 
     // Сумма возврата больше 100 000 ₽ по одной услуге — почти наверняка опечатка.
     await fetch(`${base}/api/cases/${first.caseId}/claim`, { method: 'PUT', headers, body: JSON.stringify({ fio: 'Мирова Анна Петровна', bills: { [new Date(Date.now() - 30 * 3_600_000).toISOString().slice(0, 7)]: '900' } }) });
@@ -629,7 +650,7 @@ test('health и статика мини-приложения', async () => {
   await withServer(async (base) => {
     const health = (await (await fetch(`${base}/health`)).json()) as any;
     assert.equal(health.ok, true);
-    assert.equal(health.version, '1.0.11');
+    assert.equal(health.version, '1.0.12');
     const page = await fetch(`${base}/app/`);
     assert.equal(page.status, 200);
     const html = await page.text();

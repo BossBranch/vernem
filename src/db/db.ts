@@ -386,6 +386,8 @@ export function addressTokens(query: string): string[] {
   return query
     .toLowerCase()
     .replace(/ё/g, 'е')
+    // «Садовая 10 кв 15» — квартира не часть адреса дома: иначе «15» ищется в адресе и дом не находится.
+    .replace(new RegExp(FLAT_RE.source, 'giu'), ' ')
     .replace(/[,.;"«»()]/g, ' ')
     .split(/\s+/)
     .map((t) => t.trim())

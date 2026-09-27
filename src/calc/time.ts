@@ -1,3 +1,5 @@
+import { plural } from './format.ts';
+
 // Время храним в UTC, а считаем и показываем в часовом поясе дома.
 // В России нет перехода на летнее время, но код от этого не зависит:
 // смещение вычисляется через Intl для каждого момента.
@@ -202,12 +204,13 @@ export function hoursBetween(a: Date, b: Date): number {
 
 /** «3 ч 20 мин» */
 export function formatDuration(hours: number): string {
+  // «3 суток», а не «3 сут»: сокращение жителю непонятно.
   const totalMin = Math.max(0, Math.round(hours * 60));
   const d = Math.floor(totalMin / 1440);
   const h = Math.floor((totalMin % 1440) / 60);
   const m = totalMin % 60;
   const parts: string[] = [];
-  if (d) parts.push(`${d} сут`);
+  if (d) parts.push(`${d} ${plural(d, ['сутки', 'суток', 'суток'])}`);
   if (h) parts.push(`${h} ч`);
   if (m && !d) parts.push(`${m} мин`);
   return parts.length ? parts.join(' ') : '0 мин';

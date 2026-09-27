@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { parseNorms } from '../src/calc/norms.ts';
 import { calculate, mergeIntervals, refundAmount } from '../src/calc/engine.ts';
-import { fromLocal } from '../src/calc/time.ts';
+import { formatDuration, fromLocal } from '../src/calc/time.ts';
 
 const norms = parseNorms(readFileSync(new URL('../norms/norms.yaml', import.meta.url), 'utf8'));
 const TZ = 'Europe/Moscow';
@@ -177,4 +177,12 @@ test('часовой пояс дома влияет на ночные часы',
     nsk,
   );
   assert.equal(r.months[0].percent, 0);
+});
+
+test('длительность словами: «сутки», а не «сут»', () => {
+  assert.equal(formatDuration(24), '1 сутки');
+  assert.equal(formatDuration(52), '2 суток 4 ч');
+  assert.equal(formatDuration(5 * 24), '5 суток');
+  assert.equal(formatDuration(21 * 24), '21 сутки');
+  assert.equal(formatDuration(3.5), '3 ч 30 мин');
 });

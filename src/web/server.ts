@@ -301,13 +301,15 @@ export function createApp(deps: WebDeps) {
     if (ukEmail && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(ukEmail)) errors.ukEmail = 'Почта в виде name@example.ru';
     const adsPhone = str(b.adsPhone, 40);
     if (adsPhone && !isPhone(adsPhone)) errors.adsPhone = PHONE_ERROR;
-    checkAll(errors);
+    // Поле с ошибкой не сохраняем (остаётся прежнее значение), а верные — сохраняем: опечатка в ИНН
+    // не должна стоить жителю уже вписанного телефона аварийной службы.
+    const prev = db.houseInfo(db.getHouse(id)!);
     const info = {
       ukName: str(b.ukName, 150),
-      ukInn,
+      ukInn: errors.ukInn ? prev.ukInn : ukInn,
       ukAddress: str(b.ukAddress, 200),
-      ukEmail,
-      adsPhone,
+      ukEmail: errors.ukEmail ? prev.ukEmail : ukEmail,
+      adsPhone: errors.adsPhone ? prev.adsPhone : adsPhone,
       rsoHeat: str(b.rsoHeat, 150),
       rsoWater: str(b.rsoWater, 150),
       rsoPower: str(b.rsoPower, 150),
@@ -323,6 +325,7 @@ export function createApp(deps: WebDeps) {
     db.setHouseInfo(id, info);
     if (powerChanged) deps.bot()?.recheckPowerCases(id);
     db.track(req.userId!, 'house_info', { house: id, via: 'app' });
+    if (Object.keys(errors).length) throw new HttpError(400, 'Остальное сохранено. Исправьте поле с ошибкой', errors);
     res.json({ house: houseJson(req.userId!, id) });
   });
 

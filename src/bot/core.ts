@@ -237,11 +237,11 @@ export class Vernem {
     const overlap = relatedOverlap(this.db, this.norms, userId, r.houseId, r.service, r.startedAt, null);
     if (overlap) return { error: `За это время уже есть дело ${overlap}. Одни и те же часы нельзя оплатить дважды — укажите время позже.` };
     // Ответ про лифт — свойство дома: лимит перерыва света одинаков для всех дел этого дома.
+    // «Да» и «Нет» из формы — ответ за весь дом, как в карточке дома; «Не знаю» приходит без варианта и ничего не меняет.
     if (r.service === 'electricity_off' && r.variant) {
       const house = this.db.getHouse(r.houseId)!;
-      // В форме один вариант «Нет или не знаю» — «Нет» за весь дом по нему не ставим, только «Да».
       const two = r.variant === 'two_sources';
-      if (two && this.db.houseInfo(house).twoPowerSources !== true) {
+      if (this.db.houseInfo(house).twoPowerSources !== two) {
         this.db.setHouseInfo(r.houseId, { ...this.db.houseInfo(house), twoPowerSources: two });
         this.recheckPowerCases(r.houseId);
       }

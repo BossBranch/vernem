@@ -223,7 +223,8 @@ export function actOf(db: Db, incidentId: number): { act: Act; signers: ActSigne
 export function claimInputFor(db: Db, norms: Norms, c: CaseBundle, now: Date): ClaimInput {
   return {
     norms,
-    incident: c.incident,
+    // Лимит перерыва в тексте — тот же, что в расчёте: ответ про лифт берётся из карточки дома.
+    incident: { ...c.incident, variant: variantFor(db, c) },
     house: c.house,
     participant: c.p,
     readings: db.listReadings(c.p.id),
