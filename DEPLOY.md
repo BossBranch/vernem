@@ -70,3 +70,11 @@ docker compose exec app rm -f /app/data/backup.db
 docker compose exec app node --disable-warning=ExperimentalWarning -e "new (require('node:sqlite').DatabaseSync)('/app/data/vernem.db').exec(\"VACUUM INTO '/app/data/backup.db'\")"
 docker compose cp app:/app/data/backup.db ./backup-$(date +%F).db
 ```
+
+## CI/CD
+
+GitHub Actions проверяет pull request и `main` через `npm run typecheck`, `npm test`, `npm run build` и Docker-сборку. Production не обновляется по push: workflow **Deploy Production** запускается вручную и требует ввести `DEPLOY`.
+
+До включения workflow на VPS нужно установить root-owned скрипты из `deploy/deploy-vernem` и `deploy/vernem-ssh-wrapper`, создать ограниченного пользователя `deploy` и отдельный SSH-ключ. Подробная процедура: [`deploy/CI-CD.md`](deploy/CI-CD.md). Секреты MAX остаются только в `/opt/vernem/.env` и не добавляются в GitHub Secrets.
+
+При успешном deployment скрипт сохраняет один rollback-образ, до 14 консистентных копий SQLite в `/opt/vernem-backups`, ограничивает build cache 1 ГБ и удаляет только dangling images. Volumes SQLite и Caddy автоматически не удаляются.

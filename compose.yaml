@@ -3,7 +3,7 @@
 services:
   app:
     build: .
-    image: vernem-bot:1.0.4
+    image: vernem-bot:current
     env_file:
       - path: .env
         required: false
@@ -15,6 +15,11 @@ services:
     volumes:
       - vernem-data:/app/data
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   caddy:
     image: caddy:2.11.4-alpine
@@ -30,6 +35,11 @@ services:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   vernem-data:

@@ -1,0 +1,8 @@
+#!/bin/sh
+# Installed root-owned on the VPS as the forced command for the CI/CD SSH key.
+set -eu
+
+case "${SSH_ORIGINAL_COMMAND:-}" in
+  "deploy "*) exec sudo -n /usr/local/sbin/deploy-vernem "$SSH_ORIGINAL_COMMAND" ;;
+  *) echo "Only 'deploy <commit SHA>' is allowed" >&2; exit 126 ;;
+esac

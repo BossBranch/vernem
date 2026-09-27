@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# Installed root-owned on the VPS. The forced SSH command passes "deploy <SHA>" as $1.
+set -Eeuo pipefail
+umask 077
+
+readonly APP_DIR=/opt/vernem
+readonly BACKUP_DIR=/opt/vernem-backups
+readonly MIN_FREE_MB=2048
+readonly KEEP_BACKUPS=14
+readonly MAX_BUILD_CACHE=1GB
+
+command=${1:-}
+if [[ ! $command =~ ^deploy\ [0-9a-f]{40}$ ]]; then
+  echo "Expected: deploy <40-character lowercase commit SHA>" >&2
+  exit 64
+fi
+
+if [[ $(id -u) -ne 0 ]]; then
+  echo "This script must run as root" >&2
+  exit 77
+fi
+
+exec 9>/var/lock/vernem-deploy.lock
+if ! flock -n 9; then
+  echo "Another Vernem deployment is already running" >&2
+  exit 75
+fi
+
+readonly SHA=${command#deploy }
+cd "$APP_DIR"
+
+if [[ ! -f .env ]]; then
+  echo "Missing $APP_DIR/.env" >&2
+  exit 78
+fi
+
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  echo "Production worktree has tracked changes; refusing to overwrite them" >&2
+  exit 65
+fi
+
+available_mb=$(df -Pm / | awk 'NR == 2 { print $4 }')
+if (( available_mb < MIN_FREE_MB )); then
+  echo "Only ${available_mb} MB free; at least ${MIN_FREE_MB} MB required" >&2
+  exit 75
+fi
+
+git fetch --prune origin main
+git cat-file -e "${SHA}^{commit}"
+if ! git merge-base --is-ancestor "$SHA" origin/main; then
+  echo "Refusing to deploy a commit outside origin/main" >&2
+  exit 65
+fi
+
+app_id=$(docker compose --profile https ps -q app)
+if [[ -z $app_id ]]; then
+  echo "The current app container is not running; refusing unattended deployment" >&2
+  exit 69
+fi
+
+readonly OLD_REF=$(git rev-parse HEAD)
+readonly OLD_IMAGE=$(docker inspect --format '{{.Image}}' "$app_id")
+checked_out=0
+replaced=0
+
+cleanup_temp_backup() {
+  docker compose exec -T app rm -f /app/data/backup.db >/dev/null 2>&1 || true
+}
+
+rollback() {
+  local exit_code=$1
+  if (( checked_out )); then
+    git checkout -B production "$OLD_REF" || true
+  fi
+  if (( replaced )); then
+    echo "Deployment failed; restoring $OLD_REF" >&2
+    docker image tag "$OLD_IMAGE" vernem-bot:current || true
+    docker compose --profile https up -d --no-deps --force-recreate app || true
+  fi
+  exit "$exit_code"
+}
+
+on_error() {
+  local exit_code=$?
+  trap - ERR
+  rollback "$exit_code"
+}
+
+trap on_error ERR
+trap cleanup_temp_backup EXIT
+
+mkdir -p "$BACKUP_DIR"
+backup="$BACKUP_DIR/vernem-$(date -u +%Y%m%dT%H%M%SZ).db"
+docker compose exec -T app node --disable-warning=ExperimentalWarning -e \
+  "new (require('node:sqlite').DatabaseSync)('/app/data/vernem.db').exec(\"VACUUM INTO '/app/data/backup.db'\")"
+docker compose cp app:/app/data/backup.db "$backup"
+chmod 600 "$backup"
+cleanup_temp_backup
+
+docker image tag "$OLD_IMAGE" vernem-bot:rollback
+git checkout -B production "$SHA"
+checked_out=1
+docker compose --profile https build app
+replaced=1
+docker compose --profile https up -d --no-deps --force-recreate app
+
+for _ in {1..36}; do
+  new_app_id=$(docker compose --profile https ps -q app)
+  status=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$new_app_id")
+  if [[ $status == healthy ]]; then
+    break
+  fi
+  if [[ $status == unhealthy || $status == exited || $status == dead ]]; then
+    echo "App entered state: $status" >&2
+    exit 70
+  fi
+  sleep 5
+done
+
+if [[ ${status:-} != healthy ]]; then
+  echo "Timed out waiting for the app healthcheck" >&2
+  exit 70
+fi
+
+public_url=$(sed -n 's/^PUBLIC_URL=//p' .env | tail -n 1 | sed 's:/*$::')
+if [[ ! $public_url =~ ^https://[^[:space:]]+$ ]]; then
+  echo "PUBLIC_URL is missing or invalid" >&2
+  exit 78
+fi
+
+health=$(curl --fail --silent --show-error --max-time 10 "$public_url/health")
+if [[ $health != *'"ok":true'* ]]; then
+  echo "Unexpected health response: $health" >&2
+  exit 70
+fi
+
+mapfile -t old_backups < <(ls -1t "$BACKUP_DIR"/vernem-*.db 2>/dev/null | tail -n +$((KEEP_BACKUPS + 1)))
+if (( ${#old_backups[@]} )); then
+  rm -f -- "${old_backups[@]}"
+fi
+
+docker image prune --force
+docker builder prune --force --keep-storage "$MAX_BUILD_CACHE"
+df -h /
+docker system df
+echo "Deployment complete: $SHA"
