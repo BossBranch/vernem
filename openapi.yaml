@@ -424,7 +424,7 @@ paths:
                 fio: { type: string, maxLength: 150 }
                 flat: { type: string, maxLength: 10 }
                 account: { type: string, maxLength: 40 }
-                adsOperator: { type: string, maxLength: 80, description: Кто принял заявку в аварийной (п. 106 Правил) }
+                adsOperator: { type: string, maxLength: 80, description: Кто принял заявку в аварийной }
                 bills:
                   type: object
                   description: 'Начислено за услугу по месяцам: {"2026-09": "1200"}; пустая строка удаляет'
@@ -596,7 +596,7 @@ paths:
       - $ref: '#/components/parameters/CaseId'
     post:
       tags: [Акт]
-      summary: Акт с соседями (п. 110(1) ПП № 354) — начать или вписаться, ссылка на PDF для подписи
+      summary: Акт с соседями — начать или вписаться, ссылка на PDF для подписи
       requestBody:
         required: true
         content:
@@ -648,7 +648,7 @@ paths:
   /api/receipt/parse:
     post:
       tags: [Документы]
-      summary: Разобрать QR-код квитанции (ГОСТ Р 56042-2014) — получатель, ИНН, лицевой счёт
+      summary: Разобрать QR-код квитанции — получатель, ИНН, лицевой счёт
       requestBody:
         required: true
         content:
@@ -935,7 +935,7 @@ components:
               percent: { type: number, description: 'Снижение платы за месяц, %' }
               lines: { type: array, items: { type: string }, description: 'Формула: факт, норма, процент' }
               bill: { type: number, nullable: true }
-        basis: { type: string, description: Пункт Приложения № 1 ПП № 354 }
+        basis: { type: string, description: Пункт закона, по которому считали }
         basisUrl: { type: string }
         estimate: { type: number, description: 'Положено вернуть, ₽ (оценка снизу)' }
         estimateComplete: { type: boolean }
