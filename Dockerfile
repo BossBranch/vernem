@@ -20,7 +20,7 @@ COPY --from=build /app/dist ./dist
 COPY norms ./norms
 COPY assets ./assets
 COPY public ./public
-RUN mkdir -p /app/data && chown -R node:node /app/data
+RUN chmod -R a+rX /app && mkdir -p /app/data && chown -R node:node /app/data
 USER node
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Installed root-owned on the VPS. The forced SSH command passes "deploy <SHA>" as $1.
 set -Eeuo pipefail
-umask 077
+umask 022
 
 readonly APP_DIR=/opt/vernem
 readonly BACKUP_DIR=/opt/vernem-backups
@@ -91,7 +91,7 @@ finish() {
 
 trap finish EXIT
 
-mkdir -p "$BACKUP_DIR"
+install -d -o root -g root -m 700 "$BACKUP_DIR"
 backup="$BACKUP_DIR/vernem-$(date -u +%Y%m%dT%H%M%SZ).db"
 # VACUUM INTO refuses to overwrite a file left by a previous interrupted deployment.
 cleanup_temp_backup
