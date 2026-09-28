@@ -16,6 +16,7 @@
     "demo": "node --disable-warning=ExperimentalWarning src/sim/demo-server.ts",
     "sim": "node --disable-warning=ExperimentalWarning src/sim/cli.ts",
     "seed:demo": "node --disable-warning=ExperimentalWarning src/sim/seed-demo.ts",
+    "init-data": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning src/sim/init-data.ts",
     "test": "node --disable-warning=ExperimentalWarning --test \"test/**/*.test.ts\"",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },

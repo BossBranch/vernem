@@ -1,0 +1,61 @@
+# Тестовые доступы к собственному API «Вернём» (REST мини-приложения).
+# Описание методов — openapi.yaml (OpenAPI 3.0). Секретов в этом файле нет.
+
+api: REST мини-приложения «Вернём»
+version: 1.2.0
+spec: openapi.yaml
+base_url:
+  production: https://vernem.xyz
+  local: http://localhost:3000
+
+auth:
+  header: X-Max-Init-Data
+  value: WebApp.initData, которую MAX выдаёт мини-приложению при запуске из бота
+  validation: https://dev.max.ru/docs/webapps/validation — HMAC-SHA256, ключ из токена бота, срок 24 часа
+  without_auth: 401 {"error":"Откройте приложение из бота в MAX"}
+
+test_access:
+  production:
+    token: токен бота — на первом слайде презентации (в репозиторий не коммитится)
+    steps:
+      - npm ci && npm run setup
+      - впишите в .env строку MAX_BOT_TOKEN=<токен со слайда>
+      - npm run init-data          # печатает initData тестового жителя 900000002
+      - передавайте её в заголовке X-Max-Init-Data
+    test_user: 900000002 (синтетический ID, не житель MAX)
+    note: Для проверки записи (адреса, дела, документы) удобнее локальный стенд — он не оставляет тестовых домов в реестре сервера.
+  local:
+    token: не нужен
+    steps:
+      - npm ci
+      - npm run demo               # стенд с демо-делами, ALLOW_DEMO_AUTH=true, база data/demo.db
+      - передавайте заголовок X-Demo-User: 900000001
+    test_user: 900000001 (демо-житель с тремя демо-делами, помечены «демо»)
+    note: X-Demo-User работает только при ALLOW_DEMO_AUTH=true; на сервере выключен.
+
+checks:
+  - name: Сервис жив
+    request: GET https://vernem.xyz/health
+    expect: 200 {"ok":true,"db":"ok","bot":"running (webhook)","version":"1.2.0"}
+  - name: Без подписи — отказ
+    request: GET https://vernem.xyz/api/me
+    expect: 401
+  - name: Неверная подпись PDF-ссылки — отказ
+    request: GET https://vernem.xyz/files/claim/1.pdf?exp=1&sig=0
+    expect: 403
+  - name: Профиль тестового жителя
+    request: GET https://vernem.xyz/api/me
+    headers: { X-Max-Init-Data: <вывод npm run init-data> }
+    expect: 200, в ответе services (9 услуг) и cities
+  - name: Проверка города
+    request: GET https://vernem.xyz/api/cities/check?q=Масква
+    headers: { X-Max-Init-Data: <вывод npm run init-data> }
+    expect: 200 {"name":"Масква","inList":false,"suggestion":"Москва","latin":false}
+  - name: Демо-дела (локально)
+    request: GET http://localhost:3000/api/cases
+    headers: { X-Demo-User: '900000001' }
+    expect: 200, три дела с demo=true
+  - name: Заявление в PDF (локально)
+    request: POST http://localhost:3000/api/cases/{id}/pdf-link
+    headers: { X-Demo-User: '900000001' }
+    expect: 200 {"url":"…/files/claim/{id}.pdf?exp=…&sig=…","fileName":"…"}; по url — application/pdf

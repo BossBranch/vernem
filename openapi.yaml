@@ -1,0 +1,961 @@
+openapi: 3.0.3
+info:
+  title: «Вернём» — REST мини-приложения
+  version: 1.2.0
+  license:
+    name: MIT
+  description: |
+    Собственный HTTP API сервиса «Вернём». Им пользуется мини-приложение в MAX (`public/app/app.js`).
+    Код — `src/web/server.ts`. Тест `test/openapi.test.ts` проверяет, что каждый маршрут сервера описан здесь, а в описании нет лишних.
+
+    **Авторизация.** Каждый запрос к `/api/*` передаёт заголовок `X-Max-Init-Data` — строку `WebApp.initData`, которую MAX выдаёт при запуске мини-приложения.
+    Сервер проверяет подпись по https://dev.max.ru/docs/webapps/validation: `secret = HMAC_SHA256("WebAppData", токен бота)`,
+    `hash = hex(HMAC_SHA256(secret, параметры "k=v" по алфавиту через \n, без hash))`. Срок жизни — 24 часа от `auth_date`.
+    Для проверки без MAX подписанную строку выдаёт `npm run init-data` (нужен `MAX_BOT_TOKEN` в `.env`).
+
+    Локально при `ALLOW_DEMO_AUTH=true` (`npm run demo`) вместо подписи можно передать `X-Demo-User: 900000001`. На сервере этот вход выключен.
+
+    **Ошибки** приходят в одном формате: `{"error": "текст для жителя", "fields": {"поле": "текст"}}`. `fields` есть, если ошибка относится к полям формы: сервер проверяет все поля сразу.
+
+    **PDF** (заявление, акт, требование, жалоба) скачиваются по короткоживущей подписанной ссылке `/files/...?exp=…&sig=…` (10 минут): `WebApp.downloadFile` не умеет передавать заголовки.
+
+    Webhook MAX (`POST /webhook/max`) принимает события от платформы MAX с заголовком `X-Max-Bot-Api-Secret` и в этот API не входит.
+servers:
+  - url: https://vernem.xyz
+    description: Production
+  - url: http://localhost:3000
+    description: Локально (`npm run demo` или `npm run dev`)
+security:
+  - MaxInitData: []
+  - DemoUser: []
+tags:
+  - name: Сервис
+  - name: Житель
+  - name: Дома
+  - name: Дела
+  - name: Акт
+  - name: Документы
+paths:
+  /health:
+    get:
+      tags: [Сервис]
+      summary: Состояние сервиса
+      security: []
+      responses:
+        '200':
+          description: База доступна
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Health' }
+              example: { ok: true, db: ok, bot: running (webhook), version: 1.2.0 }
+        '503':
+          description: База недоступна
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Health' }
+
+  /api/me:
+    get:
+      tags: [Житель]
+      summary: Профиль жителя, его адреса, справочники услуг и городов
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Me' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    delete:
+      tags: [Житель]
+      summary: Удалить все данные жителя (адреса, дела, строки в актах)
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/cities/check:
+    get:
+      tags: [Дома]
+      summary: Проверить город — из справочника, похож на известный («Масква» → Москва) или новый
+      parameters:
+        - { name: q, in: query, required: true, schema: { type: string, maxLength: 60 }, example: Масква }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name: { type: string, nullable: true, description: 'Город, как его поймёт сервис (null — латиница или пусто)' }
+                  inList: { type: boolean, description: Город есть в справочнике с часовым поясом }
+                  suggestion: { type: string, nullable: true, description: Похожий город из справочника }
+                  latin: { type: boolean, description: В запросе латиница }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/houses/search:
+    get:
+      tags: [Дома]
+      summary: Поиск дома в реестре сервиса внутри города
+      parameters:
+        - { name: q, in: query, required: true, schema: { type: string, maxLength: 100 }, example: Садовая 10 }
+        - { name: city, in: query, required: true, schema: { type: string }, example: Москва }
+      responses:
+        '200':
+          description: До 8 домов; демо-дома не показываются
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  houses:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: integer }
+                        address: { type: string }
+                        members: { type: integer, description: Сколько жителей добавили этот дом }
+                  exactId: { type: integer, nullable: true, description: Точное совпадение — «добавить дом» не предлагаем }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/me/houses:
+    post:
+      tags: [Дома]
+      summary: Добавить адрес — дом из списка (houseId) или новый (address + city)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                houseId: { type: integer, description: Дом из поиска }
+                address: { type: string, maxLength: 200, description: 'Улица и дом, если дома нет в списке. Квартира («кв 15») отделяется сама' }
+                city: { type: string, maxLength: 60 }
+                entrance: { type: string, maxLength: 4, example: 2А }
+                flat: { type: string, maxLength: 10 }
+            example: { address: Садовая 10, city: Москва, entrance: '2' }
+      responses:
+        '200':
+          description: Адрес в списке жителя
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  house: { $ref: '#/components/schemas/House' }
+                  already: { type: boolean, description: Адрес уже был в списке }
+                  entranceChanged: { type: boolean }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/me/houses/{id}:
+    parameters:
+      - $ref: '#/components/parameters/HouseId'
+    patch:
+      tags: [Дома]
+      summary: Подъезд, квартира, лицевой счёт, уведомления «у вас тоже?»
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                entrance: { type: string, maxLength: 4 }
+                flat: { type: string, maxLength: 10, nullable: true }
+                account: { type: string, maxLength: 40, nullable: true }
+                notify: { type: boolean }
+      responses:
+        '200': { $ref: '#/components/responses/HouseResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Дома]
+      summary: Убрать адрес из списка жителя
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/houses/{id}:
+    parameters:
+      - $ref: '#/components/parameters/HouseId'
+    get:
+      tags: [Дома]
+      summary: Карточка дома жителя
+      responses:
+        '200': { $ref: '#/components/responses/HouseResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/houses/{id}/info:
+    parameters:
+      - $ref: '#/components/parameters/HouseId'
+    put:
+      tags: [Дома]
+      summary: Юридические данные дома из квитанции (общие для всех жителей дома)
+      description: Поле с ошибкой не сохраняется (остаётся прежнее значение), остальные сохраняются; тогда ответ 400 с `fields`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/HouseInfo' }
+            example: { ukName: ООО «УК Пример», ukInn: '7701234567', adsPhone: '+7 495 123-45-67', twoPowerSources: false }
+      responses:
+        '200': { $ref: '#/components/responses/HouseResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/report:
+    post:
+      tags: [Дела]
+      summary: Сообщить о проблеме — новое дело, присоединение к отключению соседей или дополнение своего
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [service, houseId]
+              properties:
+                service: { $ref: '#/components/schemas/ServiceKey' }
+                houseId: { type: integer }
+                evidence: { type: string, enum: [ads, written, self], description: 'ads — номер заявки аварийной службы, written — письменное обращение, self — номера нет (нужен акт с соседями)' }
+                number: { type: string, maxLength: 60, description: 'Номер заявки или обращения, обязательно с цифрами' }
+                startedAt: { type: string, format: date-time, description: 'Не в будущем и не раньше года назад; по умолчанию — сейчас' }
+                temp: { type: number, description: Замер температуры для heating_temp и hot_water_temp }
+                corner: { type: boolean, description: Угловая квартира (норма отопления выше) }
+                variant: { type: string, enum: [two_sources, one_source], description: 'Свет: два источника питания (лифт, больше 9 этажей) — лимит перерыва 2 ч' }
+                planned: { type: boolean, description: Плановое отключение }
+            example: { service: hot_water_off, houseId: 1, evidence: ads, number: '4512', startedAt: '2026-09-25T09:00:00+03:00' }
+      responses:
+        '200':
+          description: Дело создано или найдено
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  caseId: { type: integer }
+                  outcome: { type: string, enum: [new, existing, joined] }
+                  numberSaved: { type: boolean }
+                  readingSaved: { type: boolean }
+                  since: { type: string, format: date-time, nullable: true }
+                  neighbours: { type: integer, description: Скольким соседям бот напишет «у вас тоже?» }
+                  botConnected: { type: boolean }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /api/cases:
+    get:
+      tags: [Дела]
+      summary: Все дела жителя
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cases:
+                    type: array
+                    items: { $ref: '#/components/schemas/CaseSummary' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/cases/{id}:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+    get:
+      tags: [Дела]
+      summary: Дело с расчётом, текстом заявления и подсказками для формы
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  case: { $ref: '#/components/schemas/CaseSummary' }
+                  claimText: { type: string, nullable: true, description: 'Текст заявления, когда услугу восстановили' }
+                  executorHint: { type: object, nullable: true, description: Получатель из карточки дома }
+                  personHint: { type: object, nullable: true, description: ФИО и квартира из акта или сохранённых данных }
+                  houseContacts: { type: object, description: 'Почта, адрес УК, телефон аварийной, twoPowerSources' }
+                  actSigner: { type: object, nullable: true }
+                  savedPersonal: { type: boolean }
+                  botConnected: { type: boolean }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Дела]
+      summary: Удалить дело
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /api/cases/{id}/end:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+    post:
+      tags: [Дела]
+      summary: Услугу восстановили
+      description: Окончание не раньше начала и не раньше составления подписанного акта.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                endedAt: { type: string, format: date-time, description: По умолчанию — сейчас }
+      responses:
+        '200': { $ref: '#/components/responses/CaseResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /api/cases/{id}/times:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+    patch:
+      tags: [Дела]
+      summary: Исправить время начала или окончания
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                startedAt: { type: string, format: date-time }
+                endedAt: { type: string, format: date-time }
+      responses:
+        '200': { $ref: '#/components/responses/CaseResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /api/cases/{id}/reopen:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+    post:
+      tags: [Дела]
+      summary: Снова отключили — вернуть дело в отслеживание
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /api/cases/{id}/readings:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+    post:
+      tags: [Дела]
+      summary: Замер температуры
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [temp]
+              properties:
+                temp: { type: number, example: 16 }
+                at: { type: string, format: date-time, description: По умолчанию — сейчас }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  case: { $ref: '#/components/schemas/CaseSummary' }
+                  note: { type: string, nullable: true, description: 'Подсказка, если замер уже в норме' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /api/cases/{id}/readings/{rid}:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+      - { name: rid, in: path, required: true, schema: { type: integer } }
+    delete:
+      tags: [Дела]
+      summary: Удалить замер (пока заявление не готово)
+      responses:
+        '200': { $ref: '#/components/responses/CaseResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+
+  /api/cases/{id}/claim:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+    put:
+      tags: [Документы]
+      summary: Данные заявления и плата из квитанции (автосохранение формы)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                executor: { type: string, maxLength: 200, description: Кому подаёт житель — название из квитанции }
+                executorType: { type: string, enum: [uk, rso, rop, unknown] }
+                executorInn: { type: string, maxLength: 20 }
+                fio: { type: string, maxLength: 150 }
+                flat: { type: string, maxLength: 10 }
+                account: { type: string, maxLength: 40 }
+                adsOperator: { type: string, maxLength: 80, description: Кто принял заявку в аварийной (п. 106 Правил) }
+                bills:
+                  type: object
+                  description: 'Начислено за услугу по месяцам: {"2026-09": "1200"}; пустая строка удаляет'
+                  additionalProperties: { type: string, nullable: true }
+                coldTariff:
+                  type: object
+                  description: 'Горячая вода ниже +40 °C: объём за месяц (м³) и тарифы горячей и холодной воды'
+                  additionalProperties:
+                    type: object
+                    properties:
+                      volume: { type: string }
+                      hot: { type: string }
+                      cold: { type: string }
+                remember: { type: boolean, description: 'Запомнить ФИО, квартиру и счёт для следующих заявлений; false — забыть' }
+            example: { executor: ООО «УК Пример», executorType: uk, fio: Иванова Анна Петровна, flat: '15', bills: { '2026-09': '1200' } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  case: { $ref: '#/components/schemas/CaseSummary' }
+                  claimText: { type: string, nullable: true }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/cases/{id}/extra-flats:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+    put:
+      tags: [Документы]
+      summary: Другие квартиры жителя в том же доме — по отдельному заявлению на каждую (до 5)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [flats]
+              properties:
+                flats:
+                  type: array
+                  maxItems: 5
+                  items:
+                    type: object
+                    properties:
+                      flat: { type: string, maxLength: 10 }
+                      account: { type: string, maxLength: 40 }
+                      bills: { type: object, additionalProperties: { type: string } }
+      responses:
+        '200': { $ref: '#/components/responses/CaseResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/cases/{id}/pdf-link:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+    post:
+      tags: [Документы]
+      summary: Ссылка на PDF заявления (фиксирует выданную версию)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                extra: { type: integer, description: Номер дополнительной квартиры из extra-flats }
+      responses:
+        '200': { $ref: '#/components/responses/FileLink' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/cases/{id}/submitted:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+    post:
+      tags: [Документы]
+      summary: Заявление подано — дата и входящий номер попадут в требование и жалобу
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [date]
+              properties:
+                date: { type: string, example: '2026-09-28', description: 'Дата подачи: не в будущем по часовому поясу дома и не раньше даты заявления' }
+                number: { type: string, maxLength: 40, description: Входящий номер; «вх. №» отрезается }
+      responses:
+        '200': { $ref: '#/components/responses/CaseResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/cases/{id}/receipt:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+    post:
+      tags: [Документы]
+      summary: Пришла квитанция — перерасчёт сделали, не сделали или отменить отметку
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                action: { type: string, enum: ['yes', 'no', undo] }
+                amount: { type: string, description: 'Сколько вернули, например 115,20 (для yes)' }
+      responses:
+        '200': { $ref: '#/components/responses/CaseResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /api/cases/{id}/escalation-link:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+    post:
+      tags: [Документы]
+      summary: 'Ссылка на PDF, если перерасчёт не сделали: требование о штрафе 50%, жалоба в ГЖИ, заявление в общество потребителей'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind]
+              properties:
+                kind: { type: string, enum: [fine, gji, ozpp] }
+      responses:
+        '200': { $ref: '#/components/responses/FileLink' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/cases/{id}/share:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+    post:
+      tags: [Дела]
+      summary: Карточка «У вас тоже?» для домового чата
+      description: Бот присылает карточку в диалог, мини-приложение пересылает её через `WebApp.shareMaxContent({mid})`. Без MAX — ссылка и текст.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mid: { type: string, nullable: true, description: ID сообщения с карточкой }
+                  link: { type: string, description: 'https://max.ru/<бот>?start=j_…' }
+                  text: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /api/cases/{id}/act:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+    post:
+      tags: [Акт]
+      summary: Акт с соседями (п. 110(1) ПП № 354) — начать или вписаться, ссылка на PDF для подписи
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fio]
+              properties:
+                fio: { type: string, maxLength: 150, example: Иванова Анна Петровна }
+                flat: { type: string, maxLength: 10 }
+      responses:
+        '200': { $ref: '#/components/responses/FileLink' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /api/cases/{id}/act/signed:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+    post:
+      tags: [Акт]
+      summary: Акт подписан на бумаге (отмечает тот, кто начал акт)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                chair: { type: boolean, description: Подписал ли председатель совета дома }
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/cases/{id}/act/unsigned:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+    post:
+      tags: [Акт]
+      summary: Снять отметку «подписан»
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/receipt/parse:
+    post:
+      tags: [Документы]
+      summary: Разобрать QR-код квитанции (ГОСТ Р 56042-2014) — получатель, ИНН, лицевой счёт
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [qr]
+              properties:
+                qr: { type: string, maxLength: 2000, description: Строка из WebApp.openCodeReader }
+            example: { qr: 'ST00012|Name=ООО «УК Пример»|PayeeINN=7701234567|PersAcc=1234567890|Sum=120000' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  info:
+                    type: object
+                    properties:
+                      executor: { type: string }
+                      executorInn: { type: string }
+                      account: { type: string }
+                      totalSum: { type: number }
+                      payerAddress: { type: string }
+                      period: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+
+  /api/track:
+    post:
+      tags: [Сервис]
+      summary: Событие воронки мини-приложения (имя вида app_*)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, pattern: '^app_[a-z_]+$', example: app_open }
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /files/claim/{file}:
+    get:
+      tags: [Документы]
+      summary: PDF заявления по подписанной ссылке из pdf-link
+      security: []
+      parameters:
+        - { name: file, in: path, required: true, schema: { type: string, pattern: '^\d+(-\d+)?\.pdf$' }, example: 12.pdf }
+        - $ref: '#/components/parameters/LinkExp'
+        - $ref: '#/components/parameters/LinkSig'
+      responses:
+        '200': { $ref: '#/components/responses/Pdf' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /files/act/{file}:
+    get:
+      tags: [Акт]
+      summary: PDF акта по подписанной ссылке
+      security: []
+      parameters:
+        - { name: file, in: path, required: true, schema: { type: string, pattern: '^\d+\.pdf$' }, example: 3.pdf }
+        - $ref: '#/components/parameters/LinkExp'
+        - $ref: '#/components/parameters/LinkSig'
+      responses:
+        '200': { $ref: '#/components/responses/Pdf' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /files/esc/{file}:
+    get:
+      tags: [Документы]
+      summary: PDF требования, жалобы в ГЖИ или заявления в общество потребителей по подписанной ссылке
+      security: []
+      parameters:
+        - { name: file, in: path, required: true, schema: { type: string, pattern: '^\d+-(fine|gji|ozpp)\.pdf$' }, example: 12-fine.pdf }
+        - $ref: '#/components/parameters/LinkExp'
+        - $ref: '#/components/parameters/LinkSig'
+      responses:
+        '200': { $ref: '#/components/responses/Pdf' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+components:
+  securitySchemes:
+    MaxInitData:
+      type: apiKey
+      in: header
+      name: X-Max-Init-Data
+      description: 'WebApp.initData из MAX, подпись проверяется токеном бота. Для проверки: `npm run init-data`'
+    DemoUser:
+      type: apiKey
+      in: header
+      name: X-Demo-User
+      description: 'Только локально при ALLOW_DEMO_AUTH=true: числовой ID жителя, например 900000001'
+
+  parameters:
+    CaseId:
+      { name: id, in: path, required: true, schema: { type: integer }, description: ID дела жителя (чужое дело — 404) }
+    HouseId:
+      { name: id, in: path, required: true, schema: { type: integer }, description: ID дома из списка жителя }
+    LinkExp:
+      { name: exp, in: query, required: true, schema: { type: integer }, description: 'Срок действия ссылки, Unix-время' }
+    LinkSig:
+      { name: sig, in: query, required: true, schema: { type: string }, description: HMAC-подпись пути и срока }
+
+  responses:
+    Ok:
+      description: OK
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              ok: { type: boolean, example: true }
+    CaseResponse:
+      description: Дело после изменения
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              case: { $ref: '#/components/schemas/CaseSummary' }
+    HouseResponse:
+      description: Карточка дома
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              house: { $ref: '#/components/schemas/House' }
+    FileLink:
+      description: Подписанная ссылка на PDF (10 минут)
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              url: { type: string, example: 'https://vernem.xyz/files/claim/12.pdf?exp=1790000000&sig=…' }
+              fileName: { type: string, example: Заявление_на_перерасчёт.pdf }
+    Pdf:
+      description: PDF-файл (Content-Disposition attachment)
+      content:
+        application/pdf:
+          schema: { type: string, format: binary }
+    BadRequest:
+      description: Ошибка в данных; `fields` — ошибки по полям формы
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unauthorized:
+      description: Нет или неверна подпись initData
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: Откройте приложение из бота в MAX }
+    Forbidden:
+      description: Действие доступно другому жителю, или ссылка устарела
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: Не найдено (в том числе чужое дело или адрес)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Conflict:
+      description: Шаг ещё недоступен (например, заявление до окончания отключения)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unprocessable:
+      description: Действие противоречит делу (время, статус, подписанный акт)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unavailable:
+      description: Сценарий бота не запущен
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string, description: Текст для жителя }
+        fields:
+          type: object
+          description: 'Ошибки по полям формы: {"fio": "…", "bill_2026-09": "…"}'
+          additionalProperties: { type: string }
+    Health:
+      type: object
+      properties:
+        ok: { type: boolean }
+        db: { type: string, enum: [ok, error] }
+        bot: { type: string, description: 'running (webhook), running (polling) или disabled' }
+        version: { type: string }
+    ServiceKey:
+      type: string
+      enum: [hot_water_off, hot_water_temp, heating_temp, heating_off, cold_water_off, electricity_off, gas_off, sewerage_off, waste_off]
+    Me:
+      type: object
+      properties:
+        firstName: { type: string, nullable: true }
+        address: { type: string, nullable: true }
+        houses: { type: array, items: { $ref: '#/components/schemas/House' } }
+        myCities: { type: array, items: { type: string } }
+        cities: { type: array, items: { type: string } }
+        services:
+          type: array
+          items:
+            type: object
+            properties:
+              key: { $ref: '#/components/schemas/ServiceKey' }
+              title: { type: string }
+              button: { type: string }
+              kind: { type: string }
+        savedPersonal: { type: boolean }
+        refunded: { type: number, description: 'Сколько жителю уже вернули, ₽' }
+        botUsername: { type: string, nullable: true }
+        normsCheckedAt: { type: string, description: Дата проверки норм в norms.yaml }
+    House:
+      type: object
+      properties:
+        id: { type: integer }
+        address: { type: string }
+        city: { type: string, nullable: true }
+        entrance: { type: string, nullable: true }
+        flat: { type: string, nullable: true }
+        account: { type: string, nullable: true }
+        notify: { type: boolean }
+        info: { $ref: '#/components/schemas/HouseInfo' }
+        members: { type: integer }
+        inviteLink: { type: string, nullable: true, description: 'https://max.ru/<бот>?start=h_…' }
+    HouseInfo:
+      type: object
+      description: Данные из квитанции; заполняют жители, видно, кто и когда обновил
+      properties:
+        ukName: { type: string, maxLength: 150 }
+        ukInn: { type: string, maxLength: 20 }
+        ukAddress: { type: string, maxLength: 200 }
+        ukEmail: { type: string, maxLength: 100 }
+        adsPhone: { type: string, maxLength: 40 }
+        rsoHeat: { type: string, maxLength: 150 }
+        rsoWater: { type: string, maxLength: 150 }
+        rsoPower: { type: string, maxLength: 150 }
+        rsoGas: { type: string, maxLength: 150 }
+        rop: { type: string, maxLength: 150 }
+        gji: { type: string, maxLength: 200 }
+        twoPowerSources: { type: boolean, nullable: true, description: 'Лифт или больше 9 этажей — лимит перерыва света 2 ч' }
+        updatedAt: { type: string, format: date-time, readOnly: true }
+        updatedBy: { type: integer, readOnly: true }
+    CaseSummary:
+      type: object
+      description: 'Дело жителя: факты, расчёт, статус заявления и акта. Полный тип — CaseSummary в src/services/cases.ts'
+      additionalProperties: true
+      properties:
+        id: { type: integer }
+        service: { $ref: '#/components/schemas/ServiceKey' }
+        serviceTitle: { type: string }
+        address: { type: string }
+        tz: { type: string, example: Europe/Moscow }
+        startedAt: { type: string, format: date-time }
+        endedAt: { type: string, format: date-time, nullable: true }
+        status: { type: string, enum: [tracking, ended, claim_ready, refunded, refused, closed] }
+        statusTitle: { type: string }
+        evidence: { type: string, enum: [ads, written, self] }
+        adsNumber: { type: string, nullable: true }
+        demo: { type: boolean, description: Демо-дело (помечено в интерфейсе и документах) }
+        months:
+          type: array
+          items:
+            type: object
+            properties:
+              month: { type: string, example: 2026-09 }
+              percent: { type: number, description: 'Снижение платы за месяц, %' }
+              lines: { type: array, items: { type: string }, description: 'Формула: факт, норма, процент' }
+              bill: { type: number, nullable: true }
+        basis: { type: string, description: Пункт Приложения № 1 ПП № 354 }
+        basisUrl: { type: string }
+        estimate: { type: number, description: 'Положено вернуть, ₽ (оценка снизу)' }
+        estimateComplete: { type: boolean }
+        refundAmount: { type: number, nullable: true }
+        claim: { type: object, description: 'Данные заявления, дата и входящий номер подачи' }
+        claimOutdated: { type: boolean, description: 'Заявление выдавали, а расчёт, время или получатель с тех пор изменились' }
+        act:
+          type: object
+          nullable: true
+          properties:
+            status: { type: string, enum: [collecting, chair, ready, signed] }
+            residents: { type: integer }
+            chair: { type: boolean }
+            mine: { type: boolean }
+            initiator: { type: boolean }
+        readings:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: integer }
+              at: { type: string, format: date-time }
+              tempC: { type: number }
