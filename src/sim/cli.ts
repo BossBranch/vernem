@@ -36,7 +36,7 @@ const rl = createInterface({ input: stdin, output: stdout });
 console.log('Симулятор «Вернём». Цифра — нажать кнопку, текст — написать, :wait 3h, :user 2, :link, :photo, :quit');
 await h.start(user);
 
-const prompt = () => stdout.write(`\n[житель ${user} · ${h.now().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })}] > `);
+const prompt = () => stdout.write(`\n[пользователь ${user}, ${h.now().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })}] > `);
 prompt();
 for await (const raw of rl) {
   const line = raw.trim();

@@ -34,7 +34,12 @@ export class RecordingOutbox implements Outbox {
   }
 }
 
-export type HarnessOptions = { dbPath?: string; start?: Date; config?: Partial<BotConfig> };
+/**
+ * db — работать поверх уже открытой базы (демо-дела настоящему жителю): тогда стенд её не закрывает.
+ * quiet — не подменять имя жителя и не запускать планировщик при перемотке часов:
+ * иначе напоминания других жителей из той же базы ушли бы в никуда.
+ */
+export type HarnessOptions = { dbPath?: string; db?: Db; quiet?: boolean; start?: Date; config?: Partial<BotConfig> };
 
 export class Harness {
   readonly db: Db;
@@ -42,9 +47,13 @@ export class Harness {
   readonly bot: Vernem;
   readonly scheduler: Scheduler;
   private clock: number;
+  private readonly ownDb: boolean;
+  private readonly quiet: boolean;
 
   constructor(opts: HarnessOptions = {}) {
-    this.db = new Db(opts.dbPath ?? ':memory:');
+    this.ownDb = !opts.db;
+    this.quiet = !!opts.quiet;
+    this.db = opts.db ?? new Db(opts.dbPath ?? ':memory:');
     this.clock = (opts.start ?? new Date()).getTime();
     this.bot = new Vernem(
       this.db,
@@ -75,7 +84,11 @@ export class Harness {
   /** Перематывает часы и отрабатывает наступившие напоминания. */
   async advance(ms: number) {
     this.clock += ms;
-    return this.scheduler.tick(this.now());
+    return this.quiet ? 0 : this.scheduler.tick(this.now());
+  }
+
+  private name(userId: number) {
+    return this.quiet ? undefined : `User${userId}`;
   }
 
   last(userId: number): OutMessage {
@@ -94,16 +107,16 @@ export class Harness {
   }
 
   start(userId: number, payload?: string) {
-    return this.bot.handle({ kind: 'start', userId, name: `User${userId}`, payload });
+    return this.bot.handle({ kind: 'start', userId, name: this.name(userId), payload });
   }
 
   text(userId: number, text: string) {
-    return this.bot.handle({ kind: 'text', userId, name: `User${userId}`, text });
+    return this.bot.handle({ kind: 'text', userId, name: this.name(userId), text });
   }
 
   /** Житель присылает фото (в MAX — вложение image с токеном). */
   photo(userId: number, token = 'photo-token') {
-    return this.bot.handle({ kind: 'photo', userId, name: `User${userId}`, photos: [{ token, url: `https://example.invalid/${token}.jpg` }] });
+    return this.bot.handle({ kind: 'photo', userId, name: this.name(userId), photos: [{ token, url: `https://example.invalid/${token}.jpg` }] });
   }
 
   /** Файлы, отправленные пользователю, начиная с позиции since. */
@@ -126,10 +139,10 @@ export class Harness {
       throw new Error(`Кнопка «${needle}» не найдена. Последние кнопки: ${avail}`);
     }
     if (btn.type !== 'callback') throw new Error(`«${needle}» — не callback-кнопка (${btn.type})`);
-    return this.bot.handle({ kind: 'button', userId, name: `User${userId}`, payload: btn.payload });
+    return this.bot.handle({ kind: 'button', userId, name: this.name(userId), payload: btn.payload });
   }
 
   close() {
-    this.db.close();
+    if (this.ownDb) this.db.close();
   }
 }

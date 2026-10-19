@@ -56,13 +56,13 @@ export function executorLine(claim: Claim): string {
   return claim.executor ? `${claim.executor}${claim.executorInn ? `, ИНН ${claim.executorInn}` : ''}` : BLANK;
 }
 
-export function claimTo(claim: Claim, norm: ServiceNorm): string[] {
+/** Шапка «кому». address — адрес УК из карточки дома, если заявление адресовано ей; иначе вписывают от руки. */
+export function claimTo(claim: Claim, norm: ServiceNorm, address?: string | null): string[] {
   const lines: string[] = [];
   if (claim.executor) lines.push(`Руководителю ${claim.executor}`);
   else lines.push(`Руководителю ${EXECUTOR_OF[claim.executorType ?? ''] ?? `исполнителя услуги «${norm.title}»`} ${BLANK}`);
   if (claim.executorInn) lines.push(`ИНН ${claim.executorInn}`);
-  // Реквизиты, которые обычно вписывают от руки: адрес получателя.
-  lines.push(`адрес: ${BLANK}`);
+  lines.push(`адрес: ${address?.trim() || BLANK}`);
   return lines;
 }
 
@@ -100,6 +100,8 @@ export type ClaimInput = {
   act?: { act: Act; signers: ActSigner[] } | null;
   /** Заявка, отправленная в УК через бота (УК подключила сотрудника к дому). */
   dispatch?: Dispatch | null;
+  /** Адрес получателя из карточки дома — одинаковый в заявлении и требовании. */
+  executorAddress?: string | null;
 };
 
 /** Строки о подписанном акте и проверке исполнителя — общие для заявления, требования и жалобы. */
@@ -309,14 +311,14 @@ export function buildClaim(input: ClaimInput): ClaimDoc {
   requests.push('дать письменный ответ на настоящее заявление по указанному адресу.');
 
   return {
-    to: claimTo(claim, norm),
+    to: claimTo(claim, norm, input.executorAddress),
     from,
     title: 'Заявление о перерасчёте размера платы за коммунальную услугу при предоставлении коммунальной услуги ненадлежащего качества и (или) с перерывами, превышающими установленную продолжительность',
     facts,
     norm: normLines,
     calc: calcLines,
     requests: requests.map((r, i) => `${i + 1}. ${r[0].toUpperCase()}${r.slice(1)}`),
-    note: `Расчёт ориентировочный и выполнен по данным потребителя; итоговый размер снижения платы определяет исполнитель (${norms.source.recalculation_items}). Нормы: ${norms.source.title}, ${norms.source.edition}.`,
+    note: '',
     signature: `Дата: ${formatDate(issued, tz)}        Подпись: __________ / ${claim.fio?.trim() || BLANK}`,
     total: Math.round(total * 100) / 100,
     attachments: extras.attachments.length ? extras.attachments : undefined,
@@ -338,8 +340,7 @@ export function claimToText(doc: ClaimDoc): string {
     ...(doc.calc.length ? [`${doc.calcTitle ?? 'Расчёт'}:`, ...doc.calc, ''] : []),
     ...(doc.requests.length ? [doc.requestsTitle ?? DEFAULT_REQUESTS_TITLE, ...doc.requests, ''] : []),
     ...(doc.attachments?.length ? ['Приложения:', ...doc.attachments.map((a, i) => `${i + 1}. ${a}`), ''] : []),
-    doc.note,
-    '',
+    ...(doc.note ? [doc.note, ''] : []),
     doc.signature,
     ...(doc.receipt?.length ? ['', ...doc.receipt] : []),
   ].join('\n');

@@ -750,7 +750,7 @@ test('health и статика мини-приложения', async () => {
   await withServer(async (base) => {
     const health = (await (await fetch(`${base}/health`)).json()) as any;
     assert.equal(health.ok, true);
-    assert.equal(health.version, '1.3.0');
+    assert.equal(health.version, '1.3.1');
     const page = await fetch(`${base}/app/`);
     assert.equal(page.status, 200);
     const html = await page.text();
@@ -818,5 +818,18 @@ test('заявление на почту через приложение: без
     const off = await fetch(`${base}/api/cases/${pid}/email`, { method: 'POST', headers, body: JSON.stringify({}) });
     assert.equal(off.status, 422);
     assert.match(((await off.json()) as any).error, /не настроена/);
+  });
+});
+
+test('демо-дела заново через приложение: три демо, настоящее дело остаётся', async () => {
+  await withServer(async (base, h) => {
+    const headers = { 'X-Max-Init-Data': initFor(44), 'Content-Type': 'application/json' };
+    await h.start(44);
+    const me = (await (await fetch(`${base}/api/me`, { headers })).json()) as any;
+    assert.equal(me.demoMode, true);
+    const r = (await (await fetch(`${base}/api/demo/reset`, { method: 'POST', headers })).json()) as any;
+    assert.equal(r.cases.filter((c: any) => c.demo).length, 3);
+    const again = (await (await fetch(`${base}/api/demo/reset`, { method: 'POST', headers })).json()) as any;
+    assert.equal(again.cases.length, 3, 'прежние демо удалены, а не задвоены');
   });
 });

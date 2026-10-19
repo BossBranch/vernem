@@ -215,6 +215,8 @@ export function createApp(deps: WebDeps) {
       cities: [...new Set([...db.userCities(u.id), ...CITIES.map((c) => c.name)])],
       services: SERVICE_ORDER.map((k) => ({ key: k, title: norms.services[k].title, button: norms.services[k].button, kind: norms.services[k].kind })),
       savedPersonal: !!u.save_personal,
+      // Кнопка «Демо-дела заново» — только если демо включено.
+      demoMode: cfg.demoMode,
       refunded: Math.round(refunded * 100) / 100,
       botUsername: cfg.botUsername,
       normsCheckedAt: norms.source.checked_at,
@@ -788,6 +790,19 @@ export function createApp(deps: WebDeps) {
     if (!r.ok) throw new HttpError(422, r.error);
     const { fields: _fields, ...info } = r.info;
     res.json({ info });
+  });
+
+  /** Демо-дела заново: прежние демо жителя удаляются, создаются демо 1, 2 и 3. Настоящие дела не трогаются. */
+  api.post('/demo/reset', async (req: AuthedRequest, res, next) => {
+    try {
+      if (!cfg.demoMode) throw new HttpError(404, 'Демо выключено');
+      const bot = deps.bot();
+      if (!bot) throw new HttpError(503, 'Бот сейчас недоступен');
+      await bot.restartDemo(req.userId!);
+      res.json({ cases: db.listUserParticipants(req.userId!).map((p) => summarize(db, norms, loadCase(db, p.id)!, new Date())) });
+    } catch (e) {
+      next(e);
+    }
   });
 
   api.post('/track', (req: AuthedRequest, res) => {

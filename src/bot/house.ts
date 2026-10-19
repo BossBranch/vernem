@@ -238,7 +238,7 @@ export function showHouseCard(bot: Vernem, userId: number, houseId: number) {
       `🏠 **${h.address}**${h.entrance ? `, подъезд ${h.entrance}` : ''}`,
       ...(info.length ? info : ['Данных о доме пока нет. Заполните их по квитанции — пригодятся всем соседям и попадут в заявления.']),
       '',
-      `В сети дома: ${members(bot, h.id)} · уведомления ${h.notify ? 'вкл.' : 'выкл.'}`,
+      `В сети дома: ${members(bot, h.id)}. Уведомления ${h.notify ? 'включены' : 'выключены'}.`,
       bot.db.listDispatchers(h.id).length
         ? `🏢 Заявки в боте принимает УК: ${dispatcherNames(bot, h.id)}`
         : '🏢 УК к боту не подключена — пригласите её, и заявки будут уходить ей прямо из бота.',

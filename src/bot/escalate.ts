@@ -42,7 +42,7 @@ function optsFor(bot: Vernem, c: CaseBundle): EscalationOpts {
 /** Документ эскалации для скачивания из мини-приложения. */
 export function escalationDocFor(bot: Vernem, c: CaseBundle, kind: EscalationKind) {
   const doc = buildEscalation(kind, inputFor(bot, c), optsFor(bot, c));
-  if (c.incident.demo) doc.note = `ДЕМОНСТРАЦИОННЫЕ ДАННЫЕ: не является реальным документом. ${doc.note}`;
+  if (c.incident.demo) doc.note = `ДЕМОНСТРАЦИОННЫЕ ДАННЫЕ: не является реальным документом. ${doc.note}`.trim();
   return doc;
 }
 
@@ -83,7 +83,7 @@ export async function onEscalate(bot: Vernem, userId: number, pid: number, kind:
   const input = inputFor(bot, c);
   const opts = optsFor(bot, c);
   const doc = buildEscalation(kind as EscalationKind, input, opts);
-  if (c.incident.demo) doc.note = `ДЕМОНСТРАЦИОННЫЕ ДАННЫЕ: не является реальным документом. ${doc.note}`;
+  if (c.incident.demo) doc.note = `ДЕМОНСТРАЦИОННЫЕ ДАННЫЕ: не является реальным документом. ${doc.note}`.trim();
   bot.db.track(userId, `escalation_${kind}`, { service: c.incident.service_key });
 
   const rows: Btn[][] = [];

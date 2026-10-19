@@ -4,6 +4,7 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { claimToPdf } from '../docs/pdf.ts';
+import { docAddress } from '../docs/claim.ts';
 import { claimDocFor, claimOf, loadCase } from '../services/cases.ts';
 import type { CaseBundle } from '../services/cases.ts';
 import { formatShort } from '../calc/time.ts';
@@ -59,7 +60,7 @@ export async function emailClaim(bot: Vernem, userId: number, pid: number, reply
   const text = [
     'Здравствуйте!',
     '',
-    `Направляю заявление о перерасчёте платы за коммунальную услугу по адресу: ${fresh.house.address}${flat}. Заявление — во вложении (PDF).`,
+    `Направляю заявление о перерасчёте платы за коммунальную услугу по адресу: ${docAddress(fresh.house)}${flat}. Заявление — во вложении (PDF).`,
     'Прошу зарегистрировать обращение и сообщить входящий номер.',
     replyTo ? `Ответ прошу направить на ${replyTo}.` : 'Ответ прошу направить по адресу, указанному в заявлении.',
     '',
@@ -73,7 +74,7 @@ export async function emailClaim(bot: Vernem, userId: number, pid: number, reply
       to,
       cc: replyTo,
       replyTo,
-      subject: `Заявление о перерасчёте платы — ${fresh.house.address}${flat}`,
+      subject: `Заявление о перерасчёте платы — ${docAddress(fresh.house)}${flat}`,
       text,
       attachments: [{ filename: doc.fileName ?? 'Заявление.pdf', content: pdf, contentType: 'application/pdf' }],
     });

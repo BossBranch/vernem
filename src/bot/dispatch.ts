@@ -151,9 +151,9 @@ function cardText(bot: Vernem, d: Dispatch): string {
   const norm = bot.norms.services[inc.service_key];
   const people = bot.db.listParticipants(inc.id);
   const lines = [
-    `🚨 **Заявка жителей** · ${ICON[inc.service_key]} ${norm.title}`,
+    `🚨 **Заявка жителей:** ${ICON[inc.service_key]} ${norm.title}`,
     `${house.address}${inc.entrance ? `, подъезд ${clean(inc.entrance)}` : ''}`,
-    `С ${formatShort(new Date(inc.started_at), house.tz)} · сообщили: ${people.length}`,
+    `С ${formatShort(new Date(inc.started_at), house.tz)}, сообщили: ${people.length}`,
   ];
   const readings = people.flatMap((p) => bot.db.listReadings(p.id)).sort((a, b) => a.at.localeCompare(b.at));
   if (readings.length) lines.push(`Последний замер: +${String(readings[readings.length - 1].temp_c).replace('.', ',')} °C`);

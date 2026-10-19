@@ -71,6 +71,7 @@ import {
   relatedOverlap,
 } from '../services/cases.ts';
 import type { CaseBundle } from '../services/cases.ts';
+import { resetDemoCases } from '../sim/demo-cases.ts';
 import type { BotConfig, Btn, Input, OutMessage, Outbox } from './types.ts';
 import {
   ICON,
@@ -730,6 +731,7 @@ export class Vernem {
         return this.send(userId, { text: actTemplate(this.norms.services[a as ServiceKey]?.title ?? 'коммунальная услуга', this.addressOf(userId)) });
       case 'demo':
         if (!this.cfg.demoMode) return this.stale(userId);
+        if (a === 'reset') return this.restartDemo(userId);
         return a === 'ads' || a === 'act' ? this.startDemo(userId, a) : this.askDemo(userId);
       case 'house':
         return showAddresses(this, userId);
@@ -1082,7 +1084,8 @@ export class Vernem {
           : 'без номера заявки';
     const readings = this.db.listReadings(pid);
     const lines = [
-      `${fresh ? '✅ **Записал.**' : '👀 **Слежу.**'} ${ICON[c.incident.service_key]} ${norm.title} · ${c.house.address} · с ${formatShort(new Date(c.p.started_at), tz)} · ${evidenceLine}`,
+      `${fresh ? '✅ **Записал.**' : '👀 **Слежу.**'} ${ICON[c.incident.service_key]} ${norm.title}`,
+      `${c.house.address}, с ${formatShort(new Date(c.p.started_at), tz)}, ${evidenceLine}.`,
     ];
     if (readings.length) lines.push(`Последний замер: +${fmtNum(readings[readings.length - 1].temp_c, 1)} °C.`);
     const dispatch = this.db.dispatchFor(c.incident.id);
@@ -1752,13 +1755,13 @@ export class Vernem {
     const rows: Btn[][] = list.map((p) => {
       const c = loadCase(this.db, p.id)!;
       const norm = this.norms.services[c.incident.service_key];
-      return [cb(`${ICON[c.incident.service_key]} ${norm.button} · ${formatShort(new Date(p.started_at), c.house.tz).split(' ')[0]} · ${statusTitle(p.status, norm.kind, c.incident.service_key)}`.slice(0, 64), `cs:${p.id}`)];
+      return [cb(`${ICON[c.incident.service_key]} ${norm.button}, ${formatShort(new Date(p.started_at), c.house.tz).split(' ')[0]}: ${statusTitle(p.status, norm.kind, c.incident.service_key).toLowerCase()}`.slice(0, 64), `cs:${p.id}`)];
     });
     if (this.cfg.miniAppEnabled) rows.push([app('📱 Открыть в приложении')]);
     rows.push(backRow());
     const refunded = list.reduce((s, p) => s + (p.status === 'refunded' && p.refund_amount ? p.refund_amount : 0), 0);
     return this.send(userId, {
-      text: `**Мои дела**${refunded > 0 ? ` · вернули с ботом ${fmtRub(Math.round(refunded * 100) / 100)}` : ''}`,
+      text: `**Мои дела**${refunded > 0 ? `\nВернули с ботом: ${fmtRub(Math.round(refunded * 100) / 100)}` : ''}`,
       buttons: rows,
     });
   }
@@ -1820,7 +1823,17 @@ export class Vernem {
         '1. Дозвонились в аварийную службу — есть номер заявки.',
         '2. Не дозвонились — номера нет. Доказательство — акт с соседями. Это самый сложный случай.',
       ].join('\n'),
-      buttons: [[cb('📞 1. Есть номер заявки', 'demo:ads')], [cb('📵 2. Не дозвонились', 'demo:act')], [cb('⬅️ Меню', 'menu')]],
+      buttons: [[cb('📞 1. Есть номер заявки', 'demo:ads')], [cb('📵 2. Не дозвонились', 'demo:act')], [cb('🔄 Все демо-дела заново', 'demo:reset')], [cb('⬅️ Меню', 'menu')]],
+    });
+  }
+
+  /** Все демо-дела заново: прежние демо удаляются, создаются демо 1, 2 и 3. Настоящие дела не трогаются. */
+  async restartDemo(userId: number) {
+    const n = await resetDemoCases(this.db, userId, this.now());
+    this.db.track(userId, 'demo_reset');
+    return this.send(userId, {
+      text: `🧪 Готово: ${n} демо-дела заново — «демо 1» (есть номер заявки), «демо 2» (акт с соседями) и «демо 3» (вернули меньше положенного). Ваши настоящие дела не тронуты.`,
+      buttons: [[cb('📋 Мои дела', 'cases')], [cb('⬅️ Меню', 'menu')]],
     });
   }
 

@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: «Вернём» — REST мини-приложения
-  version: 1.3.0
+  version: 1.3.1
   license:
     name: MIT
   description: |
@@ -47,7 +47,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Health' }
-              example: { ok: true, db: ok, bot: running (webhook), version: 1.3.0 }
+              example: { ok: true, db: ok, bot: running (webhook), version: 1.3.1 }
         '503':
           description: База недоступна
           content:
@@ -736,6 +736,25 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '422': { $ref: '#/components/responses/Unprocessable' }
 
+  /api/demo/reset:
+    post:
+      tags: [Житель]
+      summary: Демо-дела заново — прежние демо удаляются, создаются демо 1, 2 и 3; настоящие дела не трогаются
+      responses:
+        '200':
+          description: Все дела жителя после пересоздания демо
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cases:
+                    type: array
+                    items: { $ref: '#/components/schemas/CaseSummary' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
   /api/track:
     post:
       tags: [Сервис]
@@ -931,6 +950,7 @@ components:
               button: { type: string }
               kind: { type: string }
         savedPersonal: { type: boolean }
+        demoMode: { type: boolean, description: 'Показывать кнопку «Демо-дела заново»' }
         refunded: { type: number, description: 'Сколько жителю уже вернули, ₽' }
         botUsername: { type: string, nullable: true }
         normsCheckedAt: { type: string, description: Дата проверки норм в norms.yaml }

@@ -102,8 +102,10 @@ function draw(pdf: PDFKit.PDFDocument, doc: ClaimDoc, k: number) {
     }
 
     pdf.moveDown(0.8);
-    pdf.font('regular').fontSize(fs(8.5)).fillColor('#444444').text(doc.note, left, undefined, { width, align: 'left' });
-    pdf.fillColor('#000000');
+    if (doc.note) {
+      pdf.font('regular').fontSize(fs(8.5)).fillColor('#444444').text(doc.note, left, undefined, { width, align: 'left' });
+      pdf.fillColor('#000000');
+    }
     pdf.moveDown(2);
     pdf.font('regular').fontSize(fs(10.5)).text(doc.signature, left, undefined, { width });
 

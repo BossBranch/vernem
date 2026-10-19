@@ -44,7 +44,7 @@ export async function onPhoto(bot: Vernem, userId: number, photos: InPhoto[]) {
   bot.db.setState(userId, 'photo_pick', { photos });
   const rows: Btn[][] = open.slice(0, 5).map((p) => {
     const c = loadCase(bot.db, p.id)!;
-    return [cb(`${ICON[c.incident.service_key]} ${bot.norms.services[c.incident.service_key].button} · ${formatShort(new Date(p.started_at), c.house.tz)}`.slice(0, 64), `ph:${p.id}`)];
+    return [cb(`${ICON[c.incident.service_key]} ${bot.norms.services[c.incident.service_key].button}, с ${formatShort(new Date(p.started_at), c.house.tz)}`.slice(0, 64), `ph:${p.id}`)];
   });
   return bot.send(userId, { text: 'К какому случаю приложить фото?', buttons: [...rows, backRow()] });
 }
@@ -64,7 +64,7 @@ async function save(bot: Vernem, userId: number, c: CaseBundle, kind: PhotoKind,
   bot.db.track(userId, 'photo_added', { kind, n: photos.length });
   if (!keepWaiting) bot.db.setState(userId, 'idle');
   const norm = bot.norms.services[c.incident.service_key];
-  const lines = [`📷 Сохранил ${photos.length > 1 ? `${photos.length} ${KIND_TITLE[kind]}` : KIND_TITLE[kind]} к случаю «${norm.title}» · получено ${formatShort(now, c.house.tz)}.`];
+  const lines = [`📷 Сохранил ${photos.length > 1 ? `${photos.length} ${KIND_TITLE[kind]}` : KIND_TITLE[kind]} к случаю «${norm.title}», получено ${formatShort(now, c.house.tz)}.`];
   if (before === 0) {
     lines.push('', 'Фото — дополнительное доказательство: главное — номер из аварийной службы или акт. В заявлении я перечислю фото в приложениях со временем получения.');
   }

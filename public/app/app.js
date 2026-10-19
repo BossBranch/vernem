@@ -389,7 +389,7 @@
         }
         casesHtml = '<div class="section-row"><h2>Мои дела</h2>' + (active.length ? '<span class="muted">' + active.length + ' ' + plural(active.length, ['открытое', 'открытых', 'открытых']) + '</span>' : '') + '</div>' +
           (active.length ? '<ul class="cases">' + active.map(caseRow).join('') + '</ul>' : '<p class="muted">Открытых дел нет.</p>') +
-          (archive.length ? '<details class="archive"><summary><span>Архив: ' + archive.length + ' ' + plural(archive.length, ['дело', 'дела', 'дел']) + (archRefund > 0 ? ' · вернули ' + rub(archRefund) : '') + '</span>' + icon('down') + '</summary>' +
+          (archive.length ? '<details class="archive"><summary><span>Архив: ' + archive.length + ' ' + plural(archive.length, ['дело', 'дела', 'дел']) + (archRefund > 0 ? ', вернули ' + rub(archRefund) : '') + '</span>' + icon('down') + '</summary>' +
             '<ul class="cases">' + archive.map(caseRow).join('') + '</ul></details>' : '');
       }
 
@@ -404,6 +404,8 @@
       html += cases.length ? hero + reportBtn + howHtml + casesHtml + housesHtml : reportBtn + howHtml + housesHtml;
       html += '<footer><p>Расчёт по Приложению № 1 к ПП РФ № 354, нормы проверены ' + esc(me.normsCheckedAt.split('-').reverse().join('.')) +
         '. Сумма примерная — точную считает УК.</p>' +
+        // Демо-дела заново: удалили демо или хотите пройти его с начала — одна кнопка.
+        (me.demoMode ? '<button id="demoReset">Демо-дела заново</button><div id="demoBox"></div>' : '') +
         (cases.length || me.houses.length ? '<button id="delme">Удалить все мои данные</button><div id="delBox"></div>' : '') + '</footer>';
       root.innerHTML = html;
       $('report').onclick = function () { location.hash = me.houses.length ? '#report' : '#addhouse/report'; };
@@ -412,6 +414,16 @@
       // Внутри карточки — ссылка «позвонить»: нажатие на неё не открывает карточку дома.
       each('.house', function (el) { el.onclick = function (e) { if (!e.target.closest('a')) location.hash = '#house/' + el.getAttribute('data-id'); }; });
       if ($('delme')) $('delme').onclick = function () { askDeleteAll(cases.length); };
+      if ($('demoReset')) $('demoReset').onclick = function () {
+        askInline($('demoBox'), 'Удалю прежние демо-дела и создам три новых: демо 1, демо 2 и демо 3. Ваши настоящие дела не тронутся.', 'Да, заново', function () {
+          var done = busy($('demoReset'), 'Создаю…');
+          api('POST', '/api/demo/reset').then(function () {
+            track('app_demo_reset');
+            toast('Готово: три демо-дела заново');
+            renderHome();
+          }).catch(function (e) { toast(e.message); done(); });
+        });
+      };
     }).catch(function (e) { showError(e.message, renderHome); });
   }
 
@@ -424,7 +436,7 @@
     return '<li><div class="house" data-id="' + h.id + '" role="button" tabindex="0">' +
       '<span class="house-head"><span class="ic">' + icon('home') + '</span><span class="house-main">' +
       '<span class="title">' + esc(h.address) + '</span>' +
-      '<span class="meta">' + esc((where ? where + ' · ' : '') + uk) + '</span>' +
+      '<span class="meta">' + esc((where ? where + ', ' : '') + uk) + '</span>' +
       '<span class="meta">' + esc(cap(membersText(h.members))) + '</span></span></span>' +
       (phone ? (tel ? '<a class="phone-btn" href="' + esc(tel) + '">' + phone + '</a>' : '<span class="phone-btn">' + phone + '</span>') : '') +
       '</div></li>';
@@ -446,7 +458,7 @@
     return '<li><button class="case" data-id="' + c.id + '" data-tone="' + st.tone + '">' +
       '<span class="case-head"><span class="ic tone-' + (st.tone || 'plain') + '">' + icon(c.service) + '</span>' +
       '<span class="case-main"><span class="title">' + esc(c.serviceButton || c.serviceTitle) + '</span>' +
-      '<span class="meta">' + esc(c.address) + ' · ' + esc(period(c)) + '</span></span>' +
+      '<span class="meta">' + esc(c.address) + ', ' + esc(period(c)) + '</span></span>' +
       (sum ? '<span class="amount">' + esc(sum) + '</span>' : '') + '</span>' +
       (st.done ? bar(st.done) : '') +
       '<span class="case-now"><span class="status">' + (c.demo ? '<span class="demo-tag">' + demoLabel(c) + '</span>' : '') + esc(line) + '</span>' + icon('right') + '</span>' +
@@ -1107,7 +1119,7 @@
       var html = backLink('Главная', '');
       html += '<div class="case-title"><span class="ic big tone-' + (st.tone || 'plain') + '">' + icon(c.service) + '</span><div>' +
         '<h1>' + esc(c.serviceButton || c.serviceTitle) + '</h1>' +
-        '<p class="muted">' + esc(c.address) + ' · ' + esc(period(c)) + '</p></div></div>';
+        '<p class="muted">' + esc(c.address) + '<br>' + esc(period(c)) + '</p></div></div>';
       // Путь дела из 4 шагов; у закрытого «без денег» пути нет — вместо него объяснение.
       html += c.status === 'closed'
         ? '<p class="note">' + esc(c.statusTitle) + (c.service === 'electricity_off' && (c.contacts || {}).twoPowerSources == null ? '. Если в доме есть лифт или больше 9 этажей — отметьте это в карточке дома: тогда допустимо только 2 часа, и расчёт изменится.' : '') + '</p>'
@@ -1451,7 +1463,7 @@
     var html = '<section class="sheet"><h2>Что записано</h2><dl class="facts">' +
       '<dt>' + startLabel + '</dt><dd class="num">' + esc(when(c.startedAt, c.tz) + startFrom) + '</dd>' +
       '<dt>' + esc(endLabel) + '</dt><dd class="num">' + (c.endedAt ? esc(when(c.endedAt, c.tz)) : c.service === 'waste_off' ? 'пока нет' : 'ещё нет') + '</dd>' +
-      '<dt>Доказательство</dt><dd>' + esc(evidenceText(c)) + (c.act && c.act.status !== 'signed' ? ' · акт ждёт подписей' : '') + '</dd>' +
+      '<dt>Доказательство</dt><dd>' + esc(evidenceText(c)) + (c.act && c.act.status !== 'signed' ? ', акт ждёт подписей' : '') + '</dd>' +
       (cl.executor && (c.status === 'claim_ready' || c.status === 'refused' || c.status === 'refunded') ? '<dt>Получатель</dt><dd>' + esc(cl.executor) + '</dd>' : '') +
       (c.readings.length ? '<dt>Замеры</dt><dd class="num">' + c.readings.map(function (r) {
         return '<span class="reading">' + esc(when(r.at, c.tz)) + ': ' + esc(fmtTemp(r.tempC)) +
@@ -1584,7 +1596,7 @@
     var html = '<details class="more" id="xfBox"' + (list.length ? ' open' : '') + '><summary>Ещё квартира в этом доме?</summary>' +
       '<p class="muted hint">По каждой квартире — своё заявление: с её лицевым счётом и платой из её квитанции. Всё остальное — как в заявлении выше.</p>';
     list.forEach(function (f, i) {
-      html += '<div class="xf-row"><span><b>кв. ' + esc(f.flat) + '</b>' + (f.estimate > 0 ? ' · ≈ ' + rub(f.estimate) : '') + '</span>' +
+      html += '<div class="xf-row"><span><b>кв. ' + esc(f.flat) + '</b>' + (f.estimate > 0 ? ' — ≈ ' + rub(f.estimate) : '') + '</span>' +
         '<span><button class="btn" data-xf-pdf="' + i + '">' + icon('doc') + 'Заявление</button> <button class="linklike danger-link" data-xf-del="' + i + '">Удалить</button></span></div>';
     });
     html += '<div class="row2"><div><label for="xf_flat_new">Квартира</label><input id="xf_flat_new" maxlength="10"></div>' +

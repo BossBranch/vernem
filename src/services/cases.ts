@@ -238,7 +238,15 @@ export function claimInputFor(db: Db, norms: Norms, c: CaseBundle, now: Date): C
     photos: db.listPhotos(c.p.id),
     act: actOf(db, c.incident.id),
     dispatch: db.dispatchFor(c.incident.id) ?? null,
+    executorAddress: executorAddress(db, c),
   };
+}
+
+/** Адрес УК из карточки дома — только если заявление адресовано именно ей (название совпадает). */
+function executorAddress(db: Db, c: CaseBundle): string | null {
+  const info = db.houseInfo(c.house);
+  const executor = claimOf(c.p).executor?.trim();
+  return info.ukAddress && executor && executor === info.ukName?.trim() ? info.ukAddress : null;
 }
 
 export function claimDocFor(db: Db, norms: Norms, c: CaseBundle, now: Date, extra?: number): ClaimDoc {
@@ -251,13 +259,8 @@ export function claimDocFor(db: Db, norms: Norms, c: CaseBundle, now: Date, extr
   }
   const doc = buildClaim(input);
   if (flat) doc.fileName = doc.fileName?.replace(/^Заявление_/, `Заявление_кв${flat.flat.replace(/[^\dА-Яа-яA-Za-z]/g, '')}_`);
-  if (c.incident.demo) doc.note = `ДЕМОНСТРАЦИОННЫЕ ДАННЫЕ: не является реальным заявлением. ${doc.note}`;
-  // Адрес УК из карточки дома — если заявление адресовано именно ей.
-  const info = db.houseInfo(c.house);
-  const executor = claimOf(c.p).executor?.trim();
-  if (info.ukAddress && executor && executor === info.ukName?.trim()) {
-    doc.to = doc.to.map((l) => (/^адрес: _+$/.test(l) ? `адрес: ${info.ukAddress}` : l));
-  }
+  // Демо-данные помечены по условиям хакатона; других приписок в заявлении нет.
+  if (c.incident.demo) doc.note = 'ДЕМОНСТРАЦИОННЫЕ ДАННЫЕ: не является реальным заявлением.';
   return doc;
 }
 

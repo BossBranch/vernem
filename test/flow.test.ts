@@ -6,6 +6,7 @@ import { fromLocal } from '../src/calc/time.ts';
 import { actDocFor, calcFor, claimDocFor, claimTextFor, loadCase, summarize } from '../src/services/cases.ts';
 import { claimToPdf } from '../src/docs/pdf.ts';
 import { buildActDoc } from '../src/docs/act.ts';
+import { claimToText } from '../src/docs/claim.ts';
 
 const TZ = 'Europe/Moscow';
 const START = fromLocal(2026, 9, 22, 12, 0, TZ); // вторник, 12:00 МСК
@@ -1088,4 +1089,60 @@ test('заявление на почту: сервер отказал — жит
   await smtp.close();
   h.close();
   h2.close();
+});
+
+test('документы: без приписки «расчёт ориентировочный» и ссылки на КонсультантПлюс, адрес УК одинаковый в заявлении и требовании', async () => {
+  const h = new Harness({ start: START });
+  await reportHotWater(h, 1);
+  const house = h.db.listUserHouses(1)[0];
+  h.db.setHouseInfo(house.id, { ukName: 'ООО «УК Пример»', ukAddress: 'г. Москва, ул. Строителей, 1' });
+  await h.press(1, 'Воду дали');
+  await h.press(1, 'Только что');
+  await h.text(1, '1200');
+  await h.press(1, '✅ Да'); // получатель из карточки дома
+  await h.text(1, 'Иванов Иван Иванович');
+  await h.text(1, '42');
+  await h.press(1, 'Пропустить');
+  await h.press(1, 'Не сохранять');
+  const claim = claimText(h, 1);
+  assert.doesNotMatch(claim, /ориентировочный и выполнен|КонсультантПлюс|итоговый размер снижения платы определяет исполнитель/);
+  assert.match(claim, /адрес: г\. Москва, ул\. Строителей, 1/);
+  assert.match(claim, /Отметка о принятии \(на втором экземпляре/);
+  // Требование о штрафе — тот же адрес УК и тоже без оговорок.
+  const { escalationDocFor } = await import('../src/bot/escalate.ts');
+  const p = h.db.listUserParticipants(1)[0];
+  h.db.updateParticipant(p.id, { status: 'refused' });
+  const fine = claimToText(escalationDocFor(h.bot, loadCase(h.db, p.id)!, 'fine'));
+  assert.match(fine, /адрес: г\. Москва, ул\. Строителей, 1/);
+  assert.doesNotMatch(fine, /рассчитаны ориентировочно/);
+  h.close();
+});
+
+test('демо-дела заново: из меню «Демо» — три новых демо, настоящие дела, ФИО и прежние демо', async () => {
+  const h = new Harness({ start: START });
+  await reportHotWater(h, 1);
+  h.db.updateUser(1, { fio: 'Настоящий Житель', save_personal: 1 });
+  await h.press(1, 'Меню');
+  await h.press(1, 'Демо');
+  await h.press(1, 'Есть номер заявки');
+  await h.press(1, 'Меню');
+  await h.press(1, 'Демо');
+  await h.press(1, 'Все демо-дела заново');
+  assert.match(h.last(1).text, /3 демо-дела заново/);
+  const parts = h.db.listUserParticipants(1).map((p) => h.db.getIncident(p.incident_id)!.demo);
+  assert.deepEqual(parts.filter((d) => d).sort(), [1, 1, 3]);
+  assert.equal(parts.filter((d) => !d).length, 1, 'настоящее дело осталось');
+  assert.equal(h.db.getUser(1)!.fio, 'Настоящий Житель');
+  // Демо-заявление помечено, но без прочих приписок.
+  const demo1 = h.db.listUserParticipants(1).find((p) => h.db.getIncident(p.incident_id)!.demo === 1 && p.status === 'claim_ready')!;
+  const text = claimTextFor(h.db, h.bot.norms, loadCase(h.db, demo1.id)!, h.now());
+  assert.match(text, /^ДЕМОНСТРАЦИОННЫЕ ДАННЫЕ: не является реальным заявлением\.$/m);
+  assert.doesNotMatch(text, /КонсультантПлюс/);
+  h.close();
+});
+
+test('в текстах бота и приложения нет разделителя «·»', () => {
+  for (const f of ['src/bot/core.ts', 'src/bot/house.ts', 'src/bot/dispatch.ts', 'src/bot/photos.ts', 'src/bot/acts.ts', 'src/bot/escalate.ts', 'src/bot/ui.ts', 'src/bot/mail.ts', 'public/app/app.js']) {
+    assert.doesNotMatch(readFileSync(new URL(`../${f}`, import.meta.url), 'utf8'), /·/, f);
+  }
 });
