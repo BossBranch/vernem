@@ -750,7 +750,7 @@ test('health и статика мини-приложения', async () => {
   await withServer(async (base) => {
     const health = (await (await fetch(`${base}/health`)).json()) as any;
     assert.equal(health.ok, true);
-    assert.equal(health.version, '1.2.0');
+    assert.equal(health.version, '1.3.0');
     const page = await fetch(`${base}/app/`);
     assert.equal(page.status, 200);
     const html = await page.text();
@@ -766,4 +766,57 @@ test('QR: разделитель и регистр полей по ГОСТ', ()
   const r = parseReceiptQr('ST00012#name=ТСЖ Дом#payeeinn=1234567890#persacc=A-1');
   assert.ok(r.ok && r.info.executor === 'ТСЖ Дом' && r.info.account === 'A-1');
   assert.equal(parseReceiptQr('').ok, false);
+});
+
+test('УК в боте через приложение: ссылка для УК, заявка из формы, статус в деле', async () => {
+  await withServer(async (base, h) => {
+    const headers = { 'X-Max-Init-Data': initFor(31), 'Content-Type': 'application/json' };
+    const post = (url: string, body: object = {}) => fetch(`${base}${url}`, { method: 'POST', headers, body: JSON.stringify(body) });
+    await h.start(31);
+    const { house } = (await (await post('/api/me/houses', { address: 'Лесная 9', city: 'Москва' })).json()) as any;
+    assert.deepEqual(house.dispatchers, []);
+
+    // Без подключённой УК заявку через бота не отправить.
+    const early = await post('/api/report', { houseId: house.id, service: 'hot_water_off', evidence: 'dispatch' });
+    assert.equal(early.status, 422);
+
+    const invite = (await (await post(`/api/houses/${house.id}/uk-invite`)).json()) as any;
+    assert.match(invite.url, /^https:\/\/max\.ru\/vernem_demo_bot\?start=d_/);
+    assert.match(invite.text, /Подключиться: https:\/\/max\.ru/);
+    await h.start(77, invite.url.split('start=')[1]);
+    await h.text(77, 'Петров П. П., диспетчер ТСЖ «Лесная»');
+    const card = (await (await fetch(`${base}/api/houses/${house.id}`, { headers })).json()) as any;
+    assert.equal(card.house.dispatchers[0].title, 'Петров П. П., диспетчер ТСЖ «Лесная»');
+
+    const r = (await (await post('/api/report', { houseId: house.id, service: 'hot_water_off', evidence: 'dispatch' })).json()) as any;
+    assert.equal(r.dispatched, true);
+    let c = ((await (await fetch(`${base}/api/cases/${r.caseId}`, { headers })).json()) as any).case;
+    assert.equal(c.dispatch.status, 'sent');
+    assert.equal(c.canDispatch, false);
+    await h.press(77, '✅ Принять');
+    c = ((await (await fetch(`${base}/api/cases/${r.caseId}`, { headers })).json()) as any).case;
+    assert.equal(c.dispatch.status, 'accepted');
+    assert.equal(c.adsNumber, c.dispatch.number);
+    assert.equal(c.evidence, 'ads');
+
+    // Повторная отправка — без ошибки и без второй заявки.
+    const again = await post(`/api/cases/${r.caseId}/dispatch`);
+    assert.equal(again.status, 200);
+    assert.equal(h.sentTo(77).filter((m) => /Заявка жителей/.test(m.text)).length, 1, 'карточка УК не дублируется');
+  });
+});
+
+test('заявление на почту через приложение: без настроенной почты — понятный отказ, адрес проверяется', async () => {
+  await withServer(async (base, h) => {
+    const headers = { 'X-Max-Init-Data': initFor(5), 'Content-Type': 'application/json' };
+    const pid = await demoCase(h, 5);
+    const detail = (await (await fetch(`${base}/api/cases/${pid}`, { headers })).json()) as any;
+    assert.equal(detail.mailTo, null);
+    const bad = await fetch(`${base}/api/cases/${pid}/email`, { method: 'POST', headers, body: JSON.stringify({ replyTo: 'не почта' }) });
+    assert.equal(bad.status, 400);
+    assert.match(((await bad.json()) as any).fields.replyTo, /name@example\.ru/);
+    const off = await fetch(`${base}/api/cases/${pid}/email`, { method: 'POST', headers, body: JSON.stringify({}) });
+    assert.equal(off.status, 422);
+    assert.match(((await off.json()) as any).error, /не настроена/);
+  });
 });

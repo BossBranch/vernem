@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: «Вернём» — REST мини-приложения
-  version: 1.2.0
+  version: 1.3.0
   license:
     name: MIT
   description: |
@@ -47,7 +47,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Health' }
-              example: { ok: true, db: ok, bot: running (webhook), version: 1.2.0 }
+              example: { ok: true, db: ok, bot: running (webhook), version: 1.3.0 }
         '503':
           description: База недоступна
           content:
@@ -190,6 +190,26 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /api/houses/{id}/uk-invite:
+    parameters:
+      - $ref: '#/components/parameters/HouseId'
+    post:
+      tags: [Дома]
+      summary: Ссылка-приглашение для УК — сотрудник открывает её в MAX и начинает получать заявки жителей дома
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  url: { type: string, example: 'https://max.ru/<бот>?start=d_…' }
+                  text: { type: string, description: Готовый текст для пересылки в УК }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
   /api/houses/{id}/info:
     parameters:
       - $ref: '#/components/parameters/HouseId'
@@ -223,7 +243,7 @@ paths:
               properties:
                 service: { $ref: '#/components/schemas/ServiceKey' }
                 houseId: { type: integer }
-                evidence: { type: string, enum: [ads, written, self], description: 'ads — номер заявки аварийной службы, written — письменное обращение, self — номера нет (нужен акт с соседями)' }
+                evidence: { type: string, enum: [ads, written, self, dispatch], description: 'ads — номер заявки аварийной службы, written — письменное обращение, self — номера нет (нужен акт с соседями), dispatch — отправить заявку в УК через бота (УК дома подключена)' }
                 number: { type: string, maxLength: 60, description: 'Номер заявки или обращения, обязательно с цифрами' }
                 startedAt: { type: string, format: date-time, description: 'Не в будущем и не раньше года назад; по умолчанию — сейчас' }
                 temp: { type: number, description: Замер температуры для heating_temp и hot_water_temp }
@@ -245,6 +265,7 @@ paths:
                   readingSaved: { type: boolean }
                   since: { type: string, format: date-time, nullable: true }
                   neighbours: { type: integer, description: Скольким соседям бот напишет «у вас тоже?» }
+                  dispatched: { type: boolean, description: Заявка ушла в УК через бота }
                   botConnected: { type: boolean }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
@@ -290,6 +311,7 @@ paths:
                   actSigner: { type: object, nullable: true }
                   savedPersonal: { type: boolean }
                   botConnected: { type: boolean }
+                  mailTo: { type: string, nullable: true, description: 'Почта УК, на которую бот может отправить заявление сам' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
     delete:
@@ -342,6 +364,19 @@ paths:
       responses:
         '200': { $ref: '#/components/responses/CaseResponse' }
         '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /api/cases/{id}/dispatch:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+    post:
+      tags: [Дела]
+      summary: Отправить заявку в УК через бота — сотрудник УК принимает её в MAX, номер приходит в дело
+      responses:
+        '200': { $ref: '#/components/responses/CaseResponse' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
         '422': { $ref: '#/components/responses/Unprocessable' }
@@ -501,6 +536,27 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/cases/{id}/email:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+    post:
+      tags: [Документы]
+      summary: Отправить заявление на почту УК — дата отправки становится датой подачи
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                replyTo: { type: string, description: 'Почта жителя: копия письма и адрес для ответа УК' }
+      responses:
+        '200': { $ref: '#/components/responses/CaseResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+        '503': { $ref: '#/components/responses/Unavailable' }
 
   /api/cases/{id}/submitted:
     parameters:
@@ -891,6 +947,13 @@ components:
         info: { $ref: '#/components/schemas/HouseInfo' }
         members: { type: integer }
         inviteLink: { type: string, nullable: true, description: 'https://max.ru/<бот>?start=h_…' }
+        dispatchers:
+          type: array
+          description: Сотрудники УК, подключённые к дому в боте
+          items:
+            type: object
+            properties:
+              title: { type: string, example: 'Иванова А. П., диспетчер ООО «УК Пример»' }
     HouseInfo:
       type: object
       description: Данные из квитанции; заполняют жители, видно, кто и когда обновил
@@ -951,6 +1014,20 @@ components:
             chair: { type: boolean }
             mine: { type: boolean }
             initiator: { type: boolean }
+        dispatch:
+          type: object
+          nullable: true
+          description: Заявка в УК через бота
+          properties:
+            status: { type: string, enum: [sent, accepted, onsite, fixed, declined] }
+            sentAt: { type: string, format: date-time }
+            timeout: { type: boolean, description: 'УК не ответила вовремя' }
+            number: { type: string, nullable: true }
+            acceptedAt: { type: string, format: date-time, nullable: true }
+            acceptedBy: { type: string, nullable: true }
+            onsiteAt: { type: string, format: date-time, nullable: true }
+            fixedAt: { type: string, format: date-time, nullable: true }
+        canDispatch: { type: boolean, description: 'Можно отправить заявку в УК через бота' }
         readings:
           type: array
           items:

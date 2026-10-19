@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { isValidTimeZone } from './calc/time.ts';
+import { mailConfigFrom } from './mail/smtp.ts';
 
 const bool = (v: string | undefined, def = false) => (v === undefined || v === '' ? def : ['1', 'true', 'yes', 'on'].includes(v.toLowerCase()));
 const num = (v: string | undefined, def: number) => (v === undefined || v === '' || Number.isNaN(Number(v)) ? def : Number(v));
@@ -51,5 +52,6 @@ export function loadConfig(env = process.env) {
     schedulerIntervalSec: num(env.SCHEDULER_INTERVAL_SEC, 30),
     partnerName: env.PARTNER_ORG_NAME?.trim() || null,
     partnerUrl: partnerUrl(env.PARTNER_ORG_URL),
+    mail: mailConfigFrom(env),
   };
 }

@@ -6,7 +6,7 @@ import { formatShort, monthKey, monthTitle, toMinute } from '../calc/time.ts';
 import type { Norms } from '../calc/norms.ts';
 import { buildClaim, claimTo, claimToText } from '../docs/claim.ts';
 import type { ClaimDoc, ClaimInput } from '../docs/claim.ts';
-import type { Act, ActSigner, Claim, Db, House, Incident, Participant, ParticipantStatus } from '../db/db.ts';
+import type { Act, ActSigner, Claim, Db, Dispatch, House, Incident, Participant, ParticipantStatus } from '../db/db.ts';
 import { buildActDoc } from '../docs/act.ts';
 
 export type CaseBundle = { p: Participant; incident: Incident; house: House };
@@ -237,6 +237,7 @@ export function claimInputFor(db: Db, norms: Norms, c: CaseBundle, now: Date): C
     now: c.p.ended_at ? new Date(Math.max(new Date(c.p.ended_at).getTime(), now.getTime())) : now,
     photos: db.listPhotos(c.p.id),
     act: actOf(db, c.incident.id),
+    dispatch: db.dispatchFor(c.incident.id) ?? null,
   };
 }
 
@@ -318,6 +319,18 @@ export type CaseSummary = {
   /** Заявление уже выдавали, а расчёт или время с тех пор изменились. */
   claimOutdated: boolean;
   extraFlats: { flat: string; account?: string; bills: Record<string, number>; estimate: number }[];
+  /** Заявка в УК через бота. */
+  dispatch: {
+    status: Dispatch['status'];
+    sentAt: string;
+    timeout: boolean;
+    number: string | null;
+    acceptedAt: string | null;
+    acceptedBy: string | null;
+    onsiteAt: string | null;
+    fixedAt: string | null;
+  } | null;
+  canDispatch: boolean;
 };
 
 /**
@@ -419,6 +432,29 @@ export function summarize(db: Db, norms: Norms, c: CaseBundle, now: Date): CaseS
     act: actSummary(db, c.incident.id, c.p.user_id, !!c.incident.demo),
     photos: db.listPhotos(c.p.id).length,
     inspection: c.p.inspection,
+    dispatch: dispatchJson(db.dispatchFor(c.incident.id)),
+    // Отправить заявку в УК можно, пока номера нет и УК дома подключена к боту.
+    canDispatch:
+      c.p.status === 'tracking' &&
+      !c.incident.demo &&
+      !c.incident.ads_number &&
+      !c.p.own_ads_number &&
+      db.listDispatchers(c.house.id).length > 0 &&
+      (!db.dispatchFor(c.incident.id) || db.dispatchFor(c.incident.id)!.status === 'declined'),
+  };
+}
+
+function dispatchJson(d: Dispatch | undefined): CaseSummary['dispatch'] {
+  if (!d) return null;
+  return {
+    status: d.status,
+    sentAt: d.sent_at,
+    timeout: !!d.timeout_at,
+    number: d.number,
+    acceptedAt: d.accepted_at,
+    acceptedBy: d.accepted_title,
+    onsiteAt: d.onsite_at,
+    fixedAt: d.fixed_at,
   };
 }
 

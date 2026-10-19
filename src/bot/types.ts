@@ -1,6 +1,8 @@
 // Ядро бота не знает про SDK MAX: оно получает события Input и отправляет OutMessage.
 // Адаптер MAX (max-adapter.ts) и терминальный симулятор (sim/cli.ts) реализуют Outbox.
 
+import type { MailConfig } from '../mail/smtp.ts';
+
 export type Btn =
   | { type: 'callback'; text: string; payload: string }
   | { type: 'link'; text: string; url: string }
@@ -49,4 +51,6 @@ export type BotConfig = {
    */
   partnerName?: string | null;
   partnerUrl?: string | null;
+  /** SMTP для отправки заявления на почту УК; null — отправка выключена. */
+  mail?: MailConfig | null;
 };

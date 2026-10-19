@@ -12,6 +12,8 @@ import { actFromApp, markActSigned, unmarkActSigned } from '../bot/acts.ts';
 import { escalationDocFor } from '../bot/escalate.ts';
 import type { EscalationKind } from '../docs/escalation.ts';
 import { executorFromHouse } from '../bot/house.ts';
+import { dispatchInviteLink } from '../bot/dispatch.ts';
+import { claimEmailTarget, emailClaim } from '../bot/mail.ts';
 import { claimToText } from '../docs/claim.ts';
 import { claimToPdf } from '../docs/pdf.ts';
 import { parseReceiptQr } from '../receipt/qr.ts';
@@ -193,6 +195,8 @@ export function createApp(deps: WebDeps) {
       notify: !!h.notify,
       info: db.houseInfo(h),
       members: db.countHouseMembers(h.id),
+      // Кто из УК принимает заявки в боте — житель видит, кому уйдёт заявка.
+      dispatchers: db.listDispatchers(h.id).map((d) => ({ title: d.title })),
       inviteLink: cfg.botUsername ? `https://max.ru/${cfg.botUsername}?start=h_${h.code}` : null,
     };
   };
@@ -280,6 +284,21 @@ export function createApp(deps: WebDeps) {
     res.json({ house: houseJson(req.userId!, id) });
   });
 
+  /** Ссылка-приглашение для УК: житель пересылает её в УК, сотрудник подключается к дому в боте. */
+  api.post('/houses/:id/uk-invite', (req: AuthedRequest, res) => {
+    const id = Number(req.params.id);
+    const h = houseJson(req.userId!, id);
+    const bot = deps.bot();
+    const house = db.getHouse(id)!;
+    const url = bot ? dispatchInviteLink(bot, house) : null;
+    if (!url) throw new HttpError(503, 'Ссылка для УК появится, когда бот подключён к MAX');
+    db.track(req.userId!, 'dispatch_invite', { house: id, via: 'app' });
+    res.json({
+      url,
+      text: `Заявки жителей дома ${h.address}: жители сообщают об отключениях через бот «Вернём». Подключите сотрудника или диспетчера — заявки будут приходить ему в MAX, принять их можно одной кнопкой. Подключиться: ${url}`,
+    });
+  });
+
   api.delete('/me/houses/:id', (req: AuthedRequest, res) => {
     const id = Number(req.params.id);
     houseJson(req.userId!, id);
@@ -340,6 +359,8 @@ export function createApp(deps: WebDeps) {
       const b = req.body ?? {};
       if (!SERVICE_ORDER.includes(b.service)) throw new HttpError(400, 'Выберите, что случилось');
       if (!Number.isInteger(b.houseId)) throw new HttpError(400, 'Выберите адрес');
+      // «dispatch» — заявка уходит в УК через бота; номер придёт, когда УК её примет.
+      const dispatch = b.evidence === 'dispatch';
       const evidence = b.evidence === 'ads' || b.evidence === 'written' ? b.evidence : 'self';
       const startedAt = b.startedAt ? new Date(b.startedAt) : new Date();
       if (Number.isNaN(startedAt.getTime())) throw fieldError('started', 'Укажите дату и время');
@@ -365,9 +386,10 @@ export function createApp(deps: WebDeps) {
         corner: !!b.corner,
         variant: b.variant === 'two_sources' || b.variant === 'one_source' ? b.variant : undefined,
         planned: !!b.planned,
+        dispatch,
       });
       if ('error' in r) throw new HttpError(422, r.error, /°C/.test(r.error) ? { temp: r.error } : undefined);
-      res.json({ caseId: r.pid, outcome: r.outcome, numberSaved: !!r.numberSaved, readingSaved: !!r.readingSaved, since: r.since ?? null, neighbours: r.neighbours ?? 0, botConnected: !!cfg.token });
+      res.json({ caseId: r.pid, outcome: r.outcome, numberSaved: !!r.numberSaved, readingSaved: !!r.readingSaved, since: r.since ?? null, neighbours: r.neighbours ?? 0, dispatched: !!r.dispatched, botConnected: !!cfg.token });
     } catch (e) {
       next(e);
     }
@@ -418,7 +440,10 @@ export function createApp(deps: WebDeps) {
     const houseContacts = { ukName: info.ukName ?? null, ukEmail: info.ukEmail ?? null, ukAddress: info.ukAddress ?? null, adsPhone: info.adsPhone ?? null, twoPowerSources: info.twoPowerSources ?? null };
     // Подписант акта — чтобы мини-приложение предупредило, если ФИО в заявлении не совпадают с актом.
     const actSigner = signer ? { fio: signer.fio, flat: signer.flat, signed: act?.status === 'signed' } : null;
-    res.json({ case: s, claimText, executorHint, personHint, houseContacts, actSigner, savedPersonal: !!u?.save_personal, botConnected: !!cfg.token });
+    // Почта УК, на которую бот может отправить заявление сам (SMTP настроен и почта есть в карточке дома).
+    const bot = deps.bot();
+    const mailTo = bot ? claimEmailTarget(bot, c) : null;
+    res.json({ case: s, claimText, executorHint, personHint, houseContacts, actSigner, savedPersonal: !!u?.save_personal, botConnected: !!cfg.token, mailTo });
   });
 
   api.put('/cases/:id/claim', (req: AuthedRequest, res) => {
@@ -618,6 +643,36 @@ export function createApp(deps: WebDeps) {
     res.json({ case: summarize(db, norms, loadCase(db, c.p.id)!, new Date()) });
   });
 
+  /** Бот отправляет заявление на почту УК; replyTo — почта жителя (копия и адрес для ответа). */
+  api.post('/cases/:id/email', async (req: AuthedRequest, res, next) => {
+    try {
+      const c = ownCase(req);
+      const bot = deps.bot();
+      if (!bot) throw new HttpError(503, 'Бот сейчас недоступен');
+      const raw = typeof req.body?.replyTo === 'string' ? req.body.replyTo.trim().toLowerCase() : '';
+      if (raw && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(raw)) throw fieldError('replyTo', 'Почта в виде name@example.ru');
+      const err = await emailClaim(bot, req.userId!, c.p.id, raw || null);
+      if (err) throw new HttpError(422, err);
+      res.json({ case: summarize(db, norms, loadCase(db, c.p.id)!, new Date()) });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  /** Отправить заявку в УК через бота по открытому делу. */
+  api.post('/cases/:id/dispatch', async (req: AuthedRequest, res, next) => {
+    try {
+      const c = ownCase(req);
+      const bot = deps.bot();
+      if (!bot) throw new HttpError(503, 'Бот сейчас недоступен');
+      const err = await bot.dispatchFromApp(req.userId!, c.p.id);
+      if (err) throw new HttpError(422, err);
+      res.json({ case: summarize(db, norms, loadCase(db, c.p.id)!, new Date()) });
+    } catch (e) {
+      next(e);
+    }
+  });
+
   api.post('/cases/:id/reopen', (req: AuthedRequest, res) => {
     const c = ownCase(req);
     const bot = deps.bot();
@@ -809,8 +864,10 @@ export function createApp(deps: WebDeps) {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     const status = err instanceof HttpError ? err.status : err?.type === 'entity.parse.failed' ? 400 : 500;
-    if (status >= 500) console.error('[web]', err);
-    res.status(status).json({ error: status >= 500 ? 'Внутренняя ошибка сервера. Попробуйте ещё раз.' : err.message, ...(err instanceof HttpError && err.fields ? { fields: err.fields } : {}) });
+    // Свои ошибки (HttpError) — с понятным текстом даже при 503 («Бот сейчас недоступен»); прячем только настоящие сбои.
+    const known = err instanceof HttpError;
+    if (!known && status >= 500) console.error('[web]', err);
+    res.status(status).json({ error: !known && status >= 500 ? 'Внутренняя ошибка сервера. Попробуйте ещё раз.' : err.message, ...(known && err.fields ? { fields: err.fields } : {}) });
   });
 
   return app;

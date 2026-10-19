@@ -864,3 +864,228 @@ test('главное меню: «Открыть приложение» — пе�
   const src = readFileSync(new URL('../src/bot/core.ts', import.meta.url), 'utf8');
   assert.doesNotMatch(src, /'Нет ещё'/);
 });
+
+// ---------------------------------------------------------------------
+// УК в боте: заявка уходит сотруднику УК, номер приходит жителю
+// ---------------------------------------------------------------------
+
+/** Дом с жителем и подключённым сотрудником УК (user 50). */
+async function houseWithUk(h: Harness) {
+  const house = h.db.upsertHouse('ул. Лесная, 7', TZ, 0, 'Москва');
+  h.db.addUserHouse(1, house.id);
+  h.db.addUserHouse(2, house.id);
+  await h.start(1);
+  await h.bot.handle({ kind: 'button', userId: 1, payload: `hs:uk:${house.id}` });
+  const url = h.lastLink(1, 'start=d_');
+  const code = url.split('start=d_')[1];
+  await h.start(50, `d_${code}`);
+  await h.text(50, 'Иванова А. П., диспетчер ООО «УК Лесная»');
+  return { house, code };
+}
+
+async function reportViaUk(h: Harness, user: number) {
+  await h.press(user, 'Что-то сломалось');
+  await h.press(user, 'Нет горячей воды');
+  await h.press(user, 'Внезапно');
+  await h.press(user, 'Отправить заявку в УК');
+}
+
+test('УК в боте: подключение, заявка, «Принять» → номер у жителей, «Устранено» → житель подтверждает', async () => {
+  const h = new Harness({ start: START });
+  const { code } = await houseWithUk(h);
+  assert.match(textOf(h, 50), /Заявки жителей дома .*Лесная.* будут приходить сюда/);
+  assert.match(textOf(h, 1), /подключилась УК: Иванова А\. П\./);
+
+  // Житель того же дома не может принимать заявки как УК.
+  await h.start(2, `d_${code}`);
+  assert.match(h.last(2).text, /Вы житель этого дома/);
+
+  let mark = h.out.log.length;
+  await reportViaUk(h, 1);
+  assert.match(textOf(h, 1, mark), /Отправил заявку в УК/);
+  assert.match(textOf(h, 50, mark), /Заявка жителей.*Нет горячей воды|Заявка жителей/);
+  assert.doesNotMatch(textOf(h, 1, mark), /нужен акт с соседями/);
+
+  // Сосед присоединяется к тому же отключению — заявка общая.
+  await h.press(2, 'Что-то сломалось');
+  await h.press(2, 'Нет горячей воды');
+  await h.press(2, 'Да, присоединиться');
+
+  mark = h.out.log.length;
+  await h.press(50, '✅ Принять');
+  const num = `2209-1`;
+  assert.match(textOf(h, 1, mark), new RegExp(`УК приняла заявку.*№ ${num}`));
+  assert.match(textOf(h, 2, mark), new RegExp(`№ ${num}`));
+  const inc = h.db.getIncident(h.db.listUserParticipants(1)[0].incident_id)!;
+  assert.equal(inc.evidence, 'ads');
+  assert.equal(inc.ads_number, num);
+
+  // Второе нажатие — не дублирует.
+  await h.press(50, '✅ Принять');
+  assert.match(h.last(50).text, /уже приняли/);
+
+  await h.advance(H);
+  await h.press(50, 'Выехали');
+  assert.match(textOf(h, 1, mark), /выехали на место/);
+  await h.advance(H);
+  mark = h.out.log.length;
+  await h.press(50, 'Устранено');
+  assert.match(textOf(h, 1, mark), /устранено в 22\.09 14:00/);
+  await h.press(1, 'Да, с 14:00');
+  assert.match(textOf(h, 1, mark), /Записал: починили в 22\.09 14:00\. УК об этом знает/);
+
+  const p1 = h.db.listUserParticipants(1)[0];
+  const text = claimTextFor(h.db, h.bot.norms, loadCase(h.db, p1.id)!, h.now());
+  assert.match(text, /через подключённый им канал приёма заявок в мессенджере MAX/);
+  assert.match(text, new RegExp(`зарегистрировано под № ${num}`));
+  assert.match(text, /принял\(а\) Иванова А\. П\./);
+  assert.match(text, /С этого времени исчисляется период нарушения/);
+  const p2 = h.db.listUserParticipants(2)[0];
+  assert.match(claimTextFor(h.db, h.bot.norms, loadCase(h.db, p2.id)!, h.now()), /другой житель дома сообщил исполнителю через подключённый им канал/);
+  h.close();
+});
+
+test('УК в боте: свой номер диспетчера; молчание УК записывается; «Не наш дом»', async () => {
+  const h = new Harness({ start: START });
+  await houseWithUk(h);
+
+  // Свой номер из журнала.
+  await reportViaUk(h, 1);
+  await h.press(50, 'Принять со своим номером');
+  await h.text(50, 'нет');
+  assert.match(h.last(50).text, /должны быть цифры/);
+  await h.text(50, 'АДС-778');
+  assert.match(textOf(h, 1), /№ АДС-778/);
+  await h.bot.handle({ kind: 'button', userId: 1, payload: `rest:${h.db.listUserParticipants(1)[0].id}:y` });
+  await h.press(1, 'Только что');
+
+  // Молчание: через 30 минут бот предупреждает, это попадает в заявление.
+  const mark = h.out.log.length;
+  await h.start(2);
+  await h.press(2, 'Что-то сломалось');
+  await h.press(2, 'Нет холодной воды');
+  await h.press(2, 'Отправить заявку в УК');
+  await h.advance(31 * 60_000);
+  assert.match(textOf(h, 2, mark), /УК не ответила на заявку за 31 мин/);
+  const p2 = h.db.listUserParticipants(2)[0];
+  await h.bot.handle({ kind: 'button', userId: 2, payload: `rest:${p2.id}:y` });
+  await h.press(2, 'Только что');
+  assert.match(claimTextFor(h.db, h.bot.norms, loadCase(h.db, p2.id)!, h.now()), /однако зарегистрировано не было/);
+
+  // «Не наш дом»: жители получают совет позвонить, кнопка «Отправить в УК» возвращается.
+  await h.advance(H);
+  const m2 = h.out.log.length;
+  await h.press(1, 'Что-то сломалось');
+  await h.press(1, 'Нет света');
+  if (lastButtons(h, 1).some((b) => b.text.startsWith('Два'))) await h.press(1, 'Два');
+  await h.press(1, 'Отправить заявку в УК');
+  await h.press(50, 'Не наш дом');
+  assert.match(textOf(h, 1, m2), /УК ответила, что дом .* не обслуживает/);
+  h.close();
+});
+
+// ---------------------------------------------------------------------
+// Заявление на почту УК
+// ---------------------------------------------------------------------
+
+/** Почтовый сервер на localhost: принимает письмо и запоминает его (без шифрования — только для тестов). */
+async function fakeSmtp(opts: { failAuth?: boolean } = {}) {
+  const { createServer } = await import('node:net');
+  const mails: { from: string; rcpt: string[]; data: string }[] = [];
+  const server = createServer((s) => {
+    let buf = '';
+    let inData = false;
+    let cur = { from: '', rcpt: [] as string[], data: '' };
+    s.write('220 test ESMTP\r\n');
+    // Клиент рвёт соединение после ошибки — на Windows это ECONNRESET у сервера.
+    s.on('error', () => undefined);
+    s.on('data', (chunk) => {
+      buf += chunk.toString('utf8');
+      let i: number;
+      while ((i = buf.indexOf('\r\n')) >= 0) {
+        const line = buf.slice(0, i);
+        buf = buf.slice(i + 2);
+        if (inData) {
+          if (line === '.') {
+            inData = false;
+            mails.push(cur);
+            cur = { from: '', rcpt: [], data: '' };
+            s.write('250 queued\r\n');
+          } else cur.data += line.replace(/^\.\./, '.') + '\n';
+          continue;
+        }
+        if (/^EHLO/.test(line)) s.write('250-test\r\n250 AUTH PLAIN\r\n');
+        else if (/^AUTH PLAIN/.test(line)) s.write(opts.failAuth ? '535 bad\r\n' : '235 ok\r\n');
+        else if (/^MAIL FROM/.test(line)) (cur.from = line), s.write('250 ok\r\n');
+        else if (/^RCPT TO/.test(line)) (cur.rcpt.push(line), s.write('250 ok\r\n'));
+        else if (line === 'DATA') (inData = true), s.write('354 go\r\n');
+        else if (line === 'QUIT') s.end('221 bye\r\n');
+        else s.write('500 ?\r\n');
+      }
+    });
+  });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+  // Упавший тест не должен держать процесс: сервер не мешает завершению.
+  server.unref();
+  const port = (server.address() as { port: number }).port;
+  return { port, mails, close: () => new Promise<void>((r) => server.close(() => r())) };
+}
+
+test('заявление на почту УК: бот отправляет PDF, житель в копии, дата отправки — дата подачи', async () => {
+  const smtp = await fakeSmtp();
+  const mail = { host: '127.0.0.1', port: smtp.port, user: 'bot@vernem.test', pass: 'secret', from: 'bot@vernem.test', fromName: 'Вернём' };
+  const h = new Harness({ start: START, config: { mail } });
+  await reportHotWater(h, 1);
+  const house = h.db.listUserHouses(1)[0];
+  h.db.setHouseInfo(house.id, { ukEmail: 'uk@example.ru' });
+  await finishWithClaim(h, 1);
+  await h.press(1, 'Отправить в УК на почту');
+  assert.match(h.last(1).text, /на почту УК \*\*uk@example\.ru\*\*/);
+  await h.text(1, 'не почта');
+  assert.match(h.last(1).text, /name@example\.ru/);
+  await h.text(1, 'Ivanov@Mail.ru');
+  assert.match(h.last(1).text, /Отправил заявление на uk@example\.ru в 22\.09 12:00, копия — на ivanov@mail\.ru/);
+
+  assert.equal(smtp.mails.length, 1);
+  const m = smtp.mails[0];
+  assert.deepEqual(m.rcpt, ['RCPT TO:<uk@example.ru>', 'RCPT TO:<ivanov@mail.ru>']);
+  assert.match(m.data, /^Reply-To: <ivanov@mail\.ru>$/m);
+  assert.match(m.data, /Subject: =\?UTF-8\?B\?/);
+  assert.match(m.data, /Content-Type: application\/pdf/);
+  // Вложение — настоящий PDF (base64 от «%PDF»), с ФИО, хотя данные не сохраняли.
+  assert.match(m.data, /^JVBERi/m);
+  const body = Buffer.from(m.data.split('Content-Transfer-Encoding: base64\n\n')[1].split('\n--')[0].replace(/\n/g, ''), 'base64').toString('utf8');
+  assert.match(body, /Прошу зарегистрировать обращение и сообщить входящий номер/);
+  assert.match(body, /Ответ прошу направить на ivanov@mail\.ru/);
+
+  const p = h.db.listUserParticipants(1)[0];
+  const cl = JSON.parse(h.db.getParticipant(p.id)!.claim!);
+  assert.equal(cl.submittedVia, 'email');
+  assert.equal(cl.emailedTo, 'uk@example.ru');
+  assert.ok(cl.submittedAt);
+  await smtp.close();
+  h.close();
+});
+
+test('заявление на почту: сервер отказал — житель получает понятную ошибку, подача не отмечается', async () => {
+  const smtp = await fakeSmtp({ failAuth: true });
+  const mail = { host: '127.0.0.1', port: smtp.port, user: 'bot@vernem.test', pass: 'bad', from: 'bot@vernem.test', fromName: 'Вернём' };
+  const h = new Harness({ start: START, config: { mail } });
+  await reportHotWater(h, 1);
+  h.db.setHouseInfo(h.db.listUserHouses(1)[0].id, { ukEmail: 'uk@example.ru' });
+  await finishWithClaim(h, 1);
+  await h.press(1, 'Отправить в УК на почту');
+  await h.press(1, 'Без моей почты');
+  assert.match(h.last(1).text, /Письмо не ушло/);
+  const cl = JSON.parse(h.db.getParticipant(h.db.listUserParticipants(1)[0].id)!.claim!);
+  assert.equal(cl.submittedAt, undefined);
+  // Без настроенной почты кнопки нет.
+  const h2 = new Harness({ start: START });
+  await reportHotWater(h2, 1);
+  h2.db.setHouseInfo(h2.db.listUserHouses(1)[0].id, { ukEmail: 'uk@example.ru' });
+  await finishWithClaim(h2, 1);
+  assert.ok(!h2.buttons(1).some((b) => b.text.includes('на почту')));
+  await smtp.close();
+  h.close();
+  h2.close();
+});

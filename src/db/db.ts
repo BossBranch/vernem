@@ -42,6 +42,8 @@ export type House = {
   /** Город (для домов первой версии — null). Дом ищется и сравнивается только внутри своего города. */
   city: string | null;
   city_norm: string | null;
+  /** Код ссылки-приглашения для УК: по ней сотрудник УК подключается к дому и получает заявки. */
+  dispatch_code?: string | null;
 };
 
 /**
@@ -97,6 +99,10 @@ export type Claim = {
   /** Когда житель подал заявление исполнителю и под каким входящим номером. */
   submittedAt?: string;
   incomingNumber?: string;
+  /** Заявление отправлено на почту УК через бота: куда и когда (дата отправки = дата подачи). */
+  submittedVia?: 'email';
+  emailedTo?: string;
+  emailedAt?: string;
   /** Кто принял заявку в аварийной службе — диспетчер обязан назвать себя (п. 106 Правил). */
   adsOperator?: string;
   /** Снимок расчёта и времени на момент выдачи: если изменился — заявление надо подать заново. */
@@ -131,7 +137,32 @@ export type Participant = {
 
 export type Reading = { id: number; participant_id: number; at: string; temp_c: number };
 
-export type ReminderKind = 'ask_restored' | 'ask_receipt' | 'ask_inspection';
+export type ReminderKind = 'ask_restored' | 'ask_receipt' | 'ask_inspection' | 'dispatch_timeout';
+
+/** Сотрудник УК или диспетчер, подключённый к дому по ссылке-приглашению: ему приходят заявки жителей. */
+export type Dispatcher = { id: number; house_id: number; user_id: number; title: string; created_at: string };
+
+/**
+ * Заявка, отправленная в УК через бота. Одна на отключение: соседи присоединяются к ней.
+ * timeout_at — УК не ответила вовремя; принять заявку она может и позже.
+ */
+export type DispatchStatus = 'sent' | 'accepted' | 'onsite' | 'fixed' | 'declined';
+export type Dispatch = {
+  id: number;
+  incident_id: number;
+  house_id: number;
+  sent_by: number;
+  sent_at: string;
+  status: DispatchStatus;
+  number: string | null;
+  accepted_at: string | null;
+  accepted_by: number | null;
+  accepted_title: string | null;
+  onsite_at: string | null;
+  fixed_at: string | null;
+  declined_at: string | null;
+  timeout_at: string | null;
+};
 export type Reminder = { id: number; kind: ReminderKind; participant_id: number; user_id: number; due_at: string; sent_at: string | null };
 
 /** Уведомление соседа о зафиксированном в доме отключении. */
@@ -257,6 +288,31 @@ CREATE TABLE IF NOT EXISTS chats (
 // Таблицы и индексы, которые появились после первой версии. Создаются после миграции колонок.
 const SCHEMA_V2 = `
 CREATE UNIQUE INDEX IF NOT EXISTS houses_code ON houses(code);
+CREATE UNIQUE INDEX IF NOT EXISTS houses_dispatch_code ON houses(dispatch_code);
+CREATE TABLE IF NOT EXISTS dispatchers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  house_id INTEGER NOT NULL REFERENCES houses(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL,
+  title TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  UNIQUE(house_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS dispatches (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  incident_id INTEGER NOT NULL UNIQUE REFERENCES incidents(id) ON DELETE CASCADE,
+  house_id INTEGER NOT NULL,
+  sent_by INTEGER NOT NULL,
+  sent_at TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'sent',
+  number TEXT,
+  accepted_at TEXT,
+  accepted_by INTEGER,
+  accepted_title TEXT,
+  onsite_at TEXT,
+  fixed_at TEXT,
+  declined_at TEXT,
+  timeout_at TEXT
+);
 CREATE INDEX IF NOT EXISTS users_house ON users(house_id);
 CREATE TABLE IF NOT EXISTS alerts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -329,6 +385,7 @@ const ADDED_COLUMNS: [table: string, column: string, ddl: string][] = [
   ['user_houses', 'flat', 'TEXT'],
   ['user_houses', 'account', 'TEXT'],
   ['participants', 'own_evidence', 'TEXT'],
+  ['houses', 'dispatch_code', 'TEXT'],
 ];
 
 /**
@@ -496,6 +553,7 @@ export class Db {
       // ФИО и квартира в чужих актах — тоже персональные данные этого жителя.
       this.db.prepare('DELETE FROM act_signers WHERE user_id = ?').run(userId);
       this.db.prepare('DELETE FROM alerts WHERE user_id = ?').run(userId);
+      this.db.prepare('DELETE FROM dispatchers WHERE user_id = ?').run(userId);
       this.db.prepare('DELETE FROM user_houses WHERE user_id = ?').run(userId);
       this.db.prepare('UPDATE houses SET chair_user_id = NULL WHERE chair_user_id = ?').run(userId);
       this.db.prepare('DELETE FROM events WHERE user_id = ?').run(userId);
@@ -648,6 +706,63 @@ export class Db {
 
   setHouseInfo(houseId: number, info: HouseInfo) {
     this.db.prepare('UPDATE houses SET info = ? WHERE id = ?').run(JSON.stringify(info), houseId);
+  }
+
+  // ---------- УК в боте: диспетчеры и заявки ----------
+
+  /** Код ссылки для УК: создаётся при первом запросе и дальше не меняется. */
+  dispatchCodeFor(houseId: number): string {
+    const house = this.getHouse(houseId)!;
+    if (house.dispatch_code) return house.dispatch_code;
+    const code = newCode();
+    this.db.prepare('UPDATE houses SET dispatch_code = ? WHERE id = ?').run(code, houseId);
+    return code;
+  }
+
+  getHouseByDispatchCode(code: string): House | undefined {
+    return this.db.prepare('SELECT * FROM houses WHERE dispatch_code = ?').get(code) as House | undefined;
+  }
+
+  addDispatcher(houseId: number, userId: number, title: string) {
+    this.db
+      .prepare('INSERT INTO dispatchers (house_id, user_id, title) VALUES (?, ?, ?) ON CONFLICT(house_id, user_id) DO UPDATE SET title = excluded.title')
+      .run(houseId, userId, title);
+  }
+
+  listDispatchers(houseId: number): Dispatcher[] {
+    return this.db.prepare('SELECT * FROM dispatchers WHERE house_id = ? ORDER BY id').all(houseId) as Dispatcher[];
+  }
+
+  getDispatcher(houseId: number, userId: number): Dispatcher | undefined {
+    return this.db.prepare('SELECT * FROM dispatchers WHERE house_id = ? AND user_id = ?').get(houseId, userId) as Dispatcher | undefined;
+  }
+
+  removeDispatcher(houseId: number, userId: number) {
+    this.db.prepare('DELETE FROM dispatchers WHERE house_id = ? AND user_id = ?').run(houseId, userId);
+  }
+
+  createDispatch(incidentId: number, houseId: number, sentBy: number, at: Date): Dispatch {
+    this.db.prepare('INSERT INTO dispatches (incident_id, house_id, sent_by, sent_at) VALUES (?, ?, ?, ?)').run(incidentId, houseId, sentBy, at.toISOString());
+    return this.dispatchFor(incidentId)!;
+  }
+
+  getDispatch(id: number): Dispatch | undefined {
+    return this.db.prepare('SELECT * FROM dispatches WHERE id = ?').get(id) as Dispatch | undefined;
+  }
+
+  dispatchFor(incidentId: number): Dispatch | undefined {
+    return this.db.prepare('SELECT * FROM dispatches WHERE incident_id = ?').get(incidentId) as Dispatch | undefined;
+  }
+
+  updateDispatch(id: number, fields: Partial<Omit<Dispatch, 'id' | 'incident_id' | 'house_id' | 'sent_by'>>) {
+    const keys = Object.keys(fields) as (keyof typeof fields)[];
+    if (!keys.length) return;
+    this.db.prepare(`UPDATE dispatches SET ${keys.map((k) => `${k} = ?`).join(', ')} WHERE id = ?`).run(...keys.map((k) => (fields[k] ?? null) as any), id);
+  }
+
+  /** Заявку отправляют заново (например, после «Не наш дом» её отправил другой житель) — старую запись убираем. */
+  deleteDispatch(id: number) {
+    this.db.prepare('DELETE FROM dispatches WHERE id = ?').run(id);
   }
 
   // ---------- отключения ----------

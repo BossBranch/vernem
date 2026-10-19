@@ -13,6 +13,7 @@ import { formatDate, formatShort } from '../calc/time.ts';
 import type { Btn } from './types.ts';
 import type { Draft, Vernem } from './core.ts';
 import { ICON, backRow, cb, clean, link } from './ui.ts';
+import { dispatcherNames, sendDispatchInvite } from './dispatch.ts';
 
 export function inviteLink(bot: Vernem, house: House): string {
   return `https://max.ru/${bot.cfg.botUsername}?start=h_${house.code}`;
@@ -238,10 +239,14 @@ export function showHouseCard(bot: Vernem, userId: number, houseId: number) {
       ...(info.length ? info : ['Данных о доме пока нет. Заполните их по квитанции — пригодятся всем соседям и попадут в заявления.']),
       '',
       `В сети дома: ${members(bot, h.id)} · уведомления ${h.notify ? 'вкл.' : 'выкл.'}`,
+      bot.db.listDispatchers(h.id).length
+        ? `🏢 Заявки в боте принимает УК: ${dispatcherNames(bot, h.id)}`
+        : '🏢 УК к боту не подключена — пригласите её, и заявки будут уходить ей прямо из бота.',
     ].join('\n'),
     buttons: [
       [bot.cfg.miniAppEnabled ? bot.appButton('✏️ Данные дома', `house_${h.id}`) : cb('✏️ Данные дома', `hs:info:${h.id}`), cb('📨 Позвать соседей', `hs:invite:${h.id}`)],
       [cb(h.notify ? '🔕 Без уведомлений' : '🔔 Уведомлять', `hs:notify:${h.id}`), cb('🚪 Подъезд', `hs:ent:${h.id}`)],
+      [cb('🏢 Пригласить УК в бот', `hs:uk:${h.id}`)],
       [cb('🗑 Убрать адрес', `hs:rm:${h.id}`), cb('⬅️ Мои адреса', 'house')],
     ],
   });
@@ -275,6 +280,8 @@ export async function onHouseButton(bot: Vernem, userId: number, action: string,
       return showAddresses(bot, userId);
     case 'info':
       return askInfo(bot, userId, h.id, 0);
+    case 'uk':
+      return sendDispatchInvite(bot, userId, h.id);
     case 'invite': {
       bot.db.track(userId, 'house_invite', { house: h.id });
       const url = inviteLink(bot, h);

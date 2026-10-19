@@ -51,6 +51,7 @@ async function main() {
     tmpDir: cfg.tmpDir,
     partnerName: cfg.partnerName,
     partnerUrl: cfg.partnerUrl,
+    mail: cfg.mail,
   });
 
   // ---------- HTTP ----------

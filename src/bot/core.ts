@@ -42,6 +42,21 @@ import { actButtons, inviteToAct, onActButton, onActLink, onActText, onInspectio
 import { askPhoto, onPhoto, onPhotoPick } from './photos.ts';
 import { onEscalate, showEscalation } from './escalate.ts';
 import {
+  canDispatch,
+  dispatchCase,
+  dispatcherNames,
+  dispatchLine,
+  onDispatchButton,
+  onDispatchEnd,
+  onDispatcherLeave,
+  onDispatcherLink,
+  onDispatcherTitle,
+  onDispatchNumber,
+  remindDispatch,
+  tellDispatchersRestored,
+} from './dispatch.ts';
+import { askEmailClaim, canEmailClaim, claimEmailTarget, finishEmail, onEmailReply, rememberClaimPdf } from './mail.ts';
+import {
   STATUS_TITLE,
   statusTitle,
   billsOf,
@@ -84,6 +99,8 @@ export type Draft = {
   temp?: number;
   evidence?: Evidence;
   number?: string | null;
+  /** Заявку отправляем в УК через бота (УК дома подключена). */
+  dispatch?: boolean;
 };
 
 const MAX_TEXT = 3900;
@@ -193,6 +210,7 @@ export class Vernem {
   remind(kind: ReminderKind, pid: number) {
     if (kind === 'ask_restored') return this.remindRestored(pid);
     if (kind === 'ask_receipt') return this.remindReceipt(pid);
+    if (kind === 'dispatch_timeout') return remindDispatch(this, pid);
     return remindInspection(this, pid);
   }
 
@@ -212,8 +230,9 @@ export class Vernem {
    */
   async reportFromApp(
     userId: number,
-    r: { houseId: number; service: ServiceKey; evidence: Evidence; number: string | null; startedAt: Date; temp?: number; corner?: boolean; variant?: string; planned?: boolean },
-  ): Promise<{ pid: number; outcome: 'new' | 'existing' | 'joined'; numberSaved?: boolean; neighbours?: number; readingSaved?: boolean; since?: string } | { error: string }> {
+    r: { houseId: number; service: ServiceKey; evidence: Evidence; number: string | null; startedAt: Date; temp?: number; corner?: boolean; variant?: string; planned?: boolean; dispatch?: boolean },
+  ): Promise<{ pid: number; outcome: 'new' | 'existing' | 'joined'; numberSaved?: boolean; neighbours?: number; readingSaved?: boolean; since?: string; dispatched?: boolean } | { error: string }> {
+    if (r.dispatch && !canDispatch(this, r.houseId)) return { error: 'УК этого дома ещё не подключена к боту — позвоните в аварийную службу' };
     const norm = this.norms.services[r.service];
     if (!this.db.getUserHouse(userId, r.houseId)) return { error: 'Этого адреса нет в вашем списке' };
     if (r.service === 'hot_water_off' && r.planned) return { error: 'За плановое летнее отключение снижения платы не положено: со счётчиком вы и так не платите за неизрасходованную воду.' };
@@ -263,18 +282,37 @@ export class Vernem {
         // Новый замер — в то же дело, временем «сейчас»: мерили только что.
         const readingSaved = norm.kind !== 'interruption' && r.temp !== undefined && mine.status === 'tracking';
         if (readingSaved) this.db.addReading(mine.id, this.now().toISOString(), r.temp!);
-        return { pid: mine.id, outcome: 'existing', numberSaved: keepNumber(mine, open), readingSaved, since: mine.started_at };
+        const dispatched = !!r.dispatch && !(await dispatchCase(this, userId, mine.id));
+        return { pid: mine.id, outcome: 'existing', numberSaved: keepNumber(mine, open), readingSaved, since: mine.started_at, dispatched };
       }
       await this.completeJoin(userId, open, norm.kind === 'interruption' ? null : r.temp!, !!r.corner);
       const joined = this.db.getParticipantFor(open.id, userId)!;
-      return { pid: joined.id, outcome: 'joined', numberSaved: keepNumber(joined, open) };
+      const dispatched = !!r.dispatch && !(await dispatchCase(this, userId, joined.id));
+      return { pid: joined.id, outcome: 'joined', numberSaved: keepNumber(joined, open), dispatched };
     }
+    // Заявка через бота: начало — момент отправки, как у звонка в аварийную (п. 111).
     await this.createIncident(
       userId,
-      { service: r.service, houseId: r.houseId, evidence: r.evidence, number: r.number, variant: r.variant, corner: r.corner, temp: r.temp, hwChecked: true },
-      r.startedAt,
+      {
+        service: r.service,
+        houseId: r.houseId,
+        evidence: r.dispatch ? 'self' : r.evidence,
+        number: r.dispatch ? null : r.number,
+        variant: r.variant,
+        corner: r.corner,
+        temp: r.temp,
+        hwChecked: true,
+        dispatch: r.dispatch,
+      },
+      r.dispatch ? this.now() : r.startedAt,
     );
-    return { pid: this.db.listUserParticipants(userId)[0].id, outcome: 'new', neighbours: Math.max(0, this.db.countHouseMembers(r.houseId) - 1) };
+    const pid = this.db.listUserParticipants(userId)[0].id;
+    return { pid, outcome: 'new', neighbours: Math.max(0, this.db.countHouseMembers(r.houseId) - 1), dispatched: !!r.dispatch && !!this.db.dispatchFor(loadCase(this.db, pid)!.incident.id) };
+  }
+
+  /** Заявка в УК из мини-приложения по уже открытому делу. */
+  dispatchFromApp(userId: number, pid: number): Promise<string | null> {
+    return dispatchCase(this, userId, pid);
   }
 
   /** Исправить время начала или окончания своего дела. Время у соседей не меняется. */
@@ -455,7 +493,7 @@ export class Vernem {
     const snap = claimSnapshot(this.db, this.norms, c, this.now());
     if (cl.issuedSnapshot && !snapshotChanged(cl.issuedSnapshot, snap, snapshotIgnore(cl))) return false;
     const changed = !!cl.issuedSnapshot;
-    const { submittedAt, incomingNumber, ...rest } = cl;
+    const { submittedAt, incomingNumber, submittedVia, emailedTo, emailedAt, ...rest } = cl;
     const next = changed ? { ...rest, createdAt: this.now().toISOString(), issuedSnapshot: snap } : { ...cl, issuedSnapshot: snap };
     this.db.updateParticipant(pid, { claim: JSON.stringify(next) });
     return changed;
@@ -483,6 +521,7 @@ export class Vernem {
     if (payload?.startsWith('j_')) return this.joinByCode(userId, payload.slice(2));
     if (payload?.startsWith('h_')) return joinHouseByCode(this, userId, payload.slice(2));
     if (payload?.startsWith('a_')) return onActLink(this, userId, payload.slice(2));
+    if (payload?.startsWith('d_')) return onDispatcherLink(this, userId, payload.slice(2));
     if (payload === 'demo' && this.cfg.demoMode) return this.askDemo(userId);
     return this.welcome(userId);
   }
@@ -528,6 +567,12 @@ export class Vernem {
       case 'await_act_fio':
       case 'await_act_flat':
         return onActText(this, userId, state, text, data);
+      case 'await_mail_reply':
+        return onEmailReply(this, userId, text, data);
+      case 'await_dispatcher_title':
+        return onDispatcherTitle(this, userId, text, data);
+      case 'await_dispatch_number':
+        return onDispatchNumber(this, userId, text, data);
       case 'await_photo':
         return this.send(userId, { text: 'Жду фото: прикрепите его к сообщению (скрепка → фото).', buttons: [[cb('⬅️ К случаю', `cs:${data.pid}`)]] });
       default:
@@ -706,6 +751,21 @@ export class Vernem {
         return this.askPhoto(userId, pid, (['evidence', 'receipt', 'act'].includes(b) ? b : 'evidence') as PhotoKind);
       case 'esc':
         return onEscalate(this, userId, pid, b);
+      case 'mail':
+        return askEmailClaim(this, userId, pid);
+      case 'mailgo':
+        return finishEmail(this, userId, pid, null);
+      case 'dsp':
+        return onDispatchButton(this, userId, pid, b);
+      case 'dsx':
+        return onDispatcherLeave(this, userId, pid);
+      case 'dspend':
+        return onDispatchEnd(this, userId, pid);
+      case 'dspsend': {
+        const err = await dispatchCase(this, userId, pid);
+        if (err) return this.send(userId, { text: err, buttons: [[cb('📋 К делу', `cs:${pid}`)]] });
+        return this.sendTracking(userId, pid, false, '📨 Отправил заявку в УК. Как только её примут — пришлю номер.');
+      }
       case 'escm':
         return showEscalation(this, userId, pid);
       case 'delme':
@@ -842,6 +902,8 @@ export class Vernem {
     if (head === 'fx') {
       if (value === 'called') return this.continueDraft(userId, { ...draft, evidence: 'ads' });
       if (value === 'fail') return this.askFallback(userId, draft);
+      // Заявка через бота: время начала — момент отправки, как у звонка в аварийную.
+      if (value === 'dsp') return this.createIncident(userId, { ...draft, evidence: 'self', number: null, dispatch: true }, this.now());
     }
     if (head === 'fb') {
       if (value === 'written') return this.continueDraft(userId, { ...draft, evidence: 'written' });
@@ -856,16 +918,17 @@ export class Vernem {
     const house = draft.houseId ? this.db.getHouse(draft.houseId) : undefined;
     const phone = house ? this.db.houseInfo(house).adsPhone : undefined;
     this.saveDraft(userId, 'draft', draft);
+    const uk = !!house && canDispatch(this, house.id);
     const lines = [
-      `📞 **Позвоните в аварийную службу**${phone ? `: ${phone}` : ' — телефон есть в квитанции'}.`,
+      uk ? `🏢 УК этого дома принимает заявки в боте (${dispatcherNames(this, house!.id)}). Отправьте заявку — номер придёт сюда.` : '',
+      uk ? `📞 Или позвоните в аварийную службу${phone ? `: ${phone}` : ''}.` : `📞 **Позвоните в аварийную службу**${phone ? `: ${phone}` : ' — телефон есть в квитанции'}.`,
       'Скажите адрес и что случилось. **Запишите номер заявки** и кто её принял — диспетчер обязан назвать себя (п. 106 ПП № 354). Номер — главное доказательство.',
     ];
     if (norm.kind !== 'interruption') lines.push('Попросите прийти и замерить — по правилам не позднее чем через 2 часа.');
     if (norm.executor_hint) lines.push(norm.executor_hint);
-    return this.send(userId, {
-      text: lines.join('\n'),
-      buttons: [[cb('📞 Позвонил — ввести номер', 'fx:called')], [cb('Не дозвонился', 'fx:fail')], [cb('📍 Другой адрес', 'addr'), cb('⬅️ Меню', 'menu')]],
-    });
+    const rows: Btn[][] = [[cb('📞 Позвонил — ввести номер', 'fx:called')], [cb('Не дозвонился', 'fx:fail')], [cb('📍 Другой адрес', 'addr'), cb('⬅️ Меню', 'menu')]];
+    if (uk) rows.unshift([cb('📨 Отправить заявку в УК', 'fx:dsp')]);
+    return this.send(userId, { text: lines.filter(Boolean).join('\n'), buttons: rows });
   }
 
   private askFallback(userId: number, draft: Draft) {
@@ -954,7 +1017,12 @@ export class Vernem {
     // Бот сам сообщает соседям: «У вас тоже?» — одна кнопка, и время начала у них уже есть.
     const n = await queueHouseAlerts(this, incident);
     const night = this.quietShift(this.now(), house.tz).getTime() > this.now().getTime();
-    return this.sendTracking(userId, p.id, true, n ? `📣 Сообщил ${n} ${plural(n, ['соседу', 'соседям', 'соседям'])}${night ? ' (утром в 08:00)' : ''}.` : undefined);
+    const sent = !!draft.dispatch && !(await dispatchCase(this, userId, p.id));
+    const extra = [
+      sent ? '📨 Отправил заявку в УК. Как только её примут — пришлю номер.' : '',
+      n ? `📣 Сообщил ${n} ${plural(n, ['соседу', 'соседям', 'соседям'])}${night ? ' (утром в 08:00)' : ''}.` : '',
+    ].filter(Boolean);
+    return this.sendTracking(userId, p.id, true, extra.length ? extra.join('\n') : undefined);
   }
 
   // =====================================================================
@@ -980,6 +1048,10 @@ export class Vernem {
     const rows: Btn[][] = [];
     const done = cb(norm.kind === 'interruption' ? `✅ ${this.restoredWord(c.incident.service_key)}` : '✅ Стало тепло', `rest:${c.p.id}:y`);
     rows.push(norm.kind !== 'interruption' ? [done, cb('🌡 Новый замер', `tmp:${c.p.id}`)] : [done]);
+    const d = this.db.dispatchFor(c.incident.id);
+    if (!c.incident.ads_number && !c.p.own_ads_number && !c.incident.demo && (!d || d.status === 'declined') && canDispatch(this, c.house.id)) {
+      rows.push([cb('📨 Отправить заявку в УК', `dspsend:${c.p.id}`)]);
+    }
     if ((c.p.role === 'neighbour' || c.incident.evidence === 'self') && !c.p.own_ads_number) rows.push([cb('✏️ Ввести свой номер заявки', `own:${c.p.id}`)]);
     rows.push([cb('👥 Позвать соседей', `nb:${c.p.id}`), cb('📷 Фото', `phadd:${c.p.id}:evidence`)]);
     rows.push(...actButtons(this, c));
@@ -1013,7 +1085,10 @@ export class Vernem {
       `${fresh ? '✅ **Записал.**' : '👀 **Слежу.**'} ${ICON[c.incident.service_key]} ${norm.title} · ${c.house.address} · с ${formatShort(new Date(c.p.started_at), tz)} · ${evidenceLine}`,
     ];
     if (readings.length) lines.push(`Последний замер: +${fmtNum(readings[readings.length - 1].temp_c, 1)} °C.`);
-    if (c.incident.evidence === 'self' && !c.p.own_ads_number && !this.db.getActByIncident(c.incident.id)) lines.push('Без номера заявки нужен акт с соседями — доказательство, что услуги не было.');
+    const dispatch = this.db.dispatchFor(c.incident.id);
+    if (dispatch) lines.push(dispatchLine(dispatch, tz));
+    const waiting = dispatch?.status === 'sent' && !dispatch.timeout_at;
+    if (c.incident.evidence === 'self' && !c.p.own_ads_number && !waiting && !this.db.getActByIncident(c.incident.id)) lines.push('Без номера заявки нужен акт с соседями — доказательство, что услуги не было.');
     if (extra) lines.push(extra);
     lines.push(`Каждые ${this.cfg.restoreCheckHours} ч спрошу, починили ли. Починят раньше — нажмите ✅.`);
     return this.send(userId, { text: lines.join('\n'), buttons: this.trackingButtons(c) });
@@ -1079,7 +1154,7 @@ export class Vernem {
     return this.setEnded(userId, c, r.date);
   }
 
-  private async setEnded(userId: number, c: CaseBundle, endedAt: Date) {
+  async setEnded(userId: number, c: CaseBundle, endedAt: Date) {
     if (endedAt.getTime() <= new Date(c.p.started_at).getTime()) {
       return this.send(userId, {
         text: `Время окончания должно быть позже начала (${formatShort(new Date(c.p.started_at), c.house.tz)}). Выберите другое время.`,
@@ -1093,14 +1168,15 @@ export class Vernem {
     this.db.setState(userId, 'idle');
     this.db.track(userId, 'restored', { service: c.incident.service_key });
 
+    let ukTold = false;
     if (!c.incident.ended_at) {
       this.db.closeIncident(c.incident.id, endedAt.toISOString());
       await this.notifyNeighboursClosed(c, endedAt);
+      ukTold = await tellDispatchersRestored(this, c.incident.id, endedAt);
     }
-
-    await this.send(userId, {
-      text: `✅ Записал: починили в ${formatShort(endedAt, c.house.tz)}.${c.incident.evidence === 'self' ? '' : ' Скажите об этом аварийной службе — так фиксируется конец (п. 112 ПП № 354).'}`,
-    });
+    const viaUk = ukTold || this.db.dispatchFor(c.incident.id)?.status === 'fixed';
+    const tail = viaUk ? ' УК об этом знает.' : c.incident.evidence === 'self' ? '' : ' Скажите об этом аварийной службе — так фиксируется конец (п. 112 ПП № 354).';
+    await this.send(userId, { text: `✅ Записал: починили в ${formatShort(endedAt, c.house.tz)}.${tail}` });
     return this.resumeCalculation(userId, c.p.id);
   }
 
@@ -1538,7 +1614,8 @@ export class Vernem {
     const fresh = loadCase(this.db, pid)!;
     const doc = claimDocFor(this.db, this.norms, fresh, this.now());
     // Текстом заявление не дублируем: PDF удобнее распечатать, отправить или переписать от руки.
-    await this.sendDocPdf(userId, doc, `📄 **Заявление готово**${doc.total ? ` — на ≈ ${fmtRub(doc.total)}` : ''}.`);
+    const pdfPath = await this.sendDocPdf(userId, doc, `📄 **Заявление готово**${doc.total ? ` — на ≈ ${fmtRub(doc.total)}` : ''}.`);
+    if (pdfPath) rememberClaimPdf(pid, pdfPath);
     this.db.track(userId, 'claim_created', { service: c.incident.service_key, sum: doc.total });
 
     if (!save) {
@@ -1552,6 +1629,9 @@ export class Vernem {
     const weak = c.incident.evidence === 'self' && !c.p.own_ads_number && act?.status !== 'signed';
     const lateNumber = c.incident.evidence === 'self' && !!c.p.own_ads_number && act?.status !== 'signed';
     const rows: Btn[][] = weak || lateNumber ? actButtons(this, fresh) : [];
+    // Почта УК есть в карточке дома — бот отправит заявление сам.
+    const mailTo = claimEmailTarget(this, loadCase(this.db, pid)!);
+    if (mailTo) rows.unshift([cb('📧 Отправить в УК на почту', `mail:${pid}`)]);
     rows.push([cb('👥 Позвать соседей', `nb:${pid}`), cb('⬅️ Меню', 'menu')]);
     return this.send(userId, {
       text: [
@@ -1567,12 +1647,14 @@ export class Vernem {
     });
   }
 
-  private sendPdf(userId: number, c: CaseBundle) {
-    return this.sendDocPdf(userId, claimDocFor(this.db, this.norms, c, this.now()), 'PDF для печати или отправки:');
+  private async sendPdf(userId: number, c: CaseBundle) {
+    const path = await this.sendDocPdf(userId, claimDocFor(this.db, this.norms, c, this.now()), 'PDF для печати или отправки:');
+    if (path) rememberClaimPdf(c.p.id, path);
+    return path;
   }
 
   /** Отправляет любой документ жителя PDF-файлом: заявление, акт, требование, жалобу. */
-  async sendDocPdf(userId: number, doc: ClaimDoc, caption: string) {
+  async sendDocPdf(userId: number, doc: ClaimDoc, caption: string): Promise<string | null> {
     const name = doc.fileName ?? 'Документ.pdf';
     try {
       const pdf = await claimToPdf(doc);
@@ -1580,9 +1662,11 @@ export class Vernem {
       const path = join(dir, name);
       writeFileSync(path, pdf);
       await this.send(userId, { text: caption, file: { path, name } });
+      return path;
     } catch (e) {
       console.error('[bot] не удалось отправить PDF', e);
       await this.safeSend(userId, { text: 'PDF сейчас не получилось отправить. Попробуйте ещё раз чуть позже.' });
+      return null;
     }
   }
 
@@ -1697,9 +1781,14 @@ export class Vernem {
     if (c.p.refund_amount) lines.push(`Вернули: ${fmtRub(c.p.refund_amount)}`);
     const photos = this.db.listPhotos(pid).length;
     if (photos) lines.push(`Фото к делу: ${photos}`);
+    const dispatch = this.db.dispatchFor(c.incident.id);
+    if (dispatch) lines.push(dispatchLine(dispatch, tz));
     const rows: Btn[][] = [];
     if (c.p.status === 'ended') rows.push([cb('▶️ Продолжить расчёт', `calc:${pid}`)]);
     if (c.p.status === 'claim_ready' || c.p.status === 'refused' || c.p.status === 'refunded') rows.push([cb('📄 Прислать заявление ещё раз', `doc:${pid}`)]);
+    const emailed = claimOf(c.p).emailedAt;
+    if (emailed) lines.push(`📧 Отправлено на почту УК ${formatShort(new Date(emailed), tz)}.`);
+    else if (canEmailClaim(this, c) && c.p.status === 'claim_ready') rows.push([cb('📧 Отправить в УК на почту', `mail:${pid}`)]);
     if (c.p.status === 'claim_ready') rows.push([cb('✅ Перерасчёт пришёл', `rc:${pid}:y`), cb('❌ Не сделали', `rc:${pid}:n`)]);
     if (c.p.status === 'refused') rows.push([cb('⚖️ Что делать дальше', `escm:${pid}`)]);
     rows.push(...actButtons(this, c));

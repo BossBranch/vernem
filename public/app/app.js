@@ -493,6 +493,8 @@
   function needActFirst(c) {
     var open = c.status === 'tracking' || c.status === 'ended' || c.status === 'claim_ready';
     if (!(open && c.evidence === 'self' && !(c.act && c.act.status === 'signed'))) return false;
+    // Заявка в УК ждёт ответа — номер, скорее всего, придёт сам: акт пока не главное.
+    if (c.dispatch && c.dispatch.status === 'sent' && !c.dispatch.timeout) return false;
     // Пока перерыв в пределах допустимого, денег нет — бегать за подписями рано: сначала «Воду дали?», акт — ниже.
     if (c.status === 'tracking') return c.months.some(function (m) { return m.percent > 0 || m.coldTariffHours >= 1; });
     return true;
@@ -701,6 +703,15 @@
           (h.members > 1 ? '' : '<p class="muted hint">Когда что-то отключат, я спрошу соседей «у вас тоже?» — вместе проще доказать.</p>') : '') +
         '</section>';
 
+      // УК в боте: кто принимает заявки дома, и приглашение для УК.
+      var uk = h.dispatchers || [];
+      html += '<section class="sheet"><h2>УК в боте</h2>' +
+        (uk.length
+          ? '<p>Заявки дома принимает: <b>' + esc(uk.map(function (d) { return d.title; }).join('; ')) + '</b>. Заявку можно отправить прямо из «Сообщить о проблеме» — номер придёт в дело.</p>'
+          : '<p class="muted">Пригласите УК: сотрудник откроет ссылку в MAX, и заявки жителей будут уходить ему прямо отсюда. Принять заявку — одна кнопка, номер сразу придёт в дело.</p>') +
+        '<button class="btn wide" id="ukInvite">' + icon('doc') + (uk.length ? 'Подключить ещё сотрудника УК' : 'Пригласить УК — скопировать сообщение') + '</button>' +
+        '<textarea readonly id="ukInviteText" rows="5" hidden aria-label="Сообщение для УК"></textarea></section>';
+
       html += '<section class="sheet"><h2>Данные дома <small>из квитанции</small></h2>' +
         '<p class="muted">Один раз на весь дом — попадут в ваши заявления и заявления соседей. Их видят и могут поправить все жители дома, поэтому сверяйте с квитанцией (или с <a href="' + GIS_HOUSES + '" data-ext>ГИС ЖКХ</a>).</p>' +
         // Главное — три поля; остальное свёрнуто, чтобы форма не пугала.
@@ -738,6 +749,22 @@
         var link = $('invite').value;
         // Буфер обмена недоступен (старый WebView) — показываем ссылку, чтобы скопировать вручную.
         (navigator.clipboard ? navigator.clipboard.writeText(link) : Promise.reject()).then(function () { toast('Ссылка скопирована — отправьте её соседям'); }, function () { $('invite').hidden = false; $('invite').select(); toast('Выделите и скопируйте ссылку'); });
+      };
+      $('ukInvite').onclick = function () {
+        var btn = $('ukInvite');
+        var done = busy(btn, 'Готовлю…');
+        api('POST', '/api/houses/' + h.id + '/uk-invite').then(function (r) {
+          track('app_uk_invite');
+          // Буфер обмена недоступен (старый WebView) — показываем текст, чтобы скопировать вручную.
+          return (navigator.clipboard ? navigator.clipboard.writeText(r.text) : Promise.reject()).then(function () {
+            toast('Сообщение скопировано — отправьте его в УК: в её чат в MAX, диспетчеру или на почту');
+          }, function () {
+            $('ukInviteText').value = r.text;
+            $('ukInviteText').hidden = false;
+            $('ukInviteText').select();
+            toast('Выделите и скопируйте сообщение для УК');
+          });
+        }).catch(function (e) { toast(e.message); }).then(done);
       };
       each('[data-power]', function (b) {
         b.onclick = function () {
@@ -817,7 +844,9 @@
         '<div id="adsBox">' + stepHead(3, '<span id="adsTitle">Позвоните в аварийную службу</span>') +
         '<section class="sheet"><p id="adsHint" class="muted"></p><a class="phone-btn" id="adsPhone" hidden></a>' +
         // Ничего не отмечено заранее: житель, который ещё не звонил, не должен видеть «Дозвонились».
-        '<p class="sub-h">Сначала позвоните. Потом отметьте, что получилось:</p><div class="opts">' +
+        '<p class="sub-h" id="evIntro">Сначала позвоните. Потом отметьте, что получилось:</p><div class="opts">' +
+        // УК дома подключена к боту — заявку можно отправить ей прямо отсюда, номер придёт в дело.
+        opt('dispatch', '<span id="evDispatchText">Отправить заявку в УК через бот — номер придёт в дело</span>') +
         opt('ads', '<span id="evAdsText">Дозвонились — есть номер заявки</span>') +
         opt('written', 'Написали в «Госуслуги Дом» — есть номер обращения') +
         opt('self', 'Номера нет (не дозвонились или не назвали) — докажу актом с соседями') +
@@ -841,8 +870,11 @@
         var ev = evidence();
         var wasHidden = $('whenBox').hidden;
         $('adsBox').hidden = planned;
-        $('whenBox').hidden = planned || !ev;
+        // Заявка через бота: время — момент отправки, спрашивать нечего (кроме замера температуры).
+        $('whenBox').hidden = planned || !ev || (ev === 'dispatch' && !$('temp'));
+        each('#startChips, #started, #startedHint', function (x) { x.hidden = ev === 'dispatch'; });
         $('submitBox').hidden = planned || !ev;
+        $('submit').textContent = ev === 'dispatch' ? 'Отправить заявку в УК' : 'Записать проблему';
         if (wasHidden && !$('whenBox').hidden && ev) setTimeout(function () { $('whenBox').scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }, 50);
       }
       function refreshEvidence() {
@@ -853,15 +885,17 @@
         if (!ev) return;
         // Сменили вариант — прежняя ошибка про номер больше не относится к делу.
         if ($('number').getAttribute('aria-invalid')) clearErrors();
-        $('numberBox').hidden = ev === 'self';
+        $('numberBox').hidden = ev === 'self' || ev === 'dispatch';
         each('.opt', function (o) { o.classList.toggle('on', o.getAttribute('data-ev') === ev); });
         var slot = root.querySelector('.opt[data-ev="' + ev + '"] .opt-slot');
-        if (slot && ev !== 'self') slot.appendChild($('numberBox'));
+        if (slot && ev !== 'self' && ev !== 'dispatch') slot.appendChild($('numberBox'));
         $('numberLabel').textContent = ev === 'written' || waste ? 'Номер обращения' : 'Номер заявки';
         // По закону нарушение считается с момента сообщения в аварийную службу — поэтому спрашиваем время звонка.
         if (ev === 'ads') {
           $('startedLabel').textContent = waste ? 'Когда позвонили оператору' : 'Когда позвонили в аварийную службу';
           $('startedHint').textContent = 'По закону нарушение считается с момента звонка — укажите время звонка.';
+        } else if (ev === 'dispatch') {
+          $('startedLabel').textContent = 'Замер температуры';
         } else if (ev === 'written') {
           $('startedLabel').textContent = 'Когда отправили обращение';
           $('startedHint').textContent = 'По закону нарушение считается с момента обращения.';
@@ -958,6 +992,14 @@
           : waste
           ? 'Телефон регионального оператора по вывозу мусора — в квитанции. Запишите номер обращения — это главное доказательство.'
           : (phone ? '' : 'Телефон аварийной службы есть в квитанции. ') + 'Скажите адрес и что случилось. Запишите номер заявки и кто её принял — диспетчер обязан назвать себя. Номер — главное доказательство.';
+        // УК в боте: вариант «Отправить заявку» — только если УК этого дома подключена.
+        var uk = h && h.dispatchers && h.dispatchers.length ? h.dispatchers : null;
+        var dOpt = root.querySelector('.opt[data-ev="dispatch"]');
+        dOpt.hidden = !uk || gas;
+        if (dOpt.hidden && evidence() === 'dispatch') root.querySelector('input[value=dispatch]').checked = false;
+        if (uk) $('evDispatchText').textContent = 'Отправить заявку в УК через бот (' + uk.map(function (d) { return d.title; }).join('; ') + ') — номер придёт в дело';
+        $('evIntro').textContent = uk && !gas ? 'Отправьте заявку в УК или позвоните. Потом отметьте, что получилось:' : 'Сначала позвоните. Потом отметьте, что получилось:';
+        if (uk && !gas && !waste) $('adsTitle').textContent = 'Отправьте заявку в УК или позвоните в аварийную службу';
         refreshEvidence();
       }
       each('#houses .chip[data-id]', function (b) { b.onclick = function () { st.houseId = Number(b.getAttribute('data-id')); refresh(); }; });
@@ -990,7 +1032,7 @@
           service: st.service,
           evidence: ev,
           number: $('number').value.trim() || null,
-          startedAt: $('started').value ? new Date($('started').value).toISOString() : null,
+          startedAt: ev === 'dispatch' ? new Date().toISOString() : $('started').value ? new Date($('started').value).toISOString() : null,
           temp: $('temp') ? $('temp').value.trim() : undefined,
           corner: $('corner') ? $('corner').value === '1' : false,
           // «Не знаю» и ответ из карточки дома — без варианта: сервер возьмёт ответ дома или строгий лимит 24 ч.
@@ -1000,7 +1042,7 @@
         // Все ошибки формы — сразу, а не по одной за нажатие.
         var errs = {};
         if (!body.startedAt) errs.started = 'Выберите время кнопкой выше или впишите своё';
-        if (ev !== 'self' && !body.number) errs.number = ev === 'written' ? 'Впишите номер обращения' : 'Впишите номер заявки или выберите «Номера нет»';
+        if (ev !== 'self' && ev !== 'dispatch' && !body.number) errs.number = ev === 'written' ? 'Впишите номер обращения' : 'Впишите номер заявки или выберите «Номера нет»';
         if ($('temp') && !body.temp) errs.temp = 'Впишите, сколько градусов показал термометр';
         if (Object.keys(errs).length) { showErrors({ message: 'Заполните отмеченные поля', fields: errs }); return; }
         // Больше месяца — чаще всего опечатка в дате. Не запрещаем, но переспрашиваем.
@@ -1016,6 +1058,7 @@
           // Честно говорим, что произошло: новое дело, уже записанное или присоединение к соседям.
           if (r.outcome === 'existing') toast(r.numberSaved ? 'Номер добавлен в ваше дело' + (r.readingSaved ? ', замер тоже' : '') + '. Время начала осталось прежним — чтобы считать со звонка, в деле нажмите «Исправить время».' : r.readingSaved ? 'Замер добавлен в ваше дело' : 'Это у вас уже записано — открыл дело');
           else if (r.outcome === 'joined') toast('Соседи уже сообщили об этом — вы присоединились к их делу.' + (r.numberSaved ? ' Ваш номер заявки сохранён.' : ''));
+          else if (r.dispatched) toast('Заявка ушла в УК. Как только её примут, номер появится в деле и придёт в чат.');
           else toast(!r.botConnected ? 'Записал.' : r.neighbours > 0 ? 'Записал. Спрошу соседей в сети: «у вас тоже?»' : 'Записал. Позовите соседей — вместе проще доказать.');
           // Без записи в истории: «назад» из дела ведёт на главную, а не обратно в форму.
           location.replace(location.pathname + location.search + '#case/' + r.caseId);
@@ -1054,6 +1097,8 @@
       c.savedPersonal = !!data.savedPersonal;
       c.contacts = data.houseContacts || {};
       c.botConnected = data.botConnected !== false;
+      // Почта УК, на которую бот отправит заявление сам (почтовый сервер настроен, почта есть в карточке дома).
+      c.mailTo = data.mailTo || null;
       c.signer = data.actSigner;
       var open = c.status === 'tracking' || c.status === 'ended' || c.status === 'claim_ready';
       var temp = c.kind !== 'interruption';
@@ -1079,12 +1124,15 @@
         html += '<div class="note"><div><p>Данные заявления изменились (плата, время, акт или получатель) — скачайте его заново и подайте новое. Отметку о подаче поставите снова.</p>' +
           '<div class="actions"><button class="btn" id="pdfOutdated">' + icon('doc') + 'Скачать новое заявление</button></div></div></div>';
       }
+      if (c.status === 'tracking') html += dispatchBlock(c);
       if (actFirst) html += actSection(c, true);
       if (c.status === 'refused') html += escalationSection(c);
       if (c.status === 'refunded') html += refundedSection(c);
       if (c.status === 'claim_ready') html += nextSteps(c, actFirst);
       if (c.status === 'tracking') {
-        html += endBlock(c, !actFirst);
+        // Блок заявки в УК уже «Сейчас» (ждём ответа или УК сообщила «устранено») — время окончания ниже, обычной карточкой.
+        var ukNow = c.dispatch && (c.dispatch.status === 'fixed' || (c.dispatch.status === 'sent' && !c.dispatch.timeout));
+        html += endBlock(c, !actFirst && !ukNow);
         if (temp) html += readingBlock(c);
       }
       // Заявление ещё не скачано: плата, сумма и форма — одним блоком, по порядку.
@@ -1173,7 +1221,10 @@
   /** «Воду дали? Отметьте время»: время кнопками и зелёная кнопка. now — это главное действие дела. */
   function endBlock(c, now) {
     var title = (END_ASK[c.service] || 'Починили?') + ' Отметьте время';
-    var hint = c.service === 'waste_off' ? 'Запишите, когда вывезли, — время попадёт в заявление.'
+    var ukOpen = c.dispatch && (c.dispatch.status === 'accepted' || c.dispatch.status === 'onsite');
+    var hint = c.dispatch && c.dispatch.status === 'fixed' ? 'Дали в другое время — отметьте его здесь.'
+      : ukOpen ? 'Когда УК отметит «Устранено», я спрошу вас здесь и в чате. Дали раньше — отметьте время сами, УК я сообщу.'
+      : c.service === 'waste_off' ? 'Запишите, когда вывезли, — время попадёт в заявление.'
       : c.evidence === 'ads' ? 'Позвоните в аварийную службу и скажите, что ' + endName(c).toLowerCase() + ', — так фиксируется время окончания.'
         : c.evidence === 'written' ? 'Допишите в обращение, когда починили.' : 'Запишите время — оно попадёт в заявление.';
     return '<section class="' + (now ? 'now' : 'sheet') + '">' + (now ? '<p class="kicker">Сейчас</p>' : '') + '<h2>' + esc(title) + '</h2>' +
@@ -1183,6 +1234,38 @@
       // Зелёная — только когда это главное действие; при «сначала акт» не перетягивает внимание с акта.
       '<div class="actions"><button class="btn big' + (now ? ' go' : '') + '" id="endBtn">' + icon('check') + esc(endName(c)) + '</button></div>' +
       '<p class="muted hint">' + hint + '</p></section>';
+  }
+
+  /** Заявка в УК через бота: статус, «УК сообщила: устранено» и кнопка отправки, если УК дома подключена. */
+  function dispatchBlock(c) {
+    var d = c.dispatch;
+    if (!d) {
+      return c.canDispatch
+        ? '<section class="sheet"><h2>УК принимает заявки в боте</h2><p class="muted">Отправьте заявку — номер и время регистрации придут в дело и попадут в заявление.</p>' +
+          '<div class="actions"><button class="btn" id="dspSend">' + icon('alert') + 'Отправить заявку в УК</button></div></section>'
+        : '';
+    }
+    if (d.status === 'declined') {
+      return warn('УК ответила, что не обслуживает этот дом. Позвоните в аварийную службу и впишите номер заявки' + (c.canDispatch ? ' — или отправьте заявку ещё раз.' : '.'),
+        c.canDispatch ? '<div class="actions"><button class="btn" id="dspSend">Отправить заявку ещё раз</button></div>' : '');
+    }
+    if (d.status === 'sent' && d.timeout) {
+      return warn('УК не ответила на заявку от ' + esc(when(d.sentAt, c.tz)) + '. Это записано и попадёт в заявление. Позвоните в аварийную службу — или подпишите акт с соседями.');
+    }
+    if (d.status === 'sent') {
+      return '<section class="now"><p class="kicker">Сейчас</p><h2>Заявка в УК отправлена</h2>' +
+        '<p>Отправлена ' + esc(when(d.sentAt, c.tz)) + '. Как только УК её примет, номер появится здесь и придёт в чат.</p>' +
+        '<p class="muted hint">УК не ответит за 30 минут — подскажу, что делать.</p></section>';
+    }
+    var lines = 'УК приняла заявку № ' + esc(d.number) + ' в ' + esc(when(d.acceptedAt, c.tz)) + (d.acceptedBy ? ' (' + esc(d.acceptedBy) + ')' : '') + '.' +
+      (d.onsiteAt ? ' Выехали ' + esc(when(d.onsiteAt, c.tz)) + '.' : '');
+    if (d.status === 'fixed') {
+      return '<section class="now tone-action"><p class="kicker">Сейчас</p><h2>УК сообщила: устранено в ' + esc(when(d.fixedAt, c.tz)) + '</h2>' +
+        '<p>' + lines + ' У вас тоже всё в порядке?</p>' +
+        '<div class="actions"><button class="btn big go" id="dspEnd">' + icon('check') + 'Да, ' + esc(endName(c).toLowerCase()) + ' в ' + esc(when(d.fixedAt, c.tz).slice(-5)) + '</button></div>' +
+        '<p class="muted hint">Ещё нет — отметьте время ниже, когда починят на самом деле.</p></section>';
+    }
+    return '<div class="note"><div><p>' + lines + ' Номер уже в деле и попадёт в заявление.</p></div></div>';
   }
 
   function readingBlock(c) {
@@ -1358,7 +1441,9 @@
     // Для номера заявки часы считаются со звонка, а не с отключения — так и подписываем, чтобы не путали.
     // Подпись короткая (длинная ломала колонку на узком экране), а с чего считаем — рядом со временем.
     var startLabel = se === 'ads' || se === 'written' ? 'Считаем с' : 'Началось';
-    var startFrom = se === 'ads' ? (c.service === 'waste_off' ? ' — звонок оператору' : ' — звонок в аварийную') : se === 'written' ? ' — обращение' : '';
+    // Номер пришёл по заявке через бота — считаем с отправки заявки, а не со звонка.
+    var viaUk = c.dispatch && c.dispatch.number && c.dispatch.number === c.adsNumber;
+    var startFrom = viaUk ? ' — заявка в УК' : se === 'ads' ? (c.service === 'waste_off' ? ' — звонок оператору' : ' — звонок в аварийную') : se === 'written' ? ' — обращение' : '';
     var startLocked = !!(c.act && c.act.status === 'signed');
     var editStartLabel = se === 'ads' ? (c.service === 'waste_off' ? 'Время звонка оператору' : 'Время звонка в аварийную') : se === 'written' ? 'Время обращения' : 'Когда началось';
     var endLabel = cap((END_WHEN[c.service] || 'Когда починили').replace(/^Когда /, ''));
@@ -1544,16 +1629,25 @@
       return nstep(1, (flats.length ? 'Скачайте новые ' : 'Скачайте новое ') + what, 'Данные изменились (плата, время, акт или получатель) — подайте новое заявление вместо прежнего. ' + text, '',
         '<div class="actions step-gap"><button class="btn primary" id="pdfOutdated">' + icon('doc') + 'Скачать новое заявление</button></div>');
     }
+    // Бот может отправить заявление на почту УК сам — это быстрее, чем нести лично.
+    var mail = '';
+    if (cl.emailedAt) mail = '<p class="done">✓ Отправлено на почту УК ' + esc(cl.emailedTo || '') + ' ' + esc(when(cl.emailedAt, c.tz)) + '</p>';
+    else if (c.mailTo) {
+      mail = '<div class="actions step-gap"><button class="btn primary" id="mailOpen">' + icon('doc') + 'Отправить в УК на почту</button></div>' +
+        '<div id="mailBox" hidden><p class="muted">Отправлю заявление на <b>' + esc(c.mailTo) + '</b> с просьбой сообщить входящий номер. Дата отправки станет датой подачи.</p>' +
+        '<label for="replyTo">Ваша почта для ответа УК — необязательно</label><input id="replyTo" type="email" inputmode="email" autocomplete="email" placeholder="name@example.ru">' +
+        '<div class="actions"><button class="btn primary" id="mailSend">Отправить</button></div></div>';
+    }
     // Кнопка обычная (не главная), чтобы не отвлекать от шага «Отметьте, когда подали», но сразу под заголовком.
     return nstep(1, 'Подайте ' + what, text, '',
-      '<div class="actions step-gap"><button class="btn" id="pdfTop">' + icon('doc') + (flats.length ? 'Скачать заявление: ' + own : 'Скачать заявление (PDF)') + '</button>' +
+      mail + '<div class="actions step-gap"><button class="btn" id="pdfTop">' + icon('doc') + (flats.length ? 'Скачать заявление: ' + own : 'Скачать заявление (PDF)') + '</button>' +
       flats.map(function (f, i) { return '<button class="btn" data-xf-pdf="' + i + '">' + icon('doc') + 'Скачать заявление: кв. ' + esc(f.flat) + '</button>'; }).join('') + '</div>');
   }
 
   function submittedForm(c) {
     var cl = c.claim || {};
     if (cl.submittedAt) {
-      return '<p class="done">✓ Подано ' + esc(day(cl.submittedAt, c.tz)) + (cl.incomingNumber ? ', вх. № ' + esc(cl.incomingNumber) : '') + ' <button class="linklike" id="subEdit">Изменить</button></p>' +
+      return '<p class="done">✓ Подано ' + esc(day(cl.submittedAt, c.tz)) + (cl.submittedVia === 'email' ? ' на почту УК' : '') + (cl.incomingNumber ? ', вх. № ' + esc(cl.incomingNumber) : '') + ' <button class="linklike" id="subEdit">Изменить</button></p>' +
         '<div id="subBox" hidden>' + submittedFields(cl, c) + '</div>';
     }
     return submittedFields(cl, c);
@@ -1837,6 +1931,40 @@
         toast(r.case && r.case.status === 'closed' ? 'Записал. Это было в пределах допустимого — денег не положено' : 'Записал — посчитал, сколько положено');
         renderCase(c.id);
       }).catch(function (e) { showErrors(e.fields ? e : fieldErr('ended', e.message)); done(); });
+    };
+
+    if ($('mailOpen')) $('mailOpen').onclick = function () { $('mailBox').hidden = false; $('mailOpen').hidden = true; $('replyTo').focus(); };
+    var mailSend = $('mailSend');
+    if (mailSend) mailSend.onclick = function () {
+      var reply = $('replyTo').value.trim();
+      if (reply && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(reply)) { showErrors(fieldErr('replyTo', 'Почта в виде name@example.ru')); return; }
+      var done = busy(mailSend, 'Отправляю…');
+      api('POST', '/api/cases/' + c.id + '/email', { replyTo: reply || undefined }).then(function () {
+        haptic('success');
+        track('app_claim_email');
+        toast('Отправил заявление на почту УК. Дата подачи записана.');
+        renderCase(c.id);
+      }).catch(function (e) { if (e.fields) showErrors(e); else toast(e.message); done(); });
+    };
+    var dspSend = $('dspSend');
+    if (dspSend) dspSend.onclick = function () {
+      var done = busy(dspSend, 'Отправляю…');
+      api('POST', '/api/cases/' + c.id + '/dispatch').then(function () {
+        haptic('success');
+        track('app_dispatch');
+        toast('Заявка ушла в УК. Как только её примут, номер появится в деле.');
+        renderCase(c.id);
+      }).catch(function (e) { toast(e.message); done(); });
+    };
+    var dspEnd = $('dspEnd');
+    if (dspEnd) dspEnd.onclick = function () {
+      var done = busy(dspEnd, 'Считаю…');
+      api('POST', '/api/cases/' + c.id + '/end', { endedAt: c.dispatch.fixedAt }).then(function () {
+        haptic('success');
+        track('app_end');
+        toast('Записал — посчитал, сколько положено');
+        renderCase(c.id);
+      }).catch(function (e) { toast(e.message); done(); });
     };
 
     var readingBtn = $('addReading');

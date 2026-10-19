@@ -9,7 +9,7 @@ import type { Norms, ServiceNorm } from '../calc/norms.ts';
 import { allowedMonthlyHours } from '../calc/norms.ts';
 import { fmtNum, fmtPercent, fmtRub, fmtTemp } from '../calc/format.ts';
 import { formatDate, formatDateTime, formatDuration, hoursBetween, monthPrepositional, monthTitle, toMinute } from '../calc/time.ts';
-import type { Act, ActSigner, Claim, House, Incident, Participant, Photo, Reading } from '../db/db.ts';
+import type { Act, ActSigner, Claim, Dispatch, House, Incident, Participant, Photo, Reading } from '../db/db.ts';
 
 /**
  * Документ для жителя. Та же структура используется для заявления, акта, требования о штрафе
@@ -98,6 +98,8 @@ export type ClaimInput = {
   now: Date;
   photos?: Photo[];
   act?: { act: Act; signers: ActSigner[] } | null;
+  /** Заявка, отправленная в УК через бота (УК подключила сотрудника к дому). */
+  dispatch?: Dispatch | null;
 };
 
 /** Строки о подписанном акте и проверке исполнителя — общие для заявления, требования и жалобы. */
@@ -133,8 +135,10 @@ export function evidenceExtras(input: Pick<ClaimInput, 'participant' | 'act' | '
  * кто принял сообщение. Время регистрации пишем, только если оно известно: для номера первого жителя
  * это начало отключения (п. 111 Правил). Время звонка соседа не спрашивали — не выдумываем.
  */
-export function adsFacts(input: Pick<ClaimInput, 'incident' | 'house' | 'participant' | 'claim' | 'act'>, serviceName: string): string[] {
+export function adsFacts(input: Pick<ClaimInput, 'incident' | 'house' | 'participant' | 'claim' | 'act' | 'dispatch'>, serviceName: string): string[] {
   const { incident, house, participant: p, claim } = input;
+  const dispatched = dispatchFacts(input, serviceName);
+  if (dispatched) return dispatched;
   const regTime = formatDateTime(new Date(incident.started_at), house.tz);
   const adsNumber = p.own_ads_number || incident.ads_number;
   // Сосед мог дозвониться сам, даже если первый житель сообщил без номера.
@@ -176,6 +180,40 @@ export function adsFacts(input: Pick<ClaimInput, 'incident' | 'house' | 'partici
     '.';
   if (input.act?.act.status === 'signed') return [`${failed} Время начала нарушения указано в акте.`];
   return [`${failed} Время начала и окончания нарушения указаны потребителем.`];
+}
+
+/**
+ * Заявка ушла в УК через бота. Принята — номер и время регистрации, кто принял.
+ * Не ответили — это тоже факт: сообщение отправлено, а номер не сообщён (п. 106).
+ * null — заявки не было или житель потом получил свой номер (тогда работает обычный абзац).
+ */
+function dispatchFacts(input: Pick<ClaimInput, 'incident' | 'house' | 'participant' | 'claim' | 'act' | 'dispatch'>, serviceName: string): string[] | null {
+  const { incident, house, participant: p, dispatch: d } = input;
+  if (!d || d.status === 'declined' || p.own_ads_number) return null;
+  const waste = incident.service_key === 'waste_off';
+  const channel = `${waste ? 'региональному оператору' : 'исполнителю'} через подключённый им канал приёма заявок в мессенджере MAX`;
+  const sent = formatDateTime(new Date(d.sent_at), house.tz);
+  const what = `о нарушении предоставления коммунальной услуги «${serviceName}»`;
+  if (d.number && d.accepted_at && incident.ads_number === d.number) {
+    const reg = formatDateTime(new Date(d.accepted_at), house.tz);
+    const who = d.accepted_title ? `, сообщение принял(а) ${d.accepted_title}` : '';
+    if (p.role === 'neighbour') {
+      return [`О том же нарушении другой житель дома сообщил ${channel}: сообщение отправлено ${sent}, зарегистрировано под № ${d.number}, время регистрации — ${reg}${who} (п. 105–106 Правил).`];
+    }
+    // Сообщили позже начала (сначала записали без номера) — начало подтверждают акт или запись потребителя.
+    const late = new Date(d.sent_at).getTime() - new Date(p.started_at).getTime() > 10 * 60_000;
+    const tail = late
+      ? input.act?.act.status === 'signed'
+        ? ' Нарушение началось раньше: время начала указано в акте.'
+        : ' Нарушение началось раньше: время начала указано потребителем.'
+      : ' С этого времени исчисляется период нарушения (п. 111 Правил).';
+    return [`Я сообщил(а) ${what} ${channel} (п. 105 Правил): сообщение отправлено ${sent}, зарегистрировано под № ${d.number}, время регистрации — ${reg}${who} (п. 106 Правил).${tail}`];
+  }
+  if (d.status === 'sent' && d.timeout_at && incident.evidence === 'self') {
+    const base = `Сообщение ${what} направлено ${channel} ${sent}, однако зарегистрировано не было: номер и время регистрации потребителю не сообщены, хотя исполнитель обязан их сообщить (п. 106 Правил).`;
+    return [`${base} ${input.act?.act.status === 'signed' ? 'Время начала нарушения указано в акте.' : 'Время начала и окончания нарушения указаны потребителем.'}`];
+  }
+  return null;
 }
 
 export function buildClaim(input: ClaimInput): ClaimDoc {
