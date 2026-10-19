@@ -66,8 +66,11 @@ async function handleLine(line: string): Promise<void> {
   }
   if (line.startsWith(':user')) {
     user = Number(line.split(/\s+/)[1]) || 1;
-    lastButtons = [];
-    console.log(`(теперь пишет житель ${user})`);
+    // Кнопки, которые этому пользователю уже пришли (например, карточка заявки для УК), — сразу можно нажать.
+    const last = [...h.out.log].reverse().find((r) => r.to === 'user' && r.id === user && r.msg.buttons?.length);
+    lastButtons = last ? last.msg.buttons!.flat() : [];
+    console.log(`(теперь пишет пользователь ${user})`);
+    lastButtons.forEach((b, i) => console.log(`  \x1b[32m[${i + 1}]\x1b[0m ${b.text}`));
     return;
   }
   if (line === ':photo') {
