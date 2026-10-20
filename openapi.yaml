@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: «Вернём» — REST мини-приложения
-  version: 1.3.1
+  version: 1.4.0
   license:
     name: MIT
   description: |
@@ -47,7 +47,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Health' }
-              example: { ok: true, db: ok, bot: running (webhook), version: 1.3.1 }
+              example: { ok: true, db: ok, bot: running (webhook), version: 1.4.0 }
         '503':
           description: База недоступна
           content:
@@ -210,13 +210,26 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '503': { $ref: '#/components/responses/Unavailable' }
 
+  /api/houses/{id}/dispatchers/{did}:
+    parameters:
+      - $ref: '#/components/parameters/HouseId'
+      - { name: did, in: path, required: true, schema: { type: integer }, description: 'id из House.dispatchers' }
+    delete:
+      tags: [Дома]
+      summary: Житель отключает сотрудника УК от приёма заявок своего дома («Это не наша УК»)
+      responses:
+        '200': { $ref: '#/components/responses/HouseResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
   /api/houses/{id}/info:
     parameters:
       - $ref: '#/components/parameters/HouseId'
     put:
       tags: [Дома]
       summary: Юридические данные дома из квитанции (общие для всех жителей дома)
-      description: Поле с ошибкой не сохраняется (остаётся прежнее значение), остальные сохраняются; тогда ответ 400 с `fields`.
+      description: 'Поле с ошибкой не сохраняется (остаётся прежнее значение), остальные сохраняются; тогда ответ 400 с `fields`. Изменения уже заполненных полей записываются (кто, когда, что было) и приходят соседям в чат. Карточку демо-дома менять нельзя — 403.'
       requestBody:
         required: true
         content:
@@ -227,6 +240,7 @@ paths:
         '200': { $ref: '#/components/responses/HouseResponse' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { description: Демо-дом не меняется }
         '404': { $ref: '#/components/responses/NotFound' }
 
   /api/report:
@@ -248,8 +262,9 @@ paths:
                 startedAt: { type: string, format: date-time, description: 'Не в будущем и не раньше года назад; по умолчанию — сейчас' }
                 temp: { type: number, description: Замер температуры для heating_temp и hot_water_temp }
                 corner: { type: boolean, description: Угловая квартира (норма отопления выше) }
-                variant: { type: string, enum: [two_sources, one_source], description: 'Свет: два источника питания (лифт, больше 9 этажей) — лимит перерыва 2 ч' }
-                planned: { type: boolean, description: Плановое отключение }
+                variant: { type: string, enum: [two_sources, one_source], description: 'Свет: два независимых ввода электричества (по техпаспорту дома) — лимит перерыва 2 ч' }
+                planned: { type: boolean, description: Плановое отключение горячей воды }
+                plannedUntil: { type: string, format: date-time, description: 'До какого времени объявили плановое отключение. Обязательно при planned; срок не прошёл — 422; startedAt не раньше этого времени' }
             example: { service: hot_water_off, houseId: 1, evidence: ads, number: '4512', startedAt: '2026-09-25T09:00:00+03:00' }
       responses:
         '200':
@@ -312,6 +327,7 @@ paths:
                   savedPersonal: { type: boolean }
                   botConnected: { type: boolean }
                   mailTo: { type: string, nullable: true, description: 'Почта УК, на которую бот может отправить заявление сам' }
+                  mailNote: { type: string, nullable: true, description: 'Предупреждение: почту УК недавно изменил другой житель' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
     delete:
@@ -960,6 +976,8 @@ components:
         id: { type: integer }
         address: { type: string }
         city: { type: string, nullable: true }
+        tz: { type: string, example: Europe/Moscow, description: 'Часовой пояс дома: время в формах — по нему' }
+        demo: { type: boolean }
         entrance: { type: string, nullable: true }
         flat: { type: string, nullable: true }
         account: { type: string, nullable: true }
@@ -969,11 +987,13 @@ components:
         inviteLink: { type: string, nullable: true, description: 'https://max.ru/<бот>?start=h_…' }
         dispatchers:
           type: array
-          description: Сотрудники УК, подключённые к дому в боте
+          description: 'Сотрудники УК, подключённые к дому в боте. Без действий 90 дней подключение заканчивается само'
           items:
             type: object
             properties:
+              id: { type: integer }
               title: { type: string, example: 'Иванова А. П., диспетчер ООО «УК Пример»' }
+              since: { type: string, format: date-time }
     HouseInfo:
       type: object
       description: Данные из квитанции; заполняют жители, видно, кто и когда обновил
@@ -989,9 +1009,19 @@ components:
         rsoGas: { type: string, maxLength: 150 }
         rop: { type: string, maxLength: 150 }
         gji: { type: string, maxLength: 200 }
-        twoPowerSources: { type: boolean, nullable: true, description: 'Лифт или больше 9 этажей — лимит перерыва света 2 ч' }
+        twoPowerSources: { type: boolean, nullable: true, description: 'Два независимых ввода электричества — лимит перерыва света 2 ч' }
         updatedAt: { type: string, format: date-time, readOnly: true }
-        updatedBy: { type: integer, readOnly: true }
+        updatedByMe: { type: boolean, readOnly: true }
+        changes:
+          type: object
+          readOnly: true
+          description: 'Последнее изменение каждого поля: когда, что было, изменили ли вы'
+          additionalProperties:
+            type: object
+            properties:
+              at: { type: string, format: date-time }
+              prev: { type: string, nullable: true }
+              mine: { type: boolean }
     CaseSummary:
       type: object
       description: 'Дело жителя: факты, расчёт, статус заявления и акта. Полный тип — CaseSummary в src/services/cases.ts'
@@ -1009,6 +1039,7 @@ components:
         evidence: { type: string, enum: [ads, written, self] }
         adsNumber: { type: string, nullable: true }
         demo: { type: boolean, description: Демо-дело (помечено в интерфейсе и документах) }
+        plannedUntil: { type: string, format: date-time, nullable: true, description: 'Плановое отключение: до какого времени объявили работы' }
         months:
           type: array
           items:
@@ -1018,6 +1049,7 @@ components:
               percent: { type: number, description: 'Снижение платы за месяц, %' }
               lines: { type: array, items: { type: string }, description: 'Формула: факт, норма, процент' }
               bill: { type: number, nullable: true }
+              unmeasuredHours: { type: number, description: 'Часы без свежего замера температуры (замер в силе 24 ч) — не учтены' }
         basis: { type: string, description: Пункт закона, по которому считали }
         basisUrl: { type: string }
         estimate: { type: number, description: 'Положено вернуть, ₽ (оценка снизу)' }

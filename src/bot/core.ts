@@ -8,13 +8,13 @@
 //   photos.ts   — фото к делу;
 //   escalate.ts — требование о штрафе 50%, жалоба в ГЖИ, общество защиты прав потребителей.
 
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Db, Evidence, ExecutorType, Incident, Participant, PhotoKind, ReminderKind } from '../db/db.ts';
 import type { HeatingTempNorm, HotWaterTempNorm, Norms, ServiceKey } from '../calc/norms.ts';
 import { SERVICE_ORDER } from '../calc/norms.ts';
 import { fmtNum, fmtPercent, fmtRub, parseRubles, parseTemperature, plural } from '../calc/format.ts';
-import { formatDuration, formatShort, hoursBetween, localParts, fromLocal, monthTitle, parseLocalInput, MS_HOUR, monthKey, monthGenitive, toMinute } from '../calc/time.ts';
+import { formatDate, formatDuration, formatShort, hoursBetween, localParts, fromLocal, monthTitle, parseLocalInput, MS_HOUR, monthKey, monthGenitive, toMinute } from '../calc/time.ts';
 import { claimToPdf } from '../docs/pdf.ts';
 import { refundAmount } from '../calc/engine.ts';
 import { claimToText } from '../docs/claim.ts';
@@ -46,7 +46,9 @@ import {
   dispatchCase,
   dispatcherNames,
   dispatchLine,
+  expireDispatchers,
   onDispatchButton,
+  onDispatcherRemove,
   onDispatchEnd,
   onDispatcherLeave,
   onDispatcherLink,
@@ -55,7 +57,7 @@ import {
   remindDispatch,
   tellDispatchersRestored,
 } from './dispatch.ts';
-import { askEmailClaim, canEmailClaim, claimEmailTarget, finishEmail, onEmailReply, rememberClaimPdf } from './mail.ts';
+import { askEmailClaim, canEmailClaim, claimEmailTarget, finishEmail, forgetClaimPdfs, onEmailReply, rememberClaimPdf } from './mail.ts';
 import {
   STATUS_TITLE,
   statusTitle,
@@ -102,7 +104,12 @@ export type Draft = {
   number?: string | null;
   /** Заявку отправляем в УК через бота (УК дома подключена). */
   dispatch?: boolean;
+  /** Плановое отключение горячей воды: до какого времени объявили работы (ISO). Перерыв — после этого срока. */
+  plannedUntil?: string;
 };
+
+/** Сколько ждём отметку о подаче после выдачи заявления, прежде чем спросить. */
+const SUBMIT_CHECK_DAYS = 3;
 
 const MAX_TEXT = 3900;
 
@@ -210,6 +217,7 @@ export class Vernem {
   /** Вызывается планировщиком для каждого наступившего напоминания. */
   remind(kind: ReminderKind, pid: number) {
     if (kind === 'ask_restored') return this.remindRestored(pid);
+    if (kind === 'ask_submitted') return this.remindSubmitted(pid);
     if (kind === 'ask_receipt') return this.remindReceipt(pid);
     if (kind === 'dispatch_timeout') return remindDispatch(this, pid);
     return remindInspection(this, pid);
@@ -218,6 +226,17 @@ export class Vernem {
   /** Отправляет наступившие уведомления соседям (ночные уходят в 08:00). */
   flushAlerts() {
     return flushAlerts(this);
+  }
+
+  /** Отключает сотрудников УК, которые давно ничего не делали с заявками (вызывает планировщик раз в час). */
+  expireDispatchers() {
+    return expireDispatchers(this);
+  }
+
+  /** Удаление всех данных жителя (/delete_me и «Удалить мои данные» в приложении). */
+  deleteUser(userId: number) {
+    forgetClaimPdfs(this.db.listUserParticipants(userId).map((p) => p.id));
+    this.db.deleteUserData(userId);
   }
 
   // =====================================================================
@@ -231,12 +250,37 @@ export class Vernem {
    */
   async reportFromApp(
     userId: number,
-    r: { houseId: number; service: ServiceKey; evidence: Evidence; number: string | null; startedAt: Date; temp?: number; corner?: boolean; variant?: string; planned?: boolean; dispatch?: boolean },
-  ): Promise<{ pid: number; outcome: 'new' | 'existing' | 'joined'; numberSaved?: boolean; neighbours?: number; readingSaved?: boolean; since?: string; dispatched?: boolean } | { error: string }> {
+    r: {
+      houseId: number;
+      service: ServiceKey;
+      evidence: Evidence;
+      number: string | null;
+      startedAt: Date;
+      temp?: number;
+      corner?: boolean;
+      variant?: string;
+      planned?: boolean;
+      plannedUntil?: Date | null;
+      dispatch?: boolean;
+    },
+  ): Promise<{ pid: number; outcome: 'new' | 'existing' | 'joined'; numberSaved?: boolean; neighbours?: number; readingSaved?: boolean; since?: string; dispatched?: boolean } | { error: string; field?: string }> {
     if (r.dispatch && !canDispatch(this, r.houseId)) return { error: 'УК этого дома ещё не подключена к боту — позвоните в аварийную службу' };
     const norm = this.norms.services[r.service];
-    if (!this.db.getUserHouse(userId, r.houseId)) return { error: 'Этого адреса нет в вашем списке' };
-    if (r.service === 'hot_water_off' && r.planned) return { error: 'За плановое летнее отключение снижения платы не положено: со счётчиком вы и так не платите за неизрасходованную воду.' };
+    const uh = this.db.getUserHouse(userId, r.houseId);
+    if (!uh) return { error: 'Этого адреса нет в вашем списке' };
+    if (uh.demo) return { error: 'Это демо-адрес: настоящее дело на нём не создаётся. Выберите свой адрес' };
+    // Плановое отключение в объявленный срок плату не снижает; не дали воду в срок — перерыв считается со срока окончания работ.
+    let plannedUntil: Date | null = null;
+    if (r.service === 'hot_water_off' && r.planned) {
+      if (!r.plannedUntil || Number.isNaN(r.plannedUntil.getTime())) return { error: 'Укажите, до какого времени объявили отключение', field: 'plannedUntil' };
+      plannedUntil = r.plannedUntil;
+      if (plannedUntil.getTime() > this.now().getTime()) {
+        return { error: `Отключение объявлено до ${formatShort(plannedUntil, uh.tz)}. Пока срок не прошёл, снижения платы нет. Не дадут воду в срок — сообщите снова.`, field: 'plannedUntil' };
+      }
+      if (!r.dispatch && r.startedAt.getTime() < plannedUntil.getTime() - 60_000) {
+        return { error: `До ${formatShort(plannedUntil, uh.tz)} шли объявленные работы — укажите время не раньше`, field: 'started' };
+      }
+    }
     if (norm.kind !== 'interruption') {
       if (r.temp === undefined) return { error: 'Укажите температуру' };
       const threshold =
@@ -304,6 +348,7 @@ export class Vernem {
         temp: r.temp,
         hwChecked: true,
         dispatch: r.dispatch,
+        plannedUntil: plannedUntil?.toISOString(),
       },
       r.dispatch ? this.now() : r.startedAt,
     );
@@ -429,8 +474,10 @@ export class Vernem {
       this.db.updateParticipant(pid, { status: 'claim_ready', refund_amount: null });
       return null;
     }
-    // И «сделали», и «не сделали» видно только в квитанции за следующий месяц после подачи.
     const cl = claimOf(c.p);
+    // «Не сделали» ведёт к требованию и жалобе — в них нужна дата подачи; без подачи сроки не идут.
+    if (action === 'no' && !cl.submittedAt) return 'Сначала отметьте, когда подали заявление: от этой даты считаются сроки, и она попадёт в требование';
+    // И «сделали», и «не сделали» видно только в квитанции за следующий месяц после подачи.
     const since = new Date(cl.submittedAt ?? cl.createdAt ?? this.now().toISOString());
     const [y, m] = monthKey(since, c.house.tz).split('-').map(Number);
     const next = `${m === 12 ? y + 1 : y}-${String(m === 12 ? 1 : m + 1).padStart(2, '0')}`;
@@ -497,10 +544,15 @@ export class Vernem {
     const { submittedAt, incomingNumber, submittedVia, emailedTo, emailedAt, ...rest } = cl;
     const next = changed ? { ...rest, createdAt: this.now().toISOString(), issuedSnapshot: snap } : { ...cl, issuedSnapshot: snap };
     this.db.updateParticipant(pid, { claim: JSON.stringify(next) });
+    // Новое заявление ещё не подано: квитанцию по старому не ждём, спросим о подаче нового.
+    if (changed && c.p.status === 'claim_ready') {
+      this.db.cancelReminders(pid, 'ask_receipt');
+      if (!c.incident.demo) this.scheduleSubmittedCheck(pid, c.p.user_id, c.house.tz);
+    }
     return changed;
   }
 
-  /** Житель скачал заявление в приложении — значит, оно готово: через месяц спросим про квитанцию. */
+  /** Житель скачал заявление в приложении — значит, оно готово. Сроки пойдут, когда он отметит подачу. */
   markClaimIssued(pid: number) {
     const c = loadCase(this.db, pid);
     if (!c || c.p.status !== 'ended') return;
@@ -509,7 +561,29 @@ export class Vernem {
       claim: JSON.stringify({ ...claimOf(c.p), createdAt: claimOf(c.p).createdAt ?? this.now().toISOString(), issuedSnapshot: claimSnapshot(this.db, this.norms, c, this.now()) }),
     });
     this.db.track(c.p.user_id, 'claim_created', { service: c.incident.service_key, via: 'app' });
-    const due = this.cfg.fastReminders ? new Date(this.now().getTime() + 3 * 60_000) : this.quietShift(new Date(this.now().getTime() + this.cfg.receiptCheckDays * 24 * MS_HOUR), c.house.tz);
+    if (!claimOf(c.p).submittedAt && !c.incident.demo) this.scheduleSubmittedCheck(pid, c.p.user_id, c.house.tz);
+  }
+
+  /** Через несколько дней после выдачи спросим, подали ли заявление: без подачи квитанцию проверять рано. */
+  scheduleSubmittedCheck(pid: number, userId: number, tz: string, days = SUBMIT_CHECK_DAYS) {
+    const due = this.cfg.fastReminders ? new Date(this.now().getTime() + 3 * 60_000) : this.quietShift(new Date(this.now().getTime() + days * 24 * MS_HOUR), tz);
+    this.db.schedule('ask_submitted', pid, userId, due);
+  }
+
+  /**
+   * Заявление подано (отметка жителя или письмо на почту УК): квитанцию с перерасчётом ждём через месяц
+   * после подачи. Вызывается после каждой новой отметки о подаче.
+   */
+  afterSubmitted(pid: number) {
+    const c = loadCase(this.db, pid);
+    const at = c ? claimOf(c.p).submittedAt : undefined;
+    if (!c || !at) return;
+    this.db.cancelReminders(pid, 'ask_submitted');
+    if (c.p.status !== 'claim_ready') return;
+    const now = this.now().getTime();
+    const due = this.cfg.fastReminders
+      ? new Date(now + 3 * 60_000)
+      : this.quietShift(new Date(Math.max(new Date(at).getTime() + this.cfg.receiptCheckDays * 24 * MS_HOUR, now + 60_000)), c.house.tz);
     this.db.schedule('ask_receipt', pid, c.p.user_id, due);
   }
 
@@ -570,6 +644,12 @@ export class Vernem {
         return onActText(this, userId, state, text, data);
       case 'await_mail_reply':
         return onEmailReply(this, userId, text, data);
+      case 'await_planned_end':
+        return this.onPlannedEnd(userId, text, data.draft);
+      case 'await_submitted_date':
+        return this.onSubmittedDate(userId, text, data.pid);
+      case 'await_incoming':
+        return this.saveSubmitted(userId, data.pid, data.at, text);
       case 'await_dispatcher_title':
         return onDispatcherTitle(this, userId, text, data);
       case 'await_dispatch_number':
@@ -701,26 +781,57 @@ export class Vernem {
         return this.sendNeighbourCard(userId, pid);
       case 'post':
         return this.postToHouseChat(userId, pid);
-      case 'calc':
+      case 'calc': {
+        // Старая кнопка «Продолжить расчёт» после выдачи заявления — показываем дело, а не начинаем заново.
+        const c = this.ownCase(userId, pid);
+        if (c && !['tracking', 'ended', 'closed'].includes(c.p.status)) return this.showCase(userId, pid);
         return this.resumeCalculation(userId, pid);
+      }
       case 'billskip':
         return this.onBillSkip(userId);
       case 'ex':
-        return this.onExecutorType(userId, pid, b as ExecutorType | 'ask', payload.split(':')[3]);
       case 'pd':
-        return this.onPersonalChoice(userId, pid, b);
+      case 'sv': {
+        // Получатель, данные и выдача заявления — только пока заявление готовят. Старая кнопка после
+        // подачи или перерасчёта не должна менять дело.
+        const c = this.ownCase(userId, pid);
+        if (!c) return this.stale(userId);
+        if (c.p.status !== 'ended' && c.p.status !== 'claim_ready') return this.showCase(userId, pid);
+        if (head === 'ex') return this.onExecutorType(userId, pid, b as ExecutorType | 'ask', payload.split(':')[3]);
+        if (head === 'pd') return this.onPersonalChoice(userId, pid, b);
+        return this.issueClaim(userId, pid, b === '1');
+      }
       case 'skip':
         return this.onPersonalSkip(userId);
-      case 'sv':
-        return this.issueClaim(userId, pid, b === '1');
+      case 'sub':
+        return this.askSubmitted(userId, pid);
+      case 'subd':
+        return this.onSubmittedButton(userId, pid, b);
+      case 'subn': {
+        const st = this.db.getState<{ pid: number; at: string }>(userId);
+        if (st.state !== 'await_incoming' || st.data.pid !== pid) return this.stale(userId);
+        return this.saveSubmitted(userId, pid, st.data.at, null);
+      }
+      case 'subw': {
+        const c = this.ownCase(userId, pid);
+        if (!c || c.p.status !== 'claim_ready') return this.stale(userId);
+        this.scheduleSubmittedCheck(pid, userId, c.house.tz, 7);
+        return this.send(userId, { text: `Хорошо, напомню через неделю. ${SEND_HOWTO}`, buttons: [[cb('📋 К делу', `cs:${pid}`)]] });
+      }
+      case 'dom':
+        return this.onDomChoice(userId, Number(a), Number(b));
       case 'doc':
         return this.resendClaim(userId, pid);
       case 'send':
         return this.send(userId, { text: SEND_HOWTO, buttons: [[cb('📋 Мои случаи', 'cases')], backRow()] });
       case 'rc':
         return this.onReceiptAnswer(userId, pid, b);
-      case 'rfskip':
+      case 'rfskip': {
+        const st = this.db.getState<{ pid: number }>(userId);
+        const c = this.ownCase(userId, pid);
+        if (!c || st.state !== 'await_refund' || st.data.pid !== pid || c.p.status !== 'claim_ready') return c ? this.showCase(userId, pid) : this.stale(userId);
         return this.finishRefund(userId, pid, null);
+      }
       case 'cases':
         return this.showCases(userId);
       case 'cs':
@@ -752,7 +863,13 @@ export class Vernem {
       case 'phadd':
         return this.askPhoto(userId, pid, (['evidence', 'receipt', 'act'].includes(b) ? b : 'evidence') as PhotoKind);
       case 'esc':
-        return onEscalate(this, userId, pid, b);
+      case 'escm': {
+        // Требование и жалоба — только когда перерасчёт не сделали или сделали не полностью.
+        const c = this.ownCase(userId, pid);
+        if (!c) return this.stale(userId);
+        if (c.p.status !== 'refused' && c.p.status !== 'refunded') return this.showCase(userId, pid);
+        return head === 'esc' ? onEscalate(this, userId, pid, b) : showEscalation(this, userId, pid);
+      }
       case 'mail':
         return askEmailClaim(this, userId, pid);
       case 'mailgo':
@@ -761,6 +878,8 @@ export class Vernem {
         return onDispatchButton(this, userId, pid, b);
       case 'dsx':
         return onDispatcherLeave(this, userId, pid);
+      case 'dsr':
+        return onDispatcherRemove(this, userId, pid, Number(b), payload.split(':')[3] === 'y');
       case 'dspend':
         return onDispatchEnd(this, userId, pid);
       case 'dspsend': {
@@ -768,10 +887,8 @@ export class Vernem {
         if (err) return this.send(userId, { text: err, buttons: [[cb('📋 К делу', `cs:${pid}`)]] });
         return this.sendTracking(userId, pid, false, '📨 Отправил заявку в УК. Как только её примут — пришлю номер.');
       }
-      case 'escm':
-        return showEscalation(this, userId, pid);
       case 'delme':
-        this.db.deleteUserData(userId);
+        this.deleteUser(userId);
         return this.send(userId, { text: 'Готово: все ваши данные удалены. Если понадоблюсь — нажмите /start.' });
       default:
         return this.stale(userId);
@@ -834,13 +951,16 @@ export class Vernem {
     }
 
     if (draft.service === 'electricity_off' && !draft.variant) {
-      if (house.electricity_variant) {
+      const two = this.db.houseInfo(house).twoPowerSources;
+      if (two !== undefined) draft.variant = two ? 'two_sources' : 'one_source';
+      else if (house.electricity_variant) {
         draft.variant = house.electricity_variant;
       } else {
         this.saveDraft(userId, 'draft', draft);
+        // Два независимых ввода — свойство дома из техпаспорта, по лифту или этажности его не угадать.
         return this.send(userId, {
-          text: 'Сколько у дома вводов электричества? Обычно два — у многоэтажек с лифтами. Не знаете — посчитаю по строгому варианту.',
-          buttons: [[cb('Два', 'el:two_sources'), cb('Один / не знаю', 'el:one_source')], backRow()],
+          text: 'У дома два независимых ввода электричества? Это записано в техпаспорте дома, точно скажет УК. Не знаете — посчитаю по строгой норме: 24 ч в месяц.',
+          buttons: [[cb('Два независимых', 'el:two_sources'), cb('Один / не знаю', 'el:one_source')], backRow()],
         });
       }
     }
@@ -888,16 +1008,28 @@ export class Vernem {
 
     if (head === 'hw') {
       if (value === 'planned') {
-        this.db.setState(userId, 'idle');
+        // В объявленный срок плата не снижается. Воду не дали в срок — с этого момента перерыв, как при аварии.
+        this.saveDraft(userId, 'await_planned_end', draft);
         return this.send(userId, {
-          text: 'За плановое летнее отключение снижения платы не положено: со счётчиком вы и так не платите за неизрасходованную воду (п. 98–99 ПП № 354). Если отключили дольше объявленного или без предупреждения — выберите «Внезапно». Денег за плановое я не обещаю.',
-          buttons: [[cb('Выбрать «Внезапно»', 'svc:hot_water_off')], backRow()],
+          text: 'Плановое отключение в объявленный срок плату не снижает. А если воду не дали в срок — с этого момента считается перерыв.\nДо какого времени объявили отключение? Например: 21.10 18:00.',
+          buttons: [[cb('Объявления не было — внезапно', 'hw:sudden')], backRow()],
         });
       }
-      return this.continueDraft(userId, { ...draft, hwChecked: true });
+      return this.continueDraft(userId, { ...draft, hwChecked: true, plannedUntil: undefined });
     }
     if (head === 'el') {
-      if (draft.houseId) this.db.setHouseVariant(draft.houseId, value);
+      if (draft.houseId) {
+        this.db.setHouseVariant(draft.houseId, value);
+        // «Два независимых» — ответ за весь дом, как в карточке дома; «Один / не знаю» ничего не утверждает.
+        if (value === 'two_sources') {
+          const house = this.db.getHouse(draft.houseId)!;
+          const info = this.db.houseInfo(house);
+          if (info.twoPowerSources !== true) {
+            this.db.setHouseInfo(house.id, { ...info, twoPowerSources: true, updatedAt: this.now().toISOString(), updatedBy: userId });
+            this.recheckPowerCases(house.id);
+          }
+        }
+      }
       return this.continueDraft(userId, { ...draft, variant: value });
     }
     if (head === 'cr') return this.continueDraft(userId, { ...draft, corner: value === '1' });
@@ -962,15 +1094,37 @@ export class Vernem {
   private askStartTime(userId: number, draft: Draft) {
     const norm = this.norms.services[draft.service];
     this.saveDraft(userId, 'draft', draft);
+    const tz = this.tz(draft.houseId);
+    const planned = draft.plannedUntil ? new Date(draft.plannedUntil) : null;
     const q =
       draft.evidence === 'ads'
         ? 'Во сколько приняли заявку? С этого времени считаются часы (п. 111).'
         : draft.evidence === 'written'
           ? 'Когда отправили обращение?'
-          : norm.kind === 'interruption'
-            ? `Когда пропала ${norm.genitive.startsWith('горяч') || norm.genitive.startsWith('холодн') ? 'вода' : 'услуга'}?`
-            : 'Когда измерили температуру?';
-    return this.send(userId, { text: q, buttons: [...timeButtons('ts', 'start'), backRow()] });
+          : planned
+            ? `С какого времени считать перерыв? Работы объявили до ${formatShort(planned, tz)} — раньше нельзя.`
+            : norm.kind === 'interruption'
+              ? `Когда пропала ${norm.genitive.startsWith('горяч') || norm.genitive.startsWith('холодн') ? 'вода' : 'услуга'}?`
+              : 'Когда измерили температуру?';
+    const rows = [...timeButtons('ts', 'start'), backRow()];
+    if (planned && draft.evidence !== 'ads' && draft.evidence !== 'written') rows.unshift([cb(`С ${formatShort(planned, tz)} — когда обещали дать воду`, 'ts:planned')]);
+    return this.send(userId, { text: q, buttons: rows });
+  }
+
+  /** Житель написал, до какого времени объявили плановое отключение горячей воды. */
+  private async onPlannedEnd(userId: number, text: string, draft: Draft) {
+    if (!draft) return this.stale(userId);
+    const tz = this.tz(draft.houseId);
+    const r = parseLocalInput(text, this.now(), tz, { future: true });
+    if (!r.ok) return this.send(userId, { text: r.error, buttons: [[cb('Объявления не было — внезапно', 'hw:sudden')], backRow()] });
+    if (r.date.getTime() > this.now().getTime()) {
+      this.db.setState(userId, 'idle');
+      return this.send(userId, {
+        text: `Срок работ — до ${formatShort(r.date, tz)}. Пока он не прошёл, снижения платы нет. Если воду не дадут к этому времени — нажмите «Что-то сломалось» ещё раз.`,
+        buttons: this.menu(),
+      });
+    }
+    return this.continueDraft(userId, { ...draft, hwChecked: true, plannedUntil: r.date.toISOString() });
   }
 
   private async onStartTimeButton(userId: number, code: string) {
@@ -980,6 +1134,7 @@ export class Vernem {
       this.saveDraft(userId, 'await_time_start', draft);
       return this.send(userId, { text: TIME_HINT, buttons: [backRow()] });
     }
+    if (code === 'planned' && draft.plannedUntil) return this.createIncident(userId, draft, new Date(draft.plannedUntil));
     const date = relativeTime(code, this.now());
     if (!date) return this.stale(userId);
     return this.createIncident(userId, draft, date);
@@ -993,6 +1148,14 @@ export class Vernem {
 
   private async createIncident(userId: number, draft: Draft, startedAt: Date) {
     const house = this.db.getHouse(draft.houseId!)!;
+    // До срока окончания плановых работ перерыва нет — начало дела не может быть раньше.
+    if (draft.plannedUntil && startedAt.getTime() < new Date(draft.plannedUntil).getTime() - 60_000) {
+      this.saveDraft(userId, 'draft', draft);
+      return this.send(userId, {
+        text: `До ${formatShort(new Date(draft.plannedUntil), house.tz)} шли объявленные работы — время начала не может быть раньше. Выберите другое время.`,
+        buttons: [[cb(`С ${formatShort(new Date(draft.plannedUntil), house.tz)}`, 'ts:planned')], ...timeButtons('ts', 'start'), backRow()],
+      });
+    }
     const incident = this.db.createIncident({
       house_id: house.id,
       service_key: draft.service,
@@ -1002,6 +1165,7 @@ export class Vernem {
       evidence: draft.evidence ?? 'self',
       variant: draft.variant ?? null,
       entrance: this.db.getUserHouse(userId, house.id)?.entrance ?? null,
+      planned_until: draft.service === 'hot_water_off' ? (draft.plannedUntil ?? null) : null,
     });
     const p = this.db.addParticipant({
       incident_id: incident.id,
@@ -1115,10 +1279,11 @@ export class Vernem {
     const q =
       norm.kind === 'interruption'
         ? `${ICON[c.incident.service_key]} Починили? ${norm.title}, ${c.house.address} — уже ${formatDuration(hours)}.`
-        : `${ICON[c.incident.service_key]} Стало тепло? ${c.house.address} — уже ${formatDuration(hours)}. Если нет, пришлите новый замер: так сумма будет точнее.`;
+        : `${ICON[c.incident.service_key]} Стало тепло? ${c.house.address} — уже ${formatDuration(hours)}. Если нет, пришлите новый замер: каждый замер я учитываю не дольше суток.`;
     const buttons: Btn[][] = [[cb(norm.kind === 'interruption' ? '✅ Да, восстановили' : '✅ Да, тепло', `rest:${pid}:y`), cb('Ещё нет', `rest:${pid}:n`)]];
     if (norm.kind !== 'interruption') buttons.push([cb('🌡 Новый замер', `tmp:${pid}`)]);
-    await this.safeSend(c.p.user_id, { text: q, buttons });
+    // send, а не safeSend: не дошло — планировщик повторит напоминание.
+    await this.send(c.p.user_id, { text: q, buttons });
     this.scheduleRestoredCheck(c.p, tz);
   }
 
@@ -1367,9 +1532,10 @@ export class Vernem {
   private async sendNeighbourCard(userId: number, pid: number) {
     const c = this.ownCase(userId, pid);
     if (!c) return this.stale(userId);
-    const user = this.db.getUser(userId)!;
+    // Чат именно этого дома: карточку с адресом не отправляем в чат другого адреса жителя.
+    const chat = this.db.houseChat(c.house.id);
     await this.send(userId, {
-      text: user.house_chat_id
+      text: chat
         ? 'Карточка ниже. Могу сам опубликовать её в чате дома — там будет работать кнопка.'
         : 'Перешлите карточку ниже в домовой чат. При пересылке кнопка пропадёт, но ссылка в тексте работает. Кнопки видны, только если бот сам публикует в группе: добавьте его в чат и отправьте там /dom.',
     });
@@ -1377,7 +1543,7 @@ export class Vernem {
     if (sent.mid) this.db.updateParticipant(pid, { last_card_mid: sent.mid });
     this.db.track(userId, 'card_created', { incident: c.incident.id });
     const rows: Btn[][] = [];
-    if (user.house_chat_id) rows.push([cb('📣 Опубликовать в чате дома', `post:${pid}`)]);
+    if (chat) rows.push([cb('📣 Опубликовать в чате дома', `post:${pid}`)]);
     if (this.cfg.miniAppEnabled) rows.push([app('📱 Поделиться через приложение', `share_${pid}`)]);
     rows.push([cb('⬅️ К делу', `cs:${pid}`)]);
     return this.send(userId, { text: 'Готово.', buttons: rows });
@@ -1385,15 +1551,15 @@ export class Vernem {
 
   private async postToHouseChat(userId: number, pid: number) {
     const c = this.ownCase(userId, pid);
-    const user = this.db.getUser(userId)!;
-    if (!c || !user.house_chat_id) return this.stale(userId);
+    const chat = c ? this.db.houseChat(c.house.id) : undefined;
+    if (!c || !chat) return this.stale(userId);
     try {
-      await this.out.toChat(user.house_chat_id, this.cardMessage(c));
+      await this.out.toChat(chat.chat_id, this.cardMessage(c));
       this.db.track(userId, 'card_posted', { incident: c.incident.id });
       return this.send(userId, { text: 'Опубликовал карточку в чате дома 📣' });
     } catch (e) {
       console.error('[bot] не удалось опубликовать в чат', e);
-      this.db.updateUser(userId, { house_chat_id: null });
+      this.db.unlinkChat(chat.chat_id);
       return this.send(userId, { text: 'Не получилось опубликовать: похоже, бота удалили из чата. Перешлите карточку вручную.' });
     }
   }
@@ -1617,16 +1783,16 @@ export class Vernem {
     const fresh = loadCase(this.db, pid)!;
     const doc = claimDocFor(this.db, this.norms, fresh, this.now());
     // Текстом заявление не дублируем: PDF удобнее распечатать, отправить или переписать от руки.
-    const pdfPath = await this.sendDocPdf(userId, doc, `📄 **Заявление готово**${doc.total ? ` — на ≈ ${fmtRub(doc.total)}` : ''}.`);
-    if (pdfPath) rememberClaimPdf(pid, pdfPath);
+    const pdf = await this.sendDocPdf(userId, doc, `📄 **Заявление готово**${doc.total ? ` — на ≈ ${fmtRub(doc.total)}` : ''}.`);
+    if (pdf) rememberClaimPdf(pid, pdf);
     this.db.track(userId, 'claim_created', { service: c.incident.service_key, sum: doc.total });
 
     if (!save) {
       const { fio, flat, account, ...rest } = claim;
       this.db.updateParticipant(pid, { claim: JSON.stringify(rest) });
     }
-    const due = this.cfg.fastReminders ? new Date(this.now().getTime() + 3 * 60_000) : this.quietShift(new Date(this.now().getTime() + this.cfg.receiptCheckDays * 24 * MS_HOUR), c.house.tz);
-    this.db.schedule('ask_receipt', pid, userId, due);
+    // Сроки (проверка квитанции, требование) идут от подачи, а не от скачивания: сначала спросим, подали ли.
+    if (!claimOf(fresh.p).submittedAt && !c.incident.demo) this.scheduleSubmittedCheck(pid, userId, c.house.tz);
     // Без номера заявки и без подписанного акта заявление слабое — говорим прямо и даём кнопку акта.
     const act = this.db.getActByIncident(c.incident.id);
     const weak = c.incident.evidence === 'self' && !c.p.own_ads_number && act?.status !== 'signed';
@@ -1635,13 +1801,16 @@ export class Vernem {
     // Почта УК есть в карточке дома — бот отправит заявление сам.
     const mailTo = claimEmailTarget(this, loadCase(this.db, pid)!);
     if (mailTo) rows.unshift([cb('📧 Отправить в УК на почту', `mail:${pid}`)]);
+    rows.push([cb('✅ Я подал(а) заявление', `sub:${pid}`)]);
     rows.push([cb('👥 Позвать соседей', `nb:${pid}`), cb('⬅️ Меню', 'menu')]);
     return this.send(userId, {
       text: [
         weak ? '⚠️ В заявлении нет доказательства — ни номера заявки, ни акта. Подпишите акт с соседями и приложите его.' : '',
         lateNumber ? '⚠️ Номер заявки получен позже начала: время до звонка подтвердит только акт с соседями.' : '',
         act?.status === 'signed' ? '📎 Акт указан в приложениях — приложите его копию.' : '',
+        act?.status === 'signed' && act.chair_signed === 0 ? '⚠️ В акте нет подписи председателя совета дома, а по правилам она нужна. Если председатель есть — попросите его подписать.' : '',
         SEND_HOWTO,
+        'Подадите — нажмите «Я подал(а) заявление»: с этой даты я жду квитанцию с перерасчётом.',
         save ? '' : 'ФИО и квартиру из базы удалил — они остались только в PDF.',
       ]
         .filter(Boolean)
@@ -1651,25 +1820,31 @@ export class Vernem {
   }
 
   private async sendPdf(userId: number, c: CaseBundle) {
-    const path = await this.sendDocPdf(userId, claimDocFor(this.db, this.norms, c, this.now()), 'PDF для печати или отправки:');
-    if (path) rememberClaimPdf(c.p.id, path);
-    return path;
+    const pdf = await this.sendDocPdf(userId, claimDocFor(this.db, this.norms, c, this.now()), 'PDF для печати или отправки:');
+    if (pdf) rememberClaimPdf(c.p.id, pdf);
+    return pdf;
   }
 
-  /** Отправляет любой документ жителя PDF-файлом: заявление, акт, требование, жалобу. */
-  async sendDocPdf(userId: number, doc: ClaimDoc, caption: string): Promise<string | null> {
+  /**
+   * Отправляет любой документ жителя PDF-файлом: заявление, акт, требование, жалобу.
+   * Файл с ФИО лежит на диске только на время отправки. Возвращает сам PDF (для письма в УК) или null.
+   */
+  async sendDocPdf(userId: number, doc: ClaimDoc, caption: string): Promise<Buffer | null> {
     const name = doc.fileName ?? 'Документ.pdf';
+    let dir: string | null = null;
     try {
       const pdf = await claimToPdf(doc);
-      const dir = mkdtempSync(join(this.cfg.tmpDir, 'doc-'));
+      dir = mkdtempSync(join(this.cfg.tmpDir, 'doc-'));
       const path = join(dir, name);
       writeFileSync(path, pdf);
       await this.send(userId, { text: caption, file: { path, name } });
-      return path;
+      return pdf;
     } catch (e) {
       console.error('[bot] не удалось отправить PDF', e);
       await this.safeSend(userId, { text: 'PDF сейчас не получилось отправить. Попробуйте ещё раз чуть позже.' });
       return null;
+    } finally {
+      if (dir) rmSync(dir, { recursive: true, force: true });
     }
   }
 
@@ -1685,9 +1860,10 @@ export class Vernem {
 
   async remindReceipt(pid: number) {
     const c = loadCase(this.db, pid);
-    if (!c || c.p.status !== 'claim_ready') return;
+    // Квитанцию проверяем только по поданному заявлению: без подачи перерасчёта и не ждём.
+    if (!c || c.p.status !== 'claim_ready' || !claimOf(c.p).submittedAt) return;
     const norm = this.norms.services[c.incident.service_key];
-    return this.safeSend(c.p.user_id, {
+    return this.send(c.p.user_id, {
       text: `🧾 Пришла новая квитанция? Есть перерасчёт за «${norm.title.toLowerCase()}» (${formatShort(new Date(c.p.started_at), c.house.tz)})? Сфотографируйте квитанцию — пригодится, если перерасчёта нет.`,
       buttons: [
         [cb('✅ Да, вернули', `rc:${pid}:y`), cb('❌ Нет', `rc:${pid}:n`)],
@@ -1699,6 +1875,14 @@ export class Vernem {
   private async onReceiptAnswer(userId: number, pid: number, answer: string) {
     const c = this.ownCase(userId, pid);
     if (!c) return this.stale(userId);
+    // Старая кнопка из напоминания: результат уже отмечен — не переписываем его.
+    if (c.p.status !== 'claim_ready') return this.showCase(userId, pid);
+    if (answer === 'n' && !claimOf(c.p).submittedAt) {
+      return this.send(userId, {
+        text: 'Сначала отметьте, когда подали заявление: от этой даты считаются сроки, и она попадёт в требование.',
+        buttons: [[cb('✅ Я подал(а) заявление', `sub:${pid}`)], [cb('📋 К делу', `cs:${pid}`)]],
+      });
+    }
     if (answer === 'y') {
       this.db.setState(userId, 'await_refund', { pid });
       return this.send(userId, { text: 'Отлично! Сколько вернули? Напишите сумму перерасчёта из квитанции.', buttons: [[cb('Не помню', `rfskip:${pid}`)]] });
@@ -1715,6 +1899,11 @@ export class Vernem {
   }
 
   private async onRefund(userId: number, text: string, pid: number) {
+    const c = this.ownCase(userId, pid);
+    if (!c || c.p.status !== 'claim_ready') {
+      this.db.setState(userId, 'idle');
+      return c ? this.showCase(userId, pid) : this.stale(userId);
+    }
     const amount = parseRubles(text);
     if (amount === null) return this.send(userId, { text: 'Напишите сумму числом, например 115 или 115,20.', buttons: [[cb('Не помню', `rfskip:${pid}`)]] });
     return this.finishRefund(userId, pid, amount);
@@ -1740,6 +1929,92 @@ export class Vernem {
     }
     lines.push('', 'Расскажите соседям — им положено столько же.');
     return this.send(userId, { text: lines.join('\n'), buttons: this.menu() });
+  }
+
+  // =====================================================================
+  // Подача заявления: с неё идут сроки
+  // =====================================================================
+
+  /** Через несколько дней после выдачи: подали ли заявление. */
+  async remindSubmitted(pid: number) {
+    const c = loadCase(this.db, pid);
+    if (!c || c.p.status !== 'claim_ready' || claimOf(c.p).submittedAt) return;
+    const norm = this.norms.services[c.incident.service_key];
+    return this.send(c.p.user_id, {
+      text: `📄 Вы подали заявление о перерасчёте («${norm.title.toLowerCase()}», ${formatShort(new Date(c.p.started_at), c.house.tz)})? Отметьте дату: с неё я жду квитанцию с перерасчётом.`,
+      buttons: [[cb('✅ Подал(а)', `sub:${pid}`), cb('Ещё нет', `subw:${pid}`)], [cb('📄 Прислать заявление ещё раз', `doc:${pid}`)]],
+    });
+  }
+
+  private askSubmitted(userId: number, pid: number) {
+    const c = this.ownCase(userId, pid);
+    if (!c || c.p.status !== 'claim_ready') return c ? this.showCase(userId, pid) : this.stale(userId);
+    this.db.setState(userId, 'idle');
+    return this.send(userId, {
+      text: 'Когда подали заявление? Дата попадёт в требование и жалобу, если перерасчёт не сделают.',
+      buttons: [[cb('Сегодня', `subd:${pid}:0`), cb('Вчера', `subd:${pid}:1`)], [cb('Другой день', `subd:${pid}:m`)], [cb('📋 К делу', `cs:${pid}`)]],
+    });
+  }
+
+  private async onSubmittedButton(userId: number, pid: number, code: string) {
+    const c = this.ownCase(userId, pid);
+    if (!c || c.p.status !== 'claim_ready') return c ? this.showCase(userId, pid) : this.stale(userId);
+    if (code === 'm') {
+      this.db.setState(userId, 'await_submitted_date', { pid });
+      return this.send(userId, { text: 'Напишите дату подачи, например 21.10.', buttons: [[cb('📋 К делу', `cs:${pid}`)]] });
+    }
+    const lp = localParts(new Date(this.now().getTime() - (code === '1' ? 24 : 0) * MS_HOUR), c.house.tz);
+    return this.askIncoming(userId, c, fromLocal(lp.year, lp.month, lp.day, 12, 0, c.house.tz));
+  }
+
+  private async onSubmittedDate(userId: number, text: string, pid: number) {
+    const c = this.ownCase(userId, pid);
+    if (!c || c.p.status !== 'claim_ready') return this.stale(userId);
+    const m = /^\s*(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?\s*$/.exec(text);
+    const today = localParts(this.now(), c.house.tz);
+    if (!m) return this.send(userId, { text: 'Дата в виде 21.10 или 21.10.2026.', buttons: [[cb('📋 К делу', `cs:${pid}`)]] });
+    let y = m[3] ? Number(m[3]) : today.year;
+    if (y < 100) y += 2000;
+    const date = fromLocal(y, Number(m[2]), Number(m[1]), 12, 0, c.house.tz);
+    const check = localParts(date, c.house.tz);
+    if (check.day !== Number(m[1]) || check.month !== Number(m[2])) return this.send(userId, { text: 'Такой даты нет в календаре. Проверьте число и месяц.' });
+    return this.askIncoming(userId, c, date);
+  }
+
+  /** Дата подачи принята — спрашиваем входящий номер (необязательно). */
+  private askIncoming(userId: number, c: CaseBundle, date: Date) {
+    const problem = this.submittedProblem(c, date);
+    if (problem) return this.send(userId, { text: problem, buttons: [[cb('Другой день', `subd:${c.p.id}:m`)], [cb('📋 К делу', `cs:${c.p.id}`)]] });
+    this.db.setState(userId, 'await_incoming', { pid: c.p.id, at: date.toISOString() });
+    return this.send(userId, {
+      text: 'Входящий номер дали? Его пишут на вашем экземпляре вместе с отметкой о приёме. Напишите номер или нажмите «Номера нет».',
+      buttons: [[cb('Номера нет', `subn:${c.p.id}`)]],
+    });
+  }
+
+  /** Подать заявление раньше, чем оно датировано, или в будущем нельзя. */
+  private submittedProblem(c: CaseBundle, date: Date): string | null {
+    const day = (d: Date) => d.toLocaleDateString('sv-SE', { timeZone: c.house.tz });
+    if (day(date) > day(this.now())) return 'Эта дата ещё не наступила.';
+    const created = claimOf(c.p).createdAt;
+    if (created && day(date) < day(new Date(created))) return `Заявление датировано ${formatDate(new Date(created), c.house.tz)} — подать его раньше нельзя.`;
+    return null;
+  }
+
+  private async saveSubmitted(userId: number, pid: number, at: string, number: string | null) {
+    const c = this.ownCase(userId, pid);
+    if (!c || c.p.status !== 'claim_ready') return this.stale(userId);
+    const incoming = number ? clean(number).replace(/^\s*(вх\.?\s*)?№\s*/i, '').slice(0, 40) || undefined : undefined;
+    this.db.updateParticipant(pid, { claim: JSON.stringify({ ...claimOf(c.p), submittedAt: at, incomingNumber: incoming }) });
+    this.db.setState(userId, 'idle');
+    this.db.track(userId, 'claim_submitted', { pid });
+    this.afterSubmitted(pid);
+    const [y, mo] = monthKey(new Date(at), c.house.tz).split('-').map(Number);
+    const next = `${mo === 12 ? y + 1 : y}-${String(mo === 12 ? 1 : mo + 1).padStart(2, '0')}`;
+    return this.send(userId, {
+      text: `✅ Записал: подано ${formatDate(new Date(at), c.house.tz)}${incoming ? `, вх. № ${incoming}` : ''}. Перерасчёт появится в квитанции, которая придёт в начале ${monthGenitive(next)}, — тогда спрошу.`,
+      buttons: [[cb('📋 К делу', `cs:${pid}`), cb('⬅️ Меню', 'menu')]],
+    });
   }
 
   // =====================================================================
@@ -1789,10 +2064,13 @@ export class Vernem {
     const rows: Btn[][] = [];
     if (c.p.status === 'ended') rows.push([cb('▶️ Продолжить расчёт', `calc:${pid}`)]);
     if (c.p.status === 'claim_ready' || c.p.status === 'refused' || c.p.status === 'refunded') rows.push([cb('📄 Прислать заявление ещё раз', `doc:${pid}`)]);
-    const emailed = claimOf(c.p).emailedAt;
-    if (emailed) lines.push(`📧 Отправлено на почту УК ${formatShort(new Date(emailed), tz)}.`);
+    const cl = claimOf(c.p);
+    if (cl.emailedAt) lines.push(`📧 Отправлено на почту УК ${formatShort(new Date(cl.emailedAt), tz)}.`);
     else if (canEmailClaim(this, c) && c.p.status === 'claim_ready') rows.push([cb('📧 Отправить в УК на почту', `mail:${pid}`)]);
-    if (c.p.status === 'claim_ready') rows.push([cb('✅ Перерасчёт пришёл', `rc:${pid}:y`), cb('❌ Не сделали', `rc:${pid}:n`)]);
+    if (cl.submittedAt && !cl.emailedAt) lines.push(`Подано ${formatDate(new Date(cl.submittedAt), tz)}${cl.incomingNumber ? `, вх. № ${clean(cl.incomingNumber)}` : ''}.`);
+    // «Не сделали» — только после подачи: от неё считаются сроки, дата нужна в требовании.
+    if (c.p.status === 'claim_ready' && !cl.submittedAt) rows.push([cb('✅ Я подал(а) заявление', `sub:${pid}`)], [cb('✅ Перерасчёт уже пришёл', `rc:${pid}:y`)]);
+    else if (c.p.status === 'claim_ready') rows.push([cb('✅ Перерасчёт пришёл', `rc:${pid}:y`), cb('❌ Не сделали', `rc:${pid}:n`)]);
     if (c.p.status === 'refused') rows.push([cb('⚖️ Что делать дальше', `escm:${pid}`)]);
     rows.push(...actButtons(this, c));
     if (c.p.status !== 'closed') rows.push([cb('📷 Добавить фото', `phadd:${pid}:evidence`)]);
@@ -1897,16 +2175,41 @@ export class Vernem {
     if (cmd === '/vernem' || cmd === '/start' || cmd === '/help') return this.out.toChat(chatId, this.groupIntro());
     if (cmd !== '/dom') return;
     this.db.upsertChat(chatId, null);
-    const user = this.db.getUser(userId);
-    if (!user?.house_id) {
+    const houses = this.db.getUser(userId) ? this.db.listUserHouses(userId) : [];
+    if (!houses.length) {
       return this.out.toChat(chatId, {
         text: 'Сначала напишите боту в личные сообщения и укажите адрес дома — тогда смогу привязать этот чат.',
         buttons: [[link('💬 Написать боту', `https://max.ru/${this.cfg.botUsername}`)]],
       });
     }
-    const house = this.db.getHouse(user.house_id)!;
+    if (houses.length === 1) return this.linkHouseChat(chatId, houses[0].id, userId);
+    // Адресов несколько — не угадываем: иначе карточки одного дома уходили бы в чат другого.
+    const title = this.db.getChat(chatId)?.title;
+    await this.safeSend(userId, {
+      text: `К какому дому привязать чат${title ? ` «${clean(title)}»` : ''}? Туда будут уходить карточки отключений только этого дома.`,
+      buttons: houses.map((h) => [cb(`🏠 ${h.address}`.slice(0, 64), `dom:${chatId}:${h.id}`)]),
+    });
+    return this.out.toChat(chatId, { text: 'У вас несколько адресов — выберите дом в личных сообщениях с ботом.' });
+  }
+
+  private linkHouseChat(chatId: number, houseId: number, userId: number) {
+    const house = this.db.getHouse(houseId)!;
     this.db.linkChat(chatId, house.id, userId);
     this.db.updateUser(userId, { house_chat_id: chatId });
-    return this.out.toChat(chatId, { text: `Чат привязан к дому: ${house.address}. Кнопка «Позвать соседей» будет публиковать карточки отключений сюда.` });
+    return this.out.toChat(chatId, { text: `Чат привязан к дому: ${house.address}. Кнопка «Позвать соседей» будет публиковать карточки отключений этого дома сюда.` });
+  }
+
+  /** Житель выбрал в личных сообщениях, к какому из своих домов привязать групповой чат. */
+  private async onDomChoice(userId: number, chatId: number, houseId: number) {
+    const h = this.db.getUserHouse(userId, houseId);
+    if (!h || h.demo || !this.db.getChat(chatId)) return this.stale(userId);
+    try {
+      await this.linkHouseChat(chatId, houseId, userId);
+    } catch (e) {
+      console.error('[bot] чат недоступен', e);
+      this.db.unlinkChat(chatId);
+      return this.send(userId, { text: 'Не получилось написать в этот чат: похоже, бота из него удалили.' });
+    }
+    return this.send(userId, { text: `Готово: чат привязан к дому ${h.address}.`, buttons: this.menu() });
   }
 }

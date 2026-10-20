@@ -5,11 +5,11 @@
 // • Карточка дома: УК, аварийная служба, ресурсоснабжающие организации — заполняют жители.
 // • Сеть дома: когда кто-то фиксирует отключение, бот сам пишет соседям «У вас тоже?».
 
-import type { Alert, ExecutorType, House, HouseInfo, Incident } from '../db/db.ts';
+import type { Alert, Db, ExecutorType, House, HouseInfo, Incident } from '../db/db.ts';
 import type { ServiceKey } from '../calc/norms.ts';
 import { POPULAR_CITIES, resolveCity } from '../calc/cities.ts';
 import { innProblem, plural } from '../calc/format.ts';
-import { formatDate, formatShort } from '../calc/time.ts';
+import { formatDate, formatShort, hoursBetween } from '../calc/time.ts';
 import type { Btn } from './types.ts';
 import type { Draft, Vernem } from './core.ts';
 import { ICON, backRow, cb, clean, link } from './ui.ts';
@@ -228,18 +228,76 @@ export function houseInfoLines(bot: Vernem, house: House): string[] {
   return lines;
 }
 
+/**
+ * Поля карточки, которые попадают в документы: их изменения видны всем жителям дома.
+ * Карточка общая (её заполняют жители по квитанции), поэтому каждое изменение записывается — кто, когда и что было.
+ */
+export const HOUSE_FIELD_TITLE: Partial<Record<keyof HouseInfo, string>> = {
+  ukName: 'УК / ТСЖ',
+  ukInn: 'ИНН УК',
+  ukAddress: 'адрес УК',
+  ukEmail: 'почта УК',
+  adsPhone: 'телефон аварийной службы',
+  rsoHeat: 'поставщик тепла и горячей воды',
+  rsoWater: 'поставщик воды',
+  rsoPower: 'поставщик света',
+  rsoGas: 'поставщик газа',
+  rop: 'оператор по вывозу мусора',
+  gji: 'жилинспекция',
+};
+
+export type HouseChange = { key: string; title: string; prev: string; value: string };
+
+/** Сохраняет карточку дома и возвращает изменения уже заполненных полей (новые пустые поля — не изменения). */
+export function saveHouseInfo(db: Db, houseId: number, userId: number, next: HouseInfo, now: Date): HouseChange[] {
+  const prev = db.houseInfo(db.getHouse(houseId)!);
+  const fieldsBy = { ...(prev.fieldsBy ?? {}) };
+  const changes: HouseChange[] = [];
+  for (const [key, title] of Object.entries(HOUSE_FIELD_TITLE)) {
+    const a = String((prev as Record<string, unknown>)[key] ?? '');
+    const b = String((next as Record<string, unknown>)[key] ?? '');
+    if (a === b) continue;
+    fieldsBy[key] = { by: userId, at: now.toISOString(), ...(a ? { prev: a } : {}) };
+    if (a) changes.push({ key, title: title!, prev: a, value: b });
+  }
+  db.setHouseInfo(houseId, { ...next, fieldsBy, updatedAt: now.toISOString(), updatedBy: userId });
+  return changes;
+}
+
+/** Соседи узнают, что кто-то изменил уже заполненные данные дома: они попадают в их заявления. */
+export async function tellHouseInfoChanged(bot: Vernem, userId: number, houseId: number, changes: HouseChange[]) {
+  const house = bot.db.getHouse(houseId);
+  if (!changes.length || !house || house.demo) return;
+  const lines = changes.map((c) => `${c.title}: было «${clean(c.prev)}», стало ${c.value ? `«${clean(c.value)}»` : 'пусто'}`);
+  for (const u of bot.db.houseSubscribers(houseId)) {
+    if (u.id === userId) continue;
+    await bot.safeSend(u.id, {
+      text: [`🏠 Сосед изменил данные дома ${house.address}:`, ...lines, 'Они попадают в заявления. Если это ошибка — исправьте по квитанции.'].join('\n'),
+      buttons: [[bot.cfg.miniAppEnabled ? bot.appButton('✏️ Данные дома', `house_${houseId}`) : cb('🏠 Карточка дома', `hs:card:${houseId}`)]],
+    });
+  }
+}
+
+/** Почту УК недавно поменял другой житель — перед отправкой заявления на неё стоит проверить адрес. */
+export function ukEmailChangedByOther(info: HouseInfo, userId: number, now: Date): string | null {
+  const f = info.fieldsBy?.ukEmail;
+  if (!f || !f.prev || f.by === userId) return null;
+  return hoursBetween(new Date(f.at), now) <= 7 * 24 ? f.at : null;
+}
+
 export function showHouseCard(bot: Vernem, userId: number, houseId: number) {
   bot.db.setState(userId, 'idle');
   const h = bot.db.getUserHouse(userId, houseId);
   if (!h) return bot.stale(userId);
   const info = houseInfoLines(bot, h);
+  const dispatchers = bot.db.listDispatchers(h.id);
   return bot.send(userId, {
     text: [
       `🏠 **${h.address}**${h.entrance ? `, подъезд ${h.entrance}` : ''}`,
       ...(info.length ? info : ['Данных о доме пока нет. Заполните их по квитанции — пригодятся всем соседям и попадут в заявления.']),
       '',
       `В сети дома: ${members(bot, h.id)}. Уведомления ${h.notify ? 'включены' : 'выключены'}.`,
-      bot.db.listDispatchers(h.id).length
+      dispatchers.length
         ? `🏢 Заявки в боте принимает УК: ${dispatcherNames(bot, h.id)}`
         : '🏢 УК к боту не подключена — пригласите её, и заявки будут уходить ей прямо из бота.',
     ].join('\n'),
@@ -247,6 +305,8 @@ export function showHouseCard(bot: Vernem, userId: number, houseId: number) {
       [bot.cfg.miniAppEnabled ? bot.appButton('✏️ Данные дома', `house_${h.id}`) : cb('✏️ Данные дома', `hs:info:${h.id}`), cb('📨 Позвать соседей', `hs:invite:${h.id}`)],
       [cb(h.notify ? '🔕 Без уведомлений' : '🔔 Уведомлять', `hs:notify:${h.id}`), cb('🚪 Подъезд', `hs:ent:${h.id}`)],
       [cb('🏢 Пригласить УК в бот', `hs:uk:${h.id}`)],
+      // Любой житель может отключить сотрудника, если это не их УК.
+      ...dispatchers.map((d) => [cb(`🚫 Отключить: ${clean(d.title)}`.slice(0, 64), `dsr:${h.id}:${d.id}`)]),
       [cb('🗑 Убрать адрес', `hs:rm:${h.id}`), cb('⬅️ Мои адреса', 'house')],
     ],
   });
@@ -316,8 +376,9 @@ export async function onHouseInfoText(bot: Vernem, userId: number, text: string,
   if (field.key === 'adsPhone' && (value.replace(/\D/g, '').length < 3 || /[^\d\s+()\-.]/.test(value))) {
     return bot.send(userId, { text: 'Телефон — цифрами, например +7 495 123-45-67 или 112.', buttons: [[cb('Пропустить', `hsi:${h.id}:${data.idx}`)]] });
   }
-  bot.db.setHouseInfo(h.id, { ...bot.db.houseInfo(h), [field.key]: value, updatedAt: bot.now().toISOString(), updatedBy: userId });
+  const changes = saveHouseInfo(bot.db, h.id, userId, { ...bot.db.houseInfo(h), [field.key]: value }, bot.now());
   bot.db.track(userId, 'house_info', { house: h.id, field: field.key });
+  await tellHouseInfoChanged(bot, userId, h.id, changes);
   return askInfo(bot, userId, h.id, data.idx + 1);
 }
 
@@ -370,14 +431,15 @@ export async function queueHouseAlerts(bot: Vernem, incident: Incident): Promise
   return n;
 }
 
-/** Отправляет наступившие уведомления. Вызывается при фиксации отключения и планировщиком. */
+/** Отправляет наступившие уведомления. Вызывается при фиксации отключения и планировщиком. Не дошло — повторим через 10 минут. */
 export async function flushAlerts(bot: Vernem): Promise<number> {
   let sent = 0;
   for (const a of bot.db.takeDueAlerts(bot.now())) {
     try {
       if (await sendAlert(bot, a)) sent++;
     } catch (e) {
-      console.error('[house] уведомление', a.id, e);
+      const again = bot.db.retryAlert(a.id, new Date(bot.now().getTime() + 10 * 60_000));
+      console.error(`[house] уведомление ${a.id} не доставлено${again ? ', повторю' : ', попытки кончились'}`, e);
     }
   }
   return sent;
@@ -394,7 +456,8 @@ async function sendAlert(bot: Vernem, alert: Alert): Promise<boolean> {
   const norm = bot.norms.services[incident.service_key];
   const what = norm.kind === 'interruption' ? `нет ${norm.genitive}` : norm.button.toLowerCase();
   const ended = incident.ended_at ? new Date(incident.ended_at) : null;
-  await bot.safeSend(alert.user_id, {
+  // send, а не safeSend: если MAX не принял сообщение, flushAlerts вернёт уведомление в очередь.
+  await bot.send(alert.user_id, {
     text: [
       `🚨 **${house.address}${incident.entrance ? `, подъезд ${incident.entrance}` : ''}: ${what}**`,
       `с ${formatShort(new Date(incident.started_at), house.tz)}${ended ? ` по ${formatShort(ended, house.tz)}` : ''}${incident.ads_number && incident.evidence === 'ads' ? `, заявка № ${clean(incident.ads_number)}` : ''}.`,
@@ -412,6 +475,12 @@ export async function onAlertAnswer(bot: Vernem, userId: number, alertId: number
   const incident = bot.db.getIncident(alert.incident_id);
   if (!incident) return bot.stale(userId);
   if (answer === 'y') {
+    // Старое уведомление: отключение давно закончилось — присоединиться уже нельзя (как и по ссылке).
+    const mine = bot.db.getParticipantFor(incident.id, userId);
+    if (mine) return bot.showCase(userId, mine.id);
+    if (incident.ended_at && hoursBetween(new Date(incident.ended_at), bot.now()) > 24 * 45) {
+      return bot.send(userId, { text: 'Это отключение закончилось больше полутора месяцев назад, присоединиться уже нельзя.', buttons: bot.menu() });
+    }
     bot.db.answerAlert(alert.id, 'yes');
     bot.db.track(userId, 'alert_yes', { incident: incident.id });
     return bot.joinIncident(userId, incident);

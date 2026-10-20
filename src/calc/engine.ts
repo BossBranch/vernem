@@ -10,10 +10,14 @@ import { MS_HOUR, MS_MIN, hoursBetween, localParts, monthKey, splitByMonth, form
 export type Interval = { start: Date; end: Date };
 export type Reading = { at: Date; tempC: number };
 
+/**
+ * readingHours — сколько часов после замера считать его в силе. Без ограничения один низкий замер растянулся бы
+ * на все дни до конца дела; с ограничением часы без свежего замера не считаются (оценка снизу).
+ */
 export type CalcInput =
   | { kind: 'interruption'; intervals: Interval[]; variant?: string | null }
-  | { kind: 'heating_temperature'; readings: Reading[]; end: Date; corner?: boolean; coldRegion?: boolean }
-  | { kind: 'hot_water_temperature'; readings: Reading[]; end: Date };
+  | { kind: 'heating_temperature'; readings: Reading[]; end: Date; corner?: boolean; coldRegion?: boolean; readingHours?: number }
+  | { kind: 'hot_water_temperature'; readings: Reading[]; end: Date; readingHours?: number };
 
 export type MonthCalc = {
   month: string;
@@ -23,6 +27,8 @@ export type MonthCalc = {
   lines: string[];
   /** Часы, когда горячая вода была ниже +40 °C: оплата по тарифу холодной воды. */
   coldTariffHours?: number;
+  /** Часы без свежего замера (дольше readingHours после последнего): не учтены. */
+  unmeasuredHours?: number;
   totalHours?: number;
   excessHours?: number;
   singleLimitExceeded?: boolean;
@@ -145,14 +151,30 @@ function isNight(hour: number, from: number, to: number): boolean {
   return hour >= from && hour < to;
 }
 
-function segments(readings: Reading[], end: Date): { start: Date; end: Date; tempC: number }[] {
+/** Отрезки между замерами. maxHours — замер в силе не дольше этого; остаток до следующего замера — gaps. */
+function segments(readings: Reading[], end: Date, maxHours?: number): { segs: { start: Date; end: Date; tempC: number }[]; gaps: Interval[] } {
   const sorted = [...readings].sort((a, b) => a.at.getTime() - b.at.getTime());
-  const out: { start: Date; end: Date; tempC: number }[] = [];
+  const segs: { start: Date; end: Date; tempC: number }[] = [];
+  const gaps: Interval[] = [];
   for (let i = 0; i < sorted.length; i++) {
-    const segEnd = i + 1 < sorted.length ? sorted[i + 1].at : end;
-    if (segEnd.getTime() > sorted[i].at.getTime()) out.push({ start: sorted[i].at, end: segEnd, tempC: sorted[i].tempC });
+    const next = i + 1 < sorted.length ? sorted[i + 1].at : end;
+    const limit = maxHours ? new Date(sorted[i].at.getTime() + maxHours * MS_HOUR) : next;
+    const segEnd = limit.getTime() < next.getTime() ? limit : next;
+    if (segEnd.getTime() > sorted[i].at.getTime()) segs.push({ start: sorted[i].at, end: segEnd, tempC: sorted[i].tempC });
+    if (next.getTime() > segEnd.getTime()) gaps.push({ start: segEnd, end: next });
   }
+  return { segs, gaps };
+}
+
+/** Часы без свежего замера по месяцам — их не считаем и прямо пишем об этом в расчёте. */
+function gapHoursByMonth(gaps: Interval[], tz: string): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const g of gaps) for (const s of splitByMonth(g.start, g.end, tz)) out.set(s.month, (out.get(s.month) ?? 0) + hoursBetween(s.start, s.end));
   return out;
+}
+
+function gapLine(hours: number, maxHours: number): string {
+  return `${formatDuration(hours)} без свежего замера не учтено: каждый замер считается не дольше ${maxHours} ч. Было холодно — добавьте замер с этим временем.`;
 }
 
 export function calcHeatingTemperature(
@@ -160,7 +182,7 @@ export function calcHeatingTemperature(
   readings: Reading[],
   end: Date,
   tz: string,
-  opts: { corner?: boolean; coldRegion?: boolean } = {},
+  opts: { corner?: boolean; coldRegion?: boolean; readingHours?: number } = {},
 ): CalcResult {
   const t = norm.temperature as HeatingTempNorm;
   const normC = opts.coldRegion
@@ -172,7 +194,10 @@ export function calcHeatingTemperature(
       : t.norm_c;
 
   const byMonth = new Map<string, { degreeHours: number; hoursBelow: number; minTemp: number }>();
-  for (const seg of segments(readings, end)) {
+  const { segs, gaps } = segments(readings, end, opts.readingHours);
+  const gapHours = gapHoursByMonth(gaps, tz);
+  for (const g of gapHours.keys()) if (!byMonth.has(g)) byMonth.set(g, { degreeHours: 0, hoursBelow: 0, minTemp: Infinity });
+  for (const seg of segs) {
     walkLocalHours(seg.start, seg.end, tz, (_from, hours, hour, month) => {
       const required = isNight(hour, t.night_from_hour, t.night_to_hour) ? normC - t.night_drop_c : normC;
       const deviation = Math.max(0, required - seg.tempC);
@@ -198,7 +223,9 @@ export function calcHeatingTemperature(
       lines.push(`Часов ниже нормы: ${fmtNum(m.hoursBelow, 2)}. Сумма отклонений: ${fmtNum(degreeHours)} (по каждому часу: на сколько градусов ниже нормы).`);
       lines.push(`${fmtNum(degreeHours)} × ${fmtPercent(t.rate_percent_per_degree_hour)} = ${fmtPercent(percent)} от платы за отопление.`);
     }
-    months.push({ month, percent, lines, totalHours: round2(m.hoursBelow) });
+    const gap = gapHours.get(month) ?? 0;
+    if (gap >= 1 && opts.readingHours) lines.push(gapLine(gap, opts.readingHours));
+    months.push({ month, percent, lines, totalHours: round2(m.hoursBelow), unmeasuredHours: round2(gap) });
   }
   const notes = [
     'Снижение считается за каждый час и за каждый градус отклонения (п. 15 Приложения № 1).',
@@ -207,10 +234,13 @@ export function calcHeatingTemperature(
   return { serviceKey: norm.key, kind: 'heating_temperature', basis: norm.item, months, notes };
 }
 
-export function calcHotWaterTemperature(norm: ServiceNorm, readings: Reading[], end: Date, tz: string): CalcResult {
+export function calcHotWaterTemperature(norm: ServiceNorm, readings: Reading[], end: Date, tz: string, readingHours?: number): CalcResult {
   const t = norm.temperature as HotWaterTempNorm;
   const byMonth = new Map<string, { stepHours: number; coldHours: number; hoursBelow: number }>();
-  for (const seg of segments(readings, end)) {
+  const { segs, gaps } = segments(readings, end, readingHours);
+  const gapHours = gapHoursByMonth(gaps, tz);
+  for (const g of gapHours.keys()) if (!byMonth.has(g)) byMonth.set(g, { stepHours: 0, coldHours: 0, hoursBelow: 0 });
+  for (const seg of segs) {
     walkLocalHours(seg.start, seg.end, tz, (_from, hours, hour, month) => {
       const tol = isNight(hour, t.night_from_hour, t.night_to_hour) ? t.night_tolerance_c : t.day_tolerance_c;
       const required = t.norm_c - tol;
@@ -246,7 +276,9 @@ export function calcHotWaterTemperature(norm: ServiceNorm, readings: Reading[], 
       );
     }
     if (stepHours <= 0 && m.coldHours <= 0) lines.push('Отклонение в пределах допуска — снижение платы не положено.');
-    months.push({ month, percent, lines, coldTariffHours: round2(m.coldHours), totalHours: round2(m.hoursBelow) });
+    const gap = gapHours.get(month) ?? 0;
+    if (gap >= 1 && readingHours) lines.push(gapLine(gap, readingHours));
+    months.push({ month, percent, lines, coldTariffHours: round2(m.coldHours), totalHours: round2(m.hoursBelow), unmeasuredHours: round2(gap) });
   }
   return {
     serviceKey: norm.key,
@@ -262,9 +294,9 @@ export function calculate(norm: ServiceNorm, input: CalcInput, tz: string): Calc
     case 'interruption':
       return calcInterruption(norm, input.intervals, tz, input.variant);
     case 'heating_temperature':
-      return calcHeatingTemperature(norm, input.readings, input.end, tz, { corner: input.corner, coldRegion: input.coldRegion });
+      return calcHeatingTemperature(norm, input.readings, input.end, tz, { corner: input.corner, coldRegion: input.coldRegion, readingHours: input.readingHours });
     case 'hot_water_temperature':
-      return calcHotWaterTemperature(norm, input.readings, input.end, tz);
+      return calcHotWaterTemperature(norm, input.readings, input.end, tz, input.readingHours);
   }
 }
 

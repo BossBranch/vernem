@@ -1,5 +1,7 @@
 import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { readdirSync, rmSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { Bot } from '@maxhub/max-bot-api';
 import { loadConfig } from './config.ts';
 import { loadNorms } from './calc/norms.ts';
@@ -20,6 +22,7 @@ async function main() {
   const norms = loadNorms(cfg.normsPath);
   const db = new Db(cfg.dbPath);
   console.log(`[vernem] нормы: ${norms.source.title}, проверены ${norms.source.checked_at}; БД: ${cfg.dbPath}`);
+  sweepOldPdfs(cfg.tmpDir);
 
   let botStatus = cfg.token ? 'starting' : 'disabled (нет MAX_BOT_TOKEN)';
   let maxBot: Bot | null = null;
@@ -65,6 +68,8 @@ async function main() {
   console.log(`[vernem] HTTP на порту ${cfg.port}${cfg.publicUrl ? `, публичный адрес ${cfg.publicUrl}` : ''}`);
 
   // ---------- бот ----------
+  // Обработчики подключаются один раз: повторный запуск после ошибки не должен их удваивать.
+  let wired = false;
   async function startBot(): Promise<void> {
     if (!maxBot) return;
     const bot = maxBot;
@@ -73,7 +78,10 @@ async function main() {
       if (!cfg.botUsername) cfg.botUsername = bot.botInfo.username ?? '';
       (vernem.cfg as { botUsername: string }).botUsername = cfg.botUsername;
       console.log(`[vernem] бот @${cfg.botUsername} (id ${bot.botInfo.user_id})`);
-      wireBot(bot, (input) => vernem.handle(input));
+      if (!wired) {
+        wireBot(bot, (input) => vernem.handle(input));
+        wired = true;
+      }
       await bot.api
         .setMyCommands([
           { name: 'start', description: 'Начать / главное меню' },
@@ -122,6 +130,22 @@ async function main() {
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('unhandledRejection', (e) => console.error('[vernem] unhandledRejection', e));
+}
+
+/**
+ * PDF с ФИО теперь удаляются сразу после отправки. Здесь — то, что могло остаться от старых версий
+ * или после сбоя: папки doc-* старше часа во временном каталоге.
+ */
+function sweepOldPdfs(dir: string) {
+  try {
+    for (const name of readdirSync(dir)) {
+      if (!name.startsWith('doc-')) continue;
+      const path = join(dir, name);
+      if (Date.now() - statSync(path).mtimeMs > 3_600_000) rmSync(path, { recursive: true, force: true });
+    }
+  } catch (e) {
+    console.warn('[vernem] не удалось очистить временные PDF', (e as Error)?.message);
+  }
 }
 
 main().catch((e) => {

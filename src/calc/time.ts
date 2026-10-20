@@ -136,7 +136,7 @@ export type ParsedTime = { ok: true; date: Date } | { ok: false; error: string }
  * Разбирает время, которое ввёл житель:
  * «8:10», «08.10», «сегодня 8:10», «вчера 23:00», «22.09 08:10», «22.09.2026 8:10».
  */
-export function parseLocalInput(text: string, now: Date, tz: string): ParsedTime {
+export function parseLocalInput(text: string, now: Date, tz: string, opts: { future?: boolean } = {}): ParsedTime {
   const t = text.trim().toLowerCase().replace(/\s+/g, ' ').replace(/[,в]\s/g, ' ');
   const today = localParts(now, tz);
 
@@ -185,11 +185,14 @@ export function parseLocalInput(text: string, now: Date, tz: string): ParsedTime
   }
   if (dayShift !== 0) date = new Date(date.getTime() + dayShift * 24 * MS_HOUR);
 
-  // Дата без года в будущем — значит, прошлый год (например, 30.12 в январе).
-  if (dateMatch && !dateMatch[3] && date.getTime() - now.getTime() > 24 * MS_HOUR) {
+  // Дата без года в будущем — значит, прошлый год (например, 30.12 в январе). Срок, который ещё впереди
+  // (окончание плановых работ), — наоборот, может быть в будущем: future.
+  if (!opts.future && dateMatch && !dateMatch[3] && date.getTime() - now.getTime() > 24 * MS_HOUR) {
     date = fromLocal(y - 1, mo, d, h, mi, tz);
   }
-  if (date.getTime() - now.getTime() > 5 * MS_MIN) {
+  if (opts.future) {
+    if (date.getTime() - now.getTime() > 92 * 24 * MS_HOUR) return { ok: false, error: 'Проверьте дату: это больше чем через три месяца.' };
+  } else if (date.getTime() - now.getTime() > 5 * MS_MIN) {
     return { ok: false, error: 'Это время ещё не наступило. Укажите время в прошлом.' };
   }
   if (now.getTime() - date.getTime() > 92 * 24 * MS_HOUR) {

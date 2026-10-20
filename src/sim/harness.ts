@@ -1,7 +1,7 @@
 // Стенд без MAX: ядро бота + SQLite + «часы», которые можно перематывать.
 // Используется терминальным симулятором (npm run sim) и сквозными тестами сценария.
 
-import { mkdtempSync } from 'node:fs';
+import { copyFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Db } from '../db/db.ts';
@@ -17,8 +17,19 @@ export class RecordingOutbox implements Outbox {
   private n = 0;
   onSend?: (r: Record_) => void;
   failChats = new Set<number>();
+  /** Эти жители «недоступны»: MAX не принимает им сообщения. */
+  failUsers = new Set<number>();
+  /** Бот удаляет PDF сразу после отправки — стенд оставляет себе копию, чтобы её можно было проверить. */
+  private keepDir: string | null = null;
 
   async toUser(userId: number, msg: OutMessage): Promise<Sent> {
+    if (this.failUsers.has(userId)) throw new Error('user.unavailable');
+    if (msg.file) {
+      this.keepDir ??= mkdtempSync(join(tmpdir(), 'vernem-sent-'));
+      const copy = join(this.keepDir, `${this.n + 1}-${msg.file.name}`);
+      copyFileSync(msg.file.path, copy);
+      msg = { ...msg, file: { ...msg.file, path: copy } };
+    }
     const r = { to: 'user' as const, id: userId, msg, mid: `mid.${++this.n}` };
     this.log.push(r);
     this.onSend?.(r);

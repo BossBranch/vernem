@@ -66,6 +66,8 @@ export type HouseInfo = {
   twoPowerSources?: boolean;
   updatedAt?: string;
   updatedBy?: number;
+  /** Кто и когда менял каждое поле: карточка общая, поэтому изменения видны всем жителям дома. */
+  fieldsBy?: Partial<Record<string, { by?: number; at: string; prev?: string }>>;
 };
 
 /** Адрес в списке «Мои адреса»: у одного человека их может быть несколько. */
@@ -85,6 +87,8 @@ export type Incident = {
   variant: string | null;
   entrance: string | null;
   demo: number;
+  /** Плановое отключение горячей воды: до какого времени его объявили. Перерыв считается с этого времени. */
+  planned_until?: string | null;
   created_at: string;
 };
 
@@ -137,10 +141,15 @@ export type Participant = {
 
 export type Reading = { id: number; participant_id: number; at: string; temp_c: number };
 
-export type ReminderKind = 'ask_restored' | 'ask_receipt' | 'ask_inspection' | 'dispatch_timeout';
+export type ReminderKind = 'ask_restored' | 'ask_submitted' | 'ask_receipt' | 'ask_inspection' | 'dispatch_timeout';
 
 /** Сотрудник УК или диспетчер, подключённый к дому по ссылке-приглашению: ему приходят заявки жителей. */
-export type Dispatcher = { id: number; house_id: number; user_id: number; title: string; created_at: string };
+export type Dispatcher = { id: number; house_id: number; user_id: number; title: string; created_at: string; active_at?: string | null };
+
+/** Сотрудник УК без действий дольше этого срока отключается от дома сам: роль не живёт вечно. */
+export const DISPATCHER_TTL_DAYS = 90;
+/** Сколько раз пробуем отправить напоминание или уведомление, если MAX не принял сообщение. */
+export const MAX_SEND_ATTEMPTS = 5;
 
 /**
  * Заявка, отправленная в УК через бота. Одна на отключение: соседи присоединяются к ней.
@@ -163,7 +172,7 @@ export type Dispatch = {
   declined_at: string | null;
   timeout_at: string | null;
 };
-export type Reminder = { id: number; kind: ReminderKind; participant_id: number; user_id: number; due_at: string; sent_at: string | null };
+export type Reminder = { id: number; kind: ReminderKind; participant_id: number; user_id: number; due_at: string; sent_at: string | null; attempts?: number };
 
 /** Уведомление соседа о зафиксированном в доме отключении. */
 export type Alert = { id: number; incident_id: number; user_id: number; due_at: string; sent_at: string | null; answer: string | null };
@@ -386,6 +395,10 @@ const ADDED_COLUMNS: [table: string, column: string, ddl: string][] = [
   ['user_houses', 'account', 'TEXT'],
   ['participants', 'own_evidence', 'TEXT'],
   ['houses', 'dispatch_code', 'TEXT'],
+  ['reminders', 'attempts', 'INTEGER NOT NULL DEFAULT 0'],
+  ['alerts', 'attempts', 'INTEGER NOT NULL DEFAULT 0'],
+  ['incidents', 'planned_until', 'TEXT'],
+  ['dispatchers', 'active_at', 'TEXT'],
 ];
 
 /**
@@ -556,6 +569,39 @@ export class Db {
       this.db.prepare('DELETE FROM dispatchers WHERE user_id = ?').run(userId);
       this.db.prepare('DELETE FROM user_houses WHERE user_id = ?').run(userId);
       this.db.prepare('UPDATE houses SET chair_user_id = NULL WHERE chair_user_id = ?').run(userId);
+      // Отключения и акты, которые остались у соседей, больше не ссылаются на этого жителя.
+      // Акт переходит к соседу, который в нём подписан: иначе отметить «подписан» было бы некому.
+      for (const a of this.db.prepare('SELECT id FROM acts WHERE initiator_user_id = ?').all(userId) as { id: number }[]) {
+        const next = this.db.prepare('SELECT user_id FROM act_signers WHERE act_id = ? AND user_id > 0 ORDER BY id LIMIT 1').get(a.id) as { user_id: number } | undefined;
+        this.db.prepare('UPDATE acts SET initiator_user_id = ? WHERE id = ?').run(next?.user_id ?? 0, a.id);
+      }
+      for (const i of this.db.prepare('SELECT id FROM incidents WHERE reporter_user_id = ?').all(userId) as { id: number }[]) {
+        const next = this.db.prepare('SELECT user_id FROM participants WHERE incident_id = ? ORDER BY id LIMIT 1').get(i.id) as { user_id: number } | undefined;
+        this.db.prepare('UPDATE incidents SET reporter_user_id = ? WHERE id = ?').run(next?.user_id ?? 0, i.id);
+      }
+      this.db.prepare('UPDATE dispatches SET sent_by = 0 WHERE sent_by = ?').run(userId);
+      // Сотрудник УК удалил свои данные: в заявлениях жителей остаются номер и время, а не его имя.
+      this.db.prepare("UPDATE dispatches SET accepted_by = NULL, accepted_title = 'сотрудник УК' WHERE accepted_by = ?").run(userId);
+      this.db.prepare('UPDATE chats SET linked_by_user_id = NULL WHERE linked_by_user_id = ?').run(userId);
+      for (const h of this.db.prepare("SELECT id, info FROM houses WHERE info LIKE '%updatedBy%'").all() as { id: number; info: string }[]) {
+        try {
+          const info = JSON.parse(h.info) as HouseInfo;
+          let changed = false;
+          if (info.updatedBy === userId) {
+            delete info.updatedBy;
+            changed = true;
+          }
+          for (const f of Object.values(info.fieldsBy ?? {})) {
+            if (f?.by === userId) {
+              delete f.by;
+              changed = true;
+            }
+          }
+          if (changed) this.db.prepare('UPDATE houses SET info = ? WHERE id = ?').run(JSON.stringify(info), h.id);
+        } catch {
+          /* битый JSON карточки не мешает удалению */
+        }
+      }
       this.db.prepare('DELETE FROM events WHERE user_id = ?').run(userId);
       this.db.prepare('DELETE FROM users WHERE id = ?').run(userId);
       this.db.exec('COMMIT');
@@ -623,9 +669,13 @@ export class Db {
 
   // ---------- «Мои адреса» ----------
 
+  /**
+   * Адреса жителя. Демо-дома в списке нет: «Демо-дела заново» добавляет его жителю ради квартиры и карточки,
+   * но настоящее дело на демо-адресе создать нельзя.
+   */
   listUserHouses(userId: number): UserHouse[] {
     return this.db
-      .prepare('SELECT h.*, uh.entrance AS entrance, uh.notify AS notify, uh.flat AS flat, uh.account AS account FROM user_houses uh JOIN houses h ON h.id = uh.house_id WHERE uh.user_id = ? ORDER BY uh.created_at, h.id')
+      .prepare('SELECT h.*, uh.entrance AS entrance, uh.notify AS notify, uh.flat AS flat, uh.account AS account FROM user_houses uh JOIN houses h ON h.id = uh.house_id WHERE uh.user_id = ? AND h.demo = 0 ORDER BY uh.created_at, h.id')
       .all(userId) as UserHouse[];
   }
 
@@ -669,7 +719,9 @@ export class Db {
 
   removeUserHouse(userId: number, houseId: number) {
     this.db.prepare('DELETE FROM user_houses WHERE user_id = ? AND house_id = ?').run(userId, houseId);
-    const next = this.db.prepare('SELECT house_id FROM user_houses WHERE user_id = ? ORDER BY created_at DESC LIMIT 1').get(userId) as { house_id: number } | undefined;
+    const next = this.db
+      .prepare('SELECT uh.house_id FROM user_houses uh JOIN houses h ON h.id = uh.house_id WHERE uh.user_id = ? AND h.demo = 0 ORDER BY uh.created_at DESC LIMIT 1')
+      .get(userId) as { house_id: number } | undefined;
     this.db.prepare('UPDATE users SET house_id = ? WHERE id = ?').run(next?.house_id ?? null, userId);
   }
 
@@ -741,6 +793,27 @@ export class Db {
     this.db.prepare('DELETE FROM dispatchers WHERE house_id = ? AND user_id = ?').run(houseId, userId);
   }
 
+  getDispatcherById(id: number): Dispatcher | undefined {
+    return this.db.prepare('SELECT * FROM dispatchers WHERE id = ?').get(id) as Dispatcher | undefined;
+  }
+
+  /** Сотрудник УК что-то сделал с заявкой — срок его подключения считается заново. */
+  touchDispatcher(houseId: number, userId: number, at: Date) {
+    this.db.prepare('UPDATE dispatchers SET active_at = ? WHERE house_id = ? AND user_id = ?').run(at.toISOString(), houseId, userId);
+  }
+
+  /** Забирает и удаляет подключения сотрудников УК, которые ничего не делали с cutoff. */
+  takeStaleDispatchers(cutoff: Date): Dispatcher[] {
+    const rows = this.db.prepare('SELECT * FROM dispatchers WHERE COALESCE(active_at, created_at) < ?').all(cutoff.toISOString()) as Dispatcher[];
+    for (const d of rows) this.db.prepare('DELETE FROM dispatchers WHERE id = ?').run(d.id);
+    return rows;
+  }
+
+  /** Было ли у жителя дело в этом доме (даже если адрес он потом убрал из списка). */
+  hasCasesInHouse(userId: number, houseId: number): boolean {
+    return !!this.db.prepare('SELECT 1 FROM participants p JOIN incidents i ON i.id = p.incident_id WHERE p.user_id = ? AND i.house_id = ? LIMIT 1').get(userId, houseId);
+  }
+
   createDispatch(incidentId: number, houseId: number, sentBy: number, at: Date): Dispatch {
     this.db.prepare('INSERT INTO dispatches (incident_id, house_id, sent_by, sent_at) VALUES (?, ?, ?, ?)').run(incidentId, houseId, sentBy, at.toISOString());
     return this.dispatchFor(incidentId)!;
@@ -767,14 +840,16 @@ export class Db {
 
   // ---------- отключения ----------
 
-  createIncident(i: Omit<Incident, 'id' | 'code' | 'created_at' | 'ended_at' | 'demo' | 'entrance'> & { demo?: number; entrance?: string | null }): Incident {
+  createIncident(
+    i: Omit<Incident, 'id' | 'code' | 'created_at' | 'ended_at' | 'demo' | 'entrance' | 'planned_until'> & { demo?: number; entrance?: string | null; planned_until?: string | null },
+  ): Incident {
     const code = newCode();
     const res = this.db
       .prepare(
-        `INSERT INTO incidents (code, house_id, service_key, reporter_user_id, started_at, ads_number, evidence, variant, entrance, demo)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO incidents (code, house_id, service_key, reporter_user_id, started_at, ads_number, evidence, variant, entrance, demo, planned_until)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(code, i.house_id, i.service_key, i.reporter_user_id, i.started_at, i.ads_number, i.evidence, i.variant, i.entrance ?? null, i.demo ?? 0);
+      .run(code, i.house_id, i.service_key, i.reporter_user_id, i.started_at, i.ads_number, i.evidence, i.variant, i.entrance ?? null, i.demo ?? 0, i.planned_until ?? null);
     return this.getIncident(Number(res.lastInsertRowid))!;
   }
 
@@ -905,7 +980,10 @@ export class Db {
     else this.db.prepare('DELETE FROM reminders WHERE participant_id = ? AND sent_at IS NULL').run(participantId);
   }
 
-  /** Забирает наступившие напоминания и сразу помечает их отправленными, чтобы не отправить дважды. */
+  /**
+   * Забирает наступившие напоминания и сразу помечает их отправленными, чтобы не отправить дважды.
+   * Если MAX не принял сообщение, retryReminder возвращает напоминание в очередь.
+   */
   takeDueReminders(now: Date, limit = 50): Reminder[] {
     const rows = this.db
       .prepare('SELECT * FROM reminders WHERE sent_at IS NULL AND due_at <= ? ORDER BY due_at LIMIT ?')
@@ -913,6 +991,11 @@ export class Db {
     const mark = this.db.prepare('UPDATE reminders SET sent_at = ? WHERE id = ?');
     for (const r of rows) mark.run(now.toISOString(), r.id);
     return rows;
+  }
+
+  /** Не доставили: повторим в dueAt, но не больше MAX_SEND_ATTEMPTS раз. true — повтор запланирован. */
+  retryReminder(id: number, dueAt: Date): boolean {
+    return this.db.prepare('UPDATE reminders SET sent_at = NULL, due_at = ?, attempts = attempts + 1 WHERE id = ? AND attempts + 1 < ?').run(dueAt.toISOString(), id, MAX_SEND_ATTEMPTS).changes > 0;
   }
 
   // ---------- уведомления соседей ----------
@@ -927,6 +1010,10 @@ export class Db {
     const mark = this.db.prepare('UPDATE alerts SET sent_at = ? WHERE id = ?');
     for (const a of rows) mark.run(now.toISOString(), a.id);
     return rows;
+  }
+
+  retryAlert(id: number, dueAt: Date): boolean {
+    return this.db.prepare('UPDATE alerts SET sent_at = NULL, due_at = ?, attempts = attempts + 1 WHERE id = ? AND attempts + 1 < ?').run(dueAt.toISOString(), id, MAX_SEND_ATTEMPTS).changes > 0;
   }
 
   getAlert(id: number): Alert | undefined {
@@ -1041,6 +1128,17 @@ export class Db {
 
   linkChat(chatId: number, houseId: number, userId: number) {
     this.db.prepare('UPDATE chats SET house_id = ?, linked_by_user_id = ? WHERE chat_id = ?').run(houseId, userId, chatId);
+  }
+
+  /** Домовой чат этого дома (последний привязанный). Карточки отключений дома уходят только туда. */
+  houseChat(houseId: number): { chat_id: number; title: string | null } | undefined {
+    return this.db.prepare('SELECT chat_id, title FROM chats WHERE house_id = ? ORDER BY added_at DESC, chat_id LIMIT 1').get(houseId) as any;
+  }
+
+  /** Бот больше не может писать в чат: карточки туда не отправляем, пока чат не привяжут снова. */
+  unlinkChat(chatId: number) {
+    this.db.prepare('UPDATE chats SET house_id = NULL WHERE chat_id = ?').run(chatId);
+    this.db.prepare('UPDATE users SET house_chat_id = NULL WHERE house_chat_id = ?').run(chatId);
   }
 
   removeChat(chatId: number) {

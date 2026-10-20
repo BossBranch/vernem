@@ -47,8 +47,47 @@ export class MaxOutbox implements Outbox {
 
 const nameOf = (u?: { first_name?: string; name?: string } | null) => u?.first_name || u?.name || undefined;
 
-/** Подписывает бота на события MAX и переводит их во внутренние Input. */
+/**
+ * Уже обработанные события. MAX повторяет webhook, если не получил ответ вовремя, — повтор не должен
+ * второй раз создать дело или нажать кнопку. Помним последние события; ключ — id события в MAX.
+ */
+export class SeenUpdates {
+  private readonly keys = new Set<string>();
+  private readonly limit: number;
+  constructor(limit = 5000) {
+    this.limit = limit;
+  }
+  /** true — событие новое (и теперь запомнено), false — уже было. */
+  first(key: string | null): boolean {
+    if (!key) return true;
+    if (this.keys.has(key)) return false;
+    this.keys.add(key);
+    if (this.keys.size > this.limit) this.keys.delete(this.keys.values().next().value!);
+    return true;
+  }
+}
+
+/** Ключ события: id нажатия, id сообщения или пользователь со временем события. */
+export function updateKey(update: any): string | null {
+  if (!update?.update_type) return null;
+  if (update.update_type === 'message_callback' && update.callback?.callback_id) return `cb:${update.callback.callback_id}`;
+  if (update.update_type === 'message_created' && update.message?.body?.mid) return `msg:${update.message.body.mid}`;
+  const who = update.user?.user_id ?? update.chat_id ?? '';
+  return update.timestamp ? `${update.update_type}:${who}:${update.timestamp}` : null;
+}
+
+/** Подписывает бота на события MAX и переводит их во внутренние Input. Вызывать один раз на бота. */
 export function wireBot(bot: Bot, handle: (input: Input) => Promise<void>) {
+  const seen = new SeenUpdates();
+  // Первым — отсев повторов: остальные обработчики повторное событие не увидят.
+  bot.use(async (ctx, next) => {
+    if (!seen.first(updateKey(ctx.update))) {
+      console.warn('[max] повтор события, пропускаю', ctx.update?.update_type);
+      return;
+    }
+    return next();
+  });
+
   bot.on('bot_started', async (ctx) => {
     const user = ctx.user;
     if (!user) return;

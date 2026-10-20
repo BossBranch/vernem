@@ -3,7 +3,7 @@
 //   демо 1 — дозвонились, есть номер заявки: заявление готово;
 //   демо 2 — не дозвонились: акт с соседями собран, осталось отметить «подписан» и «Воду дали»;
 //   демо 3 — архив: заявление подано, вернули меньше положенного (видно, как потребовать остальное).
-// Прежние демо-дела жителя удаляются, настоящие дела, ФИО и состояние диалога не трогаются.
+// Прежние демо-дела жителя удаляются, настоящие дела, ФИО, текущий адрес и состояние диалога не трогаются.
 
 import type { Db } from '../db/db.ts';
 import { Harness } from './harness.ts';
@@ -54,10 +54,11 @@ export async function resetDemoCases(db: Db, userId: number, now = new Date()): 
     await h.press(userId, 'Пропустить');
     await h.press(userId, 'Запомнить');
     const archive = mine()[0];
-    // Подали на следующий день — дата и входящий номер попадут в требование и жалобу (без пустых «___»).
-    await h.advance(24 * H);
-    db.updateParticipant(archive.id, { claim: JSON.stringify({ ...JSON.parse(db.getParticipant(archive.id)!.claim!), submittedAt: h.now().toISOString(), incomingNumber: 'ДЕМО-118' }) });
-    await h.advance(30 * 24 * H);
+    await h.press(userId, 'Я подал(а) заявление');
+    await h.press(userId, 'Сегодня');
+    await h.text(userId, 'ДЕМО-118');
+    // Подали в тот же день — дата и входящий номер попадут в требование и жалобу (без пустых «___»).
+    await h.advance(31 * 24 * H);
     await h.bot.remind('ask_receipt', archive.id);
     await h.press(userId, 'Да, вернули');
     await h.text(userId, '60');
@@ -87,7 +88,8 @@ export async function resetDemoCases(db: Db, userId: number, now = new Date()): 
     return demo.length;
   } finally {
     h.close();
-    if (before) db.updateUser(userId, { fio: before.fio, save_personal: before.save_personal });
+    // Демо-дом добавлен в список жителя ради квартиры и карточки, но текущим адресом не становится.
+    if (before) db.updateUser(userId, { fio: before.fio, save_personal: before.save_personal, house_id: before.house_id });
     db.setState(userId, state.state, state.data ?? {});
   }
 }

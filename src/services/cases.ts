@@ -11,6 +11,12 @@ import { buildActDoc } from '../docs/act.ts';
 
 export type CaseBundle = { p: Participant; incident: Incident; house: House };
 
+/**
+ * Замер температуры в силе не дольше суток: дальше нужен новый замер. Иначе один низкий замер растягивался бы
+ * на все дни до «Стало тепло» без подтверждения (бот каждые несколько часов просит новый замер).
+ */
+export const READING_VALID_HOURS = 24;
+
 export function loadCase(db: Db, participantId: number): CaseBundle | null {
   const p = db.getParticipant(participantId);
   if (!p) return null;
@@ -41,9 +47,9 @@ export function calcInputFor(db: Db, norms: Norms, c: CaseBundle, now: Date): Ca
     .map((r) => ({ at: new Date(r.at), tempC: r.temp_c }))
     .filter((r) => r.at.getTime() >= start - 60_000);
   if (norm.kind === 'heating_temperature') {
-    return { kind: 'heating_temperature', readings, end, corner: !!c.p.corner };
+    return { kind: 'heating_temperature', readings, end, corner: !!c.p.corner, readingHours: READING_VALID_HOURS };
   }
-  return { kind: 'hot_water_temperature', readings, end };
+  return { kind: 'hot_water_temperature', readings, end, readingHours: READING_VALID_HOURS };
 }
 
 /**
@@ -305,7 +311,9 @@ export type CaseSummary = {
   demo: boolean;
   /** 1 — демо из бота или «есть номер», 3 — архивное демо «вернули меньше» (демо-данные мини-приложения). */
   demoKind: number;
-  months: { month: string; percent: number; lines: string[]; bill: number | null; billHint: number | null; coldTariffHours: number; hoursBelow: number | null }[];
+  /** Плановое отключение горячей воды: до какого времени объявили работы. */
+  plannedUntil: string | null;
+  months: { month: string; percent: number; lines: string[]; bill: number | null; billHint: number | null; coldTariffHours: number; hoursBelow: number | null; unmeasuredHours: number }[];
   serviceButton: string;
   basis: string;
   basisUrl: string;
@@ -414,6 +422,7 @@ export function summarize(db: Db, norms: Norms, c: CaseBundle, now: Date): CaseS
     neighbours: db.listParticipants(c.incident.id).length - 1,
     demo: !!c.incident.demo,
     demoKind: c.incident.demo ?? 0,
+    plannedUntil: c.incident.planned_until ?? null,
     months: calc.months.map((m) => ({
       month: m.month,
       percent: m.percent,
@@ -422,6 +431,7 @@ export function summarize(db: Db, norms: Norms, c: CaseBundle, now: Date): CaseS
       billHint: hints[m.month] ?? null,
       coldTariffHours: m.coldTariffHours ?? 0,
       hoursBelow: norm.kind === 'interruption' ? null : (m.totalHours ?? null),
+      unmeasuredHours: m.unmeasuredHours ?? 0,
     })),
     serviceButton: norm.button,
     basis: norm.item,

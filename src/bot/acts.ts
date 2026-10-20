@@ -1,5 +1,7 @@
 // Акт без исполнителя (п. 110(1) ПП РФ № 354): подписывают не менее 2 потребителей и председатель
-// совета дома. Акт — доказательство, заявление — требование денег; акт прикладывается к заявлению.
+// совета дома (в ТСЖ и ЖСК — председатель правления). Без председателя акт неполный: бот даёт отметить
+// «без председателя», но прямо говорит, что УК может такой акт не принять, и просит добрать подпись.
+// Акт — доказательство, заявление — требование денег; акт прикладывается к заявлению.
 // PDF для подписи житель получает сразу: в нём пустые строки для соседей, которых нет в боте, —
 // можно распечатать и обойти подъезд. Соседей из бота бот зовёт сам и вписывает их имена в акт.
 // Строка для подписи председателя есть в самом акте: отдельной роли в боте у него нет.
@@ -145,8 +147,8 @@ async function confirmSigner(bot: Vernem, userId: number, actId: number, fio: st
     }
     await bot.send(userId, {
       text: [
-        '📄 **Акт готов к подписи.** Распечатайте и попросите расписаться 2+ соседей и председателя совета дома (старшего по дому, если он есть).',
-        'Председателя нет или он отказался — подписывайте без него: при отметке «Акт подписан» выберите «без председателя».',
+        '📄 **Акт готов к подписи.** Распечатайте и попросите расписаться 2+ соседей и председателя совета дома (в ТСЖ — председателя ТСЖ). По правилам нужна и его подпись.',
+        'Председателя нет или он отказался — всё равно подпишите с соседями и отметьте «без председателя». Такой акт подтверждает нарушение в жалобе, но УК может его не принять.',
         demo ? `🧪 Соседи (демо) ${DEMO_SIGNERS.map(([, f]) => shortName(f)).join(' и ')} подтвердили в боте — их имена уже в акте.` : '',
         sent ? `Ещё отправил его ${sent} ${sent === 1 ? 'соседу' : 'соседям'} в бот — кто подтвердит, того впишу сам.` : '',
       ]
@@ -261,6 +263,15 @@ export function unmarkActSigned(bot: Vernem, userId: number, actId: number): boo
   return true;
 }
 
+/** Председатель расписался на уже подписанном акте — отмечает тот, кто начал акт. */
+export function markChairLate(bot: Vernem, userId: number, actId: number): boolean {
+  const ctx = load(bot, actId);
+  if (!ctx || ctx.act.initiator_user_id !== userId || ctx.act.status !== 'signed') return false;
+  bot.db.setActChairSigned(actId, 1);
+  bot.db.track(userId, 'act_chair_late', { act: actId });
+  return true;
+}
+
 /** «Акт подписан на бумаге» — отмечает только тот, кто начал акт. */
 export async function markActSigned(bot: Vernem, userId: number, actId: number, chair: boolean): Promise<boolean> {
   const ctx = load(bot, actId);
@@ -284,13 +295,15 @@ export async function showAct(bot: Vernem, userId: number, actId: number) {
   if (!mine && open(ctx)) rows.push([cb('✍️ Подтвердить акт', `ak:sg:${actId}`)]);
   if (mine || isInitiator) rows.push([cb('📄 Акт (PDF)', `ak:pdf:${actId}`)]);
   if (open(ctx) && isInitiator) rows.push([cb('✅ Акт подписан', `ak:done:${actId}`)]);
+  if (isInitiator && ctx.act.status === 'signed' && ctx.act.chair_signed === 0) rows.push([cb('✍️ Председатель подписал', `ak:chairlate:${actId}`)]);
   rows.push([cb('⬅️ Меню', 'menu')]);
   return bot.send(userId, {
     text: [
       `✍️ **Акт: ${ACT_STATUS_TITLE[ctx.act.status]}**`,
       ...actSummaryLines(bot, ctx),
       ...ctx.signers.map((s, i) => `${i + 1}. ${shortName(s.fio)}${s.flat ? `, кв. ${s.flat}` : ''}`),
-      open(ctx) ? `Нужны подписи минимум ${MIN_RESIDENTS} жителей и председателя совета дома. Председателя нет — хватит подписей жителей.` : '',
+      open(ctx) ? `Нужны подписи минимум ${MIN_RESIDENTS} жителей и председателя совета дома (в ТСЖ — председателя ТСЖ). Без председателя акт неполный: УК может его не принять.` : '',
+      ctx.act.status === 'signed' && ctx.act.chair_signed === 0 ? '⚠️ Подписан без председателя. Подпишет позже — отметьте.' : '',
     ]
       .filter(Boolean)
       .join('\n'),
@@ -358,9 +371,23 @@ export async function onActButton(bot: Vernem, userId: number, action: string, a
       if (!ctx || !(await markActSigned(bot, userId, id, b === '1'))) return bot.stale(userId);
       const p = bot.db.getParticipantFor(ctx.incident.id, userId);
       return bot.send(userId, {
-        text: `✅ Акт подписан — он попадёт в заявления всех участников. Сфотографируйте его: оригинал понадобится.${b === '1' ? '' : '\nБез подписи председателя акт слабее, но подписи жителей всё равно подтверждают нарушение.'}`,
+        text: `✅ Акт подписан — он попадёт в заявления всех участников. Сфотографируйте его: оригинал понадобится.${b === '1' ? '' : '\n⚠️ Без подписи председателя акт неполный (п. 110(1) Правил): УК может его не принять. Если председатель есть — попросите его подписать и отметьте это.'}`,
         // «К делу» — там кнопка «Починили»: после неё заявление с актом в приложениях.
-        buttons: [[cb('📷 Фото подписанного акта', p ? `phadd:${p.id}:act` : 'menu')], [p ? cb('⬅️ К делу', `cs:${p.id}`) : cb('⬅️ Меню', 'menu')]],
+        buttons: [
+          [cb('📷 Фото подписанного акта', p ? `phadd:${p.id}:act` : 'menu')],
+          ...(b === '1' ? [] : [[cb('✍️ Председатель подписал позже', `ak:chairlate:${id}`)]]),
+          [p ? cb('⬅️ К делу', `cs:${p.id}`) : cb('⬅️ Меню', 'menu')],
+        ],
+      });
+    }
+    case 'chairlate': {
+      // Председатель расписался на уже подписанном акте — заявление станет полным (снимок заметит изменение).
+      const ctx = load(bot, id);
+      if (!ctx || !markChairLate(bot, userId, id)) return bot.stale(userId);
+      const p = bot.db.getParticipantFor(ctx.incident.id, userId);
+      return bot.send(userId, {
+        text: '✅ Отметил: председатель подписал акт. Если заявление уже скачано — скачайте новое, в нём будет его подпись.',
+        buttons: [[p ? cb('⬅️ К делу', `cs:${p.id}`) : cb('⬅️ Меню', 'menu')]],
       });
     }
   }
@@ -388,7 +415,8 @@ export function scheduleInspectionCheck(bot: Vernem, pid: number, userId: number
 export async function remindInspection(bot: Vernem, pid: number) {
   const c = loadCase(bot.db, pid);
   if (!c || c.p.status !== 'tracking' || c.p.inspection === 'executor_act' || c.p.inspection === 'no_show') return;
-  return bot.safeSend(c.p.user_id, {
+  // send: не дошло — планировщик повторит.
+  return bot.send(c.p.user_id, {
     text: `Прошло 2 часа. Приходили из УК замерить температуру и составить акт? По правилам — не позднее 2 часов (п. 108 ПП № 354).`,
     buttons: [[cb('✅ Да, акт есть', `insp:${pid}:act`), cb('❌ Никто', `insp:${pid}:none`)], [cb('Договорились на потом', `insp:${pid}:later`)]],
   });

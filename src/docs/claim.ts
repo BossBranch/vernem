@@ -8,7 +8,7 @@ import { coldTariffAmount, refundAmount } from '../calc/engine.ts';
 import type { Norms, ServiceNorm } from '../calc/norms.ts';
 import { allowedMonthlyHours } from '../calc/norms.ts';
 import { fmtNum, fmtPercent, fmtRub, fmtTemp } from '../calc/format.ts';
-import { formatDate, formatDateTime, formatDuration, hoursBetween, monthPrepositional, monthTitle, toMinute } from '../calc/time.ts';
+import { formatDate, formatDateTime, formatDuration, hoursBetween, localParts, monthPrepositional, monthTitle, toMinute } from '../calc/time.ts';
 import type { Act, ActSigner, Claim, Dispatch, House, Incident, Participant, Photo, Reading } from '../db/db.ts';
 
 /**
@@ -193,12 +193,13 @@ function dispatchFacts(input: Pick<ClaimInput, 'incident' | 'house' | 'participa
   const { incident, house, participant: p, dispatch: d } = input;
   if (!d || d.status === 'declined' || p.own_ads_number) return null;
   const waste = incident.service_key === 'waste_off';
-  const channel = `${waste ? 'региональному оператору' : 'исполнителю'} через подключённый им канал приёма заявок в мессенджере MAX`;
+  // Как есть: сотрудник подключился по приглашению жителей и сам указал, кто он. Проверить это бот не может.
+  const channel = `${waste ? 'региональному оператору' : 'исполнителю'} через канал приёма заявок в мессенджере MAX (сервис «Вернём»)`;
   const sent = formatDateTime(new Date(d.sent_at), house.tz);
   const what = `о нарушении предоставления коммунальной услуги «${serviceName}»`;
   if (d.number && d.accepted_at && incident.ads_number === d.number) {
     const reg = formatDateTime(new Date(d.accepted_at), house.tz);
-    const who = d.accepted_title ? `, сообщение принял(а) ${d.accepted_title}` : '';
+    const who = d.accepted_title ? `, сообщение принял(а) сотрудник, указавший себя как «${d.accepted_title}»` : '';
     if (p.role === 'neighbour') {
       return [`О том же нарушении другой житель дома сообщил ${channel}: сообщение отправлено ${sent}, зарегистрировано под № ${d.number}, время регистрации — ${reg}${who} (п. 105–106 Правил).`];
     }
@@ -239,24 +240,38 @@ export function buildClaim(input: ClaimInput): ClaimDoc {
   ];
 
   const facts: string[] = [];
+  // Ночью норма ниже (у отопления — на 3 °C, у горячей воды допуск больше): замер сравниваем с нормой его часа.
+  const night = (at: string, from: number, to: number) => {
+    const h = localParts(new Date(at), tz).hour;
+    return h >= from && h < to;
+  };
+  if (calc.kind === 'interruption' && incident.planned_until) {
+    facts.push(`Плановое отключение горячего водоснабжения было объявлено до ${formatDateTime(new Date(incident.planned_until), tz)}; в объявленный срок горячее водоснабжение не возобновлено.`);
+  }
   if (calc.kind === 'interruption') {
     facts.push(
       `С ${formatDateTime(start, tz)} по ${formatDateTime(end, tz)} (${formatDuration(hoursBetween(toMinute(start), toMinute(end)))}) коммунальная услуга «${serviceName}» не предоставлялась (перерыв в предоставлении).`,
     );
   } else if (calc.kind === 'heating_temperature') {
-    const t = norm.temperature as { norm_c: number; corner_norm_c: number };
+    const t = norm.temperature as { norm_c: number; corner_norm_c: number; night_from_hour: number; night_to_hour: number; night_drop_c: number };
     const normC = p.corner ? t.corner_norm_c : t.norm_c;
     facts.push(
       `С ${formatDateTime(start, tz)} по ${formatDateTime(end, tz)} температура воздуха в жилом помещении${p.corner ? ' (угловая комната)' : ''} была ниже нормативной. Результаты измерений:`,
     );
-    for (const r of readings) facts.push(`— ${formatDateTime(new Date(r.at), tz)}: ${fmtTemp(r.temp_c)}${r.temp_c >= normC ? ' (в пределах нормы)' : ''}`);
+    for (const r of readings) {
+      const required = night(r.at, t.night_from_hour, t.night_to_hour) ? normC - t.night_drop_c : normC;
+      facts.push(`— ${formatDateTime(new Date(r.at), tz)}: ${fmtTemp(r.temp_c)}${r.temp_c >= required ? ' (в пределах нормы)' : ''}`);
+    }
   } else {
-    const t = norm.temperature as { norm_c: number; day_tolerance_c: number };
+    const t = norm.temperature as { norm_c: number; day_tolerance_c: number; night_tolerance_c: number; night_from_hour: number; night_to_hour: number };
     facts.push(
       `С ${formatDateTime(start, tz)} по ${formatDateTime(end, tz)} температура горячей воды в точке водоразбора отклонялась от нормативной. Результаты измерений:`,
     );
     // Замер в норме тоже пишем — честно помечаем, что в этот момент вода была нормальной.
-    for (const r of readings) facts.push(`— ${formatDateTime(new Date(r.at), tz)}: ${fmtTemp(r.temp_c)}${r.temp_c >= t.norm_c - t.day_tolerance_c ? ' (в пределах нормы)' : ''}`);
+    for (const r of readings) {
+      const tol = night(r.at, t.night_from_hour, t.night_to_hour) ? t.night_tolerance_c : t.day_tolerance_c;
+      facts.push(`— ${formatDateTime(new Date(r.at), tz)}: ${fmtTemp(r.temp_c)}${r.temp_c >= t.norm_c - tol ? ' (в пределах нормы)' : ''}`);
+    }
   }
 
   facts.push(...adsFacts(input, serviceName));
@@ -268,7 +283,7 @@ export function buildClaim(input: ClaimInput): ClaimDoc {
     const allowed = allowedMonthlyHours(norm.interruption, incident.variant);
     const unit = norm.interruption.unit_hours === 1 ? 'каждый час' : `каждые ${norm.interruption.unit_hours} ч`;
     normLines.push(
-      `Согласно ${norm.item} к Правилам предоставления коммунальных услуг (утв. ПП РФ от 06.05.2011 № 354) допустимая продолжительность перерыва составляет ${fmtNum(allowed)} ч суммарно в течение месяца${incident.service_key === 'electricity_off' && incident.variant === 'two_sources' ? ' (при наличии двух независимых взаимно резервирующих источников питания — многоквартирный дом с лифтом или выше 9 этажей)' : ''}; за ${unit} превышения размер платы за месяц снижается на ${fmtPercent(norm.interruption.rate_percent)}.`,
+      `Согласно ${norm.item} к Правилам предоставления коммунальных услуг (утв. ПП РФ от 06.05.2011 № 354) допустимая продолжительность перерыва составляет ${fmtNum(allowed)} ч суммарно в течение месяца${incident.service_key === 'electricity_off' && incident.variant === 'two_sources' ? ' (при наличии двух независимых взаимно резервирующих источников питания)' : ''}; за ${unit} превышения размер платы за месяц снижается на ${fmtPercent(norm.interruption.rate_percent)}.`,
     );
   } else {
     normLines.push(

@@ -273,7 +273,14 @@ test('дело в мини-приложении: повтор, правка вр
     await fetch(`${base}/api/cases/${first.caseId}/claim`, { method: 'PUT', headers, body: JSON.stringify({ fio: 'Петров Пётр', remember: true, bills: { [data.case.months[0].month]: '1000' } }) });
     assert.equal(h.db.getUser(22)!.fio, 'Петров Пётр', '«запомнить мои данные»');
     await fetch(`${base}/api/cases/${first.caseId}/pdf-link`, { method: 'POST', headers });
-    // «Не сделали» — только когда пришла квитанция за следующий месяц: в день подачи это неправда.
+    // «Не сделали» — только после подачи: от неё считаются сроки.
+    const unsubmitted = await fetch(`${base}/api/cases/${first.caseId}/receipt`, { method: 'POST', headers, body: JSON.stringify({ refunded: false }) });
+    assert.equal(unsubmitted.status, 422);
+    assert.match(((await unsubmitted.json()) as any).error, /Сначала отметьте, когда подали заявление/);
+    const todayIso = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Moscow' });
+    await fetch(`${base}/api/cases/${first.caseId}/submitted`, { method: 'POST', headers, body: JSON.stringify({ date: `${todayIso}T12:00:00` }) });
+    assert.ok(h.db.db.prepare("SELECT 1 FROM reminders WHERE kind = 'ask_receipt' AND participant_id = ? AND sent_at IS NULL").get(first.caseId), 'после подачи бот ждёт квитанцию');
+    // И только когда пришла квитанция за следующий месяц: в день подачи это неправда.
     const early = await fetch(`${base}/api/cases/${first.caseId}/receipt`, { method: 'POST', headers, body: JSON.stringify({ refunded: false }) });
     assert.equal(early.status, 422);
     assert.match(((await early.json()) as any).error, /Перерасчёт появится в квитанции/);
@@ -503,6 +510,8 @@ test('отопление летом не считается', async () => {
   const inc = h.db.createIncident({ house_id: house.id, service_key: 'heating_temp', reporter_user_id: 1, started_at: '2026-07-10T09:00:00Z', ads_number: null, evidence: 'self', variant: null, demo: 0 });
   const p = h.db.addParticipant({ incident_id: inc.id, user_id: 1, role: 'reporter', started_at: '2026-07-10T09:00:00Z' });
   h.db.addReading(p.id, '2026-07-10T09:00:00Z', 15);
+  // Замер в силе сутки: в сентябре — свой замер.
+  h.db.addReading(p.id, '2026-09-01T09:00:00Z', 15);
   h.db.updateParticipant(p.id, { ended_at: '2026-09-02T09:00:00Z', status: 'ended' });
   const { calcFor, loadCase } = await import('../src/services/cases.ts');
   const months = calcFor(h.db, h.bot.norms, loadCase(h.db, p.id)!, new Date('2026-09-03T00:00:00Z')).months;
@@ -750,7 +759,7 @@ test('health и статика мини-приложения', async () => {
   await withServer(async (base) => {
     const health = (await (await fetch(`${base}/health`)).json()) as any;
     assert.equal(health.ok, true);
-    assert.equal(health.version, '1.3.1');
+    assert.equal(health.version, '1.4.0');
     const page = await fetch(`${base}/app/`);
     assert.equal(page.status, 200);
     const html = await page.text();
@@ -831,5 +840,57 @@ test('демо-дела заново через приложение: три д�
     assert.equal(r.cases.filter((c: any) => c.demo).length, 3);
     const again = (await (await fetch(`${base}/api/demo/reset`, { method: 'POST', headers })).json()) as any;
     assert.equal(again.cases.length, 3, 'прежние демо удалены, а не задвоены');
+  });
+});
+
+test('1.4 в приложении: демо-дом не в списке и не меняется, плановое отключение, «не наша УК», правки карточки без id соседей', async () => {
+  await withServer(async (base, h) => {
+    const headers = (u: number) => ({ 'X-Max-Init-Data': initFor(u), 'Content-Type': 'application/json' });
+    await h.start(71);
+    await h.start(72);
+    // Демо-дела заново: демо-дом не появляется в «Мои адреса», дело на нём создать нельзя, карточку не поменять.
+    await fetch(`${base}/api/demo/reset`, { method: 'POST', headers: headers(71) });
+    const me = (await (await fetch(`${base}/api/me`, { headers: headers(71) })).json()) as any;
+    assert.equal(me.houses.length, 0);
+    const demoHouse = h.db.listUserParticipants(71).map((p) => h.db.getIncident(p.incident_id)!.house_id)[0];
+    const onDemo = await fetch(`${base}/api/report`, { method: 'POST', headers: headers(71), body: JSON.stringify({ service: 'cold_water_off', houseId: demoHouse, evidence: 'self' }) });
+    assert.equal(onDemo.status, 422);
+    assert.match(((await onDemo.json()) as any).error, /демо-адрес/);
+    assert.equal((await fetch(`${base}/api/houses/${demoHouse}/info`, { method: 'PUT', headers: headers(71), body: JSON.stringify({ ukName: 'Чужая УК' }) })).status, 403);
+
+    // Плановое отключение: срок не прошёл — дела нет; прошёл — начало не раньше срока.
+    const add = (u: number) => fetch(`${base}/api/me/houses`, { method: 'POST', headers: headers(u), body: JSON.stringify({ address: 'Лесная 11', city: 'Москва' }) }).then((r) => r.json() as any);
+    const { house } = await add(71);
+    await add(72);
+    const report = (body: object) => fetch(`${base}/api/report`, { method: 'POST', headers: headers(71), body: JSON.stringify({ service: 'hot_water_off', houseId: house.id, evidence: 'self', planned: true, ...body }) });
+    const future = await report({ plannedUntil: new Date(Date.now() + 24 * 3_600_000).toISOString() });
+    assert.equal(future.status, 422);
+    assert.ok(((await future.json()) as any).fields.plannedUntil);
+    const until = new Date(Date.now() - 48 * 3_600_000).toISOString();
+    const early = await report({ plannedUntil: until, startedAt: new Date(Date.now() - 72 * 3_600_000).toISOString() });
+    assert.ok(((await early.json()) as any).fields.started);
+    const ok = (await (await report({ plannedUntil: until, startedAt: until })).json()) as any;
+    const detail = (await (await fetch(`${base}/api/cases/${ok.caseId}`, { headers: headers(71) })).json()) as any;
+    assert.equal(detail.case.plannedUntil, until);
+
+    // Правки карточки: сосед видит, что поле поменяли, но не видит id того, кто поменял.
+    await fetch(`${base}/api/houses/${house.id}/info`, { method: 'PUT', headers: headers(71), body: JSON.stringify({ ukEmail: 'uk@example.ru' }) });
+    const mark = h.out.log.length;
+    await fetch(`${base}/api/houses/${house.id}/info`, { method: 'PUT', headers: headers(72), body: JSON.stringify({ ukEmail: 'evil@example.ru' }) });
+    assert.match(h.sentTo(71, mark).map((m) => m.text).join('\n'), /почта УК: было «uk@example\.ru», стало «evil@example\.ru»/);
+    const card = (await (await fetch(`${base}/api/houses/${house.id}`, { headers: headers(71) })).json()) as any;
+    assert.deepEqual(card.house.info.changes.ukEmail, { at: card.house.info.changes.ukEmail.at, prev: 'uk@example.ru', mine: false });
+    assert.equal(JSON.stringify(card.house.info).includes('"by"'), false);
+    assert.equal(card.house.tz, 'Europe/Moscow');
+
+    // Сотрудник УК подключился — житель отключает его из карточки дома.
+    const code = h.db.dispatchCodeFor(house.id);
+    await h.start(80, `d_${code}`);
+    await h.text(80, 'Сидоров П. П., ООО «УК»');
+    const withUk = (await (await fetch(`${base}/api/houses/${house.id}`, { headers: headers(71) })).json()) as any;
+    assert.equal(withUk.house.dispatchers.length, 1);
+    const off = (await (await fetch(`${base}/api/houses/${house.id}/dispatchers/${withUk.house.dispatchers[0].id}`, { method: 'DELETE', headers: headers(71) })).json()) as any;
+    assert.equal(off.house.dispatchers.length, 0);
+    assert.equal((await fetch(`${base}/api/houses/${house.id}/dispatchers/${withUk.house.dispatchers[0].id}`, { method: 'DELETE', headers: headers(71) })).status, 404);
   });
 });

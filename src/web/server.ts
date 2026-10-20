@@ -8,12 +8,13 @@ import type { Norms } from '../calc/norms.ts';
 import type { AppConfig } from '../config.ts';
 import type { Vernem } from '../bot/core.ts';
 import { actDocFor, billsOf, claimDocFor, claimOf, loadCase, summarize } from '../services/cases.ts';
-import { actFromApp, markActSigned, unmarkActSigned } from '../bot/acts.ts';
+import { actFromApp, markActSigned, markChairLate, unmarkActSigned } from '../bot/acts.ts';
 import { escalationDocFor } from '../bot/escalate.ts';
 import type { EscalationKind } from '../docs/escalation.ts';
-import { executorFromHouse } from '../bot/house.ts';
-import { dispatchInviteLink } from '../bot/dispatch.ts';
-import { claimEmailTarget, emailClaim } from '../bot/mail.ts';
+import { executorFromHouse, saveHouseInfo, tellHouseInfoChanged } from '../bot/house.ts';
+import { dispatchInviteLink, removeDispatcherByResident } from '../bot/dispatch.ts';
+import { claimEmailTarget, emailClaim, emailTargetNote } from '../bot/mail.ts';
+import type { HouseInfo } from '../db/db.ts';
 import { claimToText } from '../docs/claim.ts';
 import { claimToPdf } from '../docs/pdf.ts';
 import { parseReceiptQr } from '../receipt/qr.ts';
@@ -189,16 +190,26 @@ export function createApp(deps: WebDeps) {
       id: h.id,
       address: h.address,
       city: h.city,
+      // Время в формах — по часовому поясу дома, а не телефона: в нём же считается расчёт.
+      tz: h.tz,
+      demo: !!h.demo,
       entrance: h.entrance,
       flat: h.flat,
       account: h.account,
       notify: !!h.notify,
-      info: db.houseInfo(h),
+      info: publicInfo(db.houseInfo(h), userId),
       members: db.countHouseMembers(h.id),
-      // Кто из УК принимает заявки в боте — житель видит, кому уйдёт заявка.
-      dispatchers: db.listDispatchers(h.id).map((d) => ({ title: d.title })),
+      // Кто из УК принимает заявки в боте — житель видит, кому уйдёт заявка, и может отключить сотрудника.
+      dispatchers: db.listDispatchers(h.id).map((d) => ({ id: d.id, title: d.title, since: d.created_at })),
       inviteLink: cfg.botUsername ? `https://max.ru/${cfg.botUsername}?start=h_${h.code}` : null,
     };
+  };
+
+  /** Карточка дома для жителя: без id соседей — только «изменил сосед» или «изменили вы» и когда. */
+  const publicInfo = (info: HouseInfo, userId: number) => {
+    const { updatedBy, fieldsBy, ...rest } = info;
+    const changes = Object.fromEntries(Object.entries(fieldsBy ?? {}).map(([k, f]) => [k, { at: f!.at, prev: f!.prev ?? null, mine: f!.by === userId }]));
+    return { ...rest, updatedByMe: updatedBy === userId, changes };
   };
 
   api.get('/me', (req: AuthedRequest, res) => {
@@ -301,6 +312,17 @@ export function createApp(deps: WebDeps) {
     });
   });
 
+  /** Житель отключает сотрудника УК от своего дома («Это не наша УК»). */
+  api.delete('/houses/:id/dispatchers/:did', (req: AuthedRequest, res) => {
+    const id = Number(req.params.id);
+    houseJson(req.userId!, id);
+    const bot = deps.bot();
+    if (!bot) throw new HttpError(503, 'Бот сейчас недоступен');
+    const err = removeDispatcherByResident(bot, req.userId!, id, Number(req.params.did));
+    if (err) throw new HttpError(404, err);
+    res.json({ house: houseJson(req.userId!, id) });
+  });
+
   api.delete('/me/houses/:id', (req: AuthedRequest, res) => {
     const id = Number(req.params.id);
     houseJson(req.userId!, id);
@@ -312,44 +334,52 @@ export function createApp(deps: WebDeps) {
     res.json({ house: houseJson(req.userId!, Number(req.params.id)) });
   });
 
-  api.put('/houses/:id/info', (req: AuthedRequest, res) => {
-    const id = Number(req.params.id);
-    houseJson(req.userId!, id);
-    const b = req.body ?? {};
-    const errors: Record<string, string> = {};
-    const ukInn = str(b.ukInn, 20);
-    const ukInnErr = ukInn ? innError(ukInn) : null;
-    if (ukInnErr) errors.ukInn = ukInnErr;
-    const ukEmail = str(b.ukEmail, 100);
-    if (ukEmail && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(ukEmail)) errors.ukEmail = 'Почта в виде name@example.ru';
-    const adsPhone = str(b.adsPhone, 40);
-    if (adsPhone && !isPhone(adsPhone)) errors.adsPhone = PHONE_ERROR;
-    // Поле с ошибкой не сохраняем (остаётся прежнее значение), а верные — сохраняем: опечатка в ИНН
-    // не должна стоить жителю уже вписанного телефона аварийной службы.
-    const prev = db.houseInfo(db.getHouse(id)!);
-    const info = {
-      ukName: str(b.ukName, 150),
-      ukInn: errors.ukInn ? prev.ukInn : ukInn,
-      ukAddress: str(b.ukAddress, 200),
-      ukEmail: errors.ukEmail ? prev.ukEmail : ukEmail,
-      adsPhone: errors.adsPhone ? prev.adsPhone : adsPhone,
-      rsoHeat: str(b.rsoHeat, 150),
-      rsoWater: str(b.rsoWater, 150),
-      rsoPower: str(b.rsoPower, 150),
-      rsoGas: str(b.rsoGas, 150),
-      rop: str(b.rop, 150),
-      gji: str(b.gji, 200),
-      // Лифт / больше 9 этажей: не передан — оставляем прежний ответ.
-      twoPowerSources: typeof b.twoPowerSources === 'boolean' ? b.twoPowerSources : b.twoPowerSources === null ? undefined : db.houseInfo(db.getHouse(id)!).twoPowerSources,
-      updatedAt: new Date().toISOString(),
-      updatedBy: req.userId,
-    };
-    const powerChanged = db.houseInfo(db.getHouse(id)!).twoPowerSources !== info.twoPowerSources;
-    db.setHouseInfo(id, info);
-    if (powerChanged) deps.bot()?.recheckPowerCases(id);
-    db.track(req.userId!, 'house_info', { house: id, via: 'app' });
-    if (Object.keys(errors).length) throw new HttpError(400, 'Остальное сохранено. Исправьте поле с ошибкой', errors);
-    res.json({ house: houseJson(req.userId!, id) });
+  api.put('/houses/:id/info', async (req: AuthedRequest, res, next) => {
+    try {
+      const id = Number(req.params.id);
+      houseJson(req.userId!, id);
+      // Демо-дом общий для всех, кто смотрит демо: его карточку не меняют.
+      if (db.getHouse(id)!.demo) throw new HttpError(403, 'Это демо-дом: его данные заполнены для примера и не меняются');
+      const b = req.body ?? {};
+      const errors: Record<string, string> = {};
+      const ukInn = str(b.ukInn, 20);
+      const ukInnErr = ukInn ? innError(ukInn) : null;
+      if (ukInnErr) errors.ukInn = ukInnErr;
+      const ukEmail = str(b.ukEmail, 100);
+      if (ukEmail && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(ukEmail)) errors.ukEmail = 'Почта в виде name@example.ru';
+      const adsPhone = str(b.adsPhone, 40);
+      if (adsPhone && !isPhone(adsPhone)) errors.adsPhone = PHONE_ERROR;
+      // Поле с ошибкой не сохраняем (остаётся прежнее значение), а верные — сохраняем: опечатка в ИНН
+      // не должна стоить жителю уже вписанного телефона аварийной службы.
+      const prev = db.houseInfo(db.getHouse(id)!);
+      const info: HouseInfo = {
+        ...prev,
+        ukName: str(b.ukName, 150),
+        ukInn: errors.ukInn ? prev.ukInn : ukInn,
+        ukAddress: str(b.ukAddress, 200),
+        ukEmail: errors.ukEmail ? prev.ukEmail : ukEmail,
+        adsPhone: errors.adsPhone ? prev.adsPhone : adsPhone,
+        rsoHeat: str(b.rsoHeat, 150),
+        rsoWater: str(b.rsoWater, 150),
+        rsoPower: str(b.rsoPower, 150),
+        rsoGas: str(b.rsoGas, 150),
+        rop: str(b.rop, 150),
+        gji: str(b.gji, 200),
+        // Два независимых ввода электричества: не передано — оставляем прежний ответ.
+        twoPowerSources: typeof b.twoPowerSources === 'boolean' ? b.twoPowerSources : b.twoPowerSources === null ? undefined : prev.twoPowerSources,
+      };
+      const powerChanged = prev.twoPowerSources !== info.twoPowerSources;
+      // Карточка общая: изменения уже заполненных полей записываются и приходят соседям.
+      const changes = saveHouseInfo(db, id, req.userId!, info, new Date());
+      if (powerChanged) deps.bot()?.recheckPowerCases(id);
+      db.track(req.userId!, 'house_info', { house: id, via: 'app' });
+      const bot = deps.bot();
+      if (bot) await tellHouseInfoChanged(bot, req.userId!, id, changes);
+      if (Object.keys(errors).length) throw new HttpError(400, 'Остальное сохранено. Исправьте поле с ошибкой', errors);
+      res.json({ house: houseJson(req.userId!, id) });
+    } catch (e) {
+      next(e);
+    }
   });
 
   // ---------- сообщить о проблеме и «починили» ----------
@@ -364,9 +394,14 @@ export function createApp(deps: WebDeps) {
       // «dispatch» — заявка уходит в УК через бота; номер придёт, когда УК её примет.
       const dispatch = b.evidence === 'dispatch';
       const evidence = b.evidence === 'ads' || b.evidence === 'written' ? b.evidence : 'self';
+      // Плановое отключение горячей воды: до какого времени объявили работы.
+      const plannedUntil = b.plannedUntil ? new Date(b.plannedUntil) : null;
+      if (plannedUntil && Number.isNaN(plannedUntil.getTime())) throw fieldError('plannedUntil', 'Укажите дату и время');
+      // Срок работ ещё впереди — главная ошибка у срока (её объяснит бот), а не у времени начала.
+      const plannedAhead = !!b.planned && !!plannedUntil && plannedUntil.getTime() > Date.now();
       const startedAt = b.startedAt ? new Date(b.startedAt) : new Date();
       if (Number.isNaN(startedAt.getTime())) throw fieldError('started', 'Укажите дату и время');
-      if (startedAt.getTime() > Date.now() + 5 * 60_000) throw fieldError('started', 'Это время ещё не наступило');
+      if (!plannedAhead && startedAt.getTime() > Date.now() + 5 * 60_000) throw fieldError('started', 'Это время ещё не наступило');
       if (Date.now() - startedAt.getTime() > 366 * 24 * 3_600_000) throw fieldError('started', 'Это было больше года назад — такое проще решать через жилищную инспекцию');
       const temp = tempOf(b.temp, 'temp', b.service) ?? undefined;
       const numberRaw = typeof b.number === 'string' ? b.number.trim() : '';
@@ -388,9 +423,10 @@ export function createApp(deps: WebDeps) {
         corner: !!b.corner,
         variant: b.variant === 'two_sources' || b.variant === 'one_source' ? b.variant : undefined,
         planned: !!b.planned,
+        plannedUntil,
         dispatch,
       });
-      if ('error' in r) throw new HttpError(422, r.error, /°C/.test(r.error) ? { temp: r.error } : undefined);
+      if ('error' in r) throw new HttpError(422, r.error, r.field ? { [r.field]: r.error } : /°C/.test(r.error) ? { temp: r.error } : undefined);
       res.json({ caseId: r.pid, outcome: r.outcome, numberSaved: !!r.numberSaved, readingSaved: !!r.readingSaved, since: r.since ?? null, neighbours: r.neighbours ?? 0, dispatched: !!r.dispatched, botConnected: !!cfg.token });
     } catch (e) {
       next(e);
@@ -413,7 +449,9 @@ export function createApp(deps: WebDeps) {
   });
 
   api.delete('/me', (req: AuthedRequest, res) => {
-    db.deleteUserData(req.userId!);
+    const bot = deps.bot();
+    if (bot) bot.deleteUser(req.userId!);
+    else db.deleteUserData(req.userId!);
     res.json({ ok: true });
   });
 
@@ -445,7 +483,9 @@ export function createApp(deps: WebDeps) {
     // Почта УК, на которую бот может отправить заявление сам (SMTP настроен и почта есть в карточке дома).
     const bot = deps.bot();
     const mailTo = bot ? claimEmailTarget(bot, c) : null;
-    res.json({ case: s, claimText, executorHint, personHint, houseContacts, actSigner, savedPersonal: !!u?.save_personal, botConnected: !!cfg.token, mailTo });
+    // Почту УК недавно изменил другой житель — предупреждаем перед отправкой.
+    const mailNote = bot && mailTo ? emailTargetNote(bot, c, c.p.user_id) : null;
+    res.json({ case: s, claimText, executorHint, personHint, houseContacts, actSigner, savedPersonal: !!u?.save_personal, botConnected: !!cfg.token, mailTo, mailNote });
   });
 
   api.put('/cases/:id/claim', (req: AuthedRequest, res) => {
@@ -585,6 +625,9 @@ export function createApp(deps: WebDeps) {
     if (numRaw.length > 40) throw fieldError('incoming', 'Входящий номер — до 40 знаков');
     const claim = { ...claimOf(c.p), submittedAt: date.toISOString(), incomingNumber: str(numRaw, 40) };
     db.updateParticipant(c.p.id, { claim: JSON.stringify(claim) });
+    // С даты подачи ждём квитанцию с перерасчётом.
+    deps.bot()?.afterSubmitted(c.p.id);
+    db.track(req.userId!, 'claim_submitted', { via: 'app' });
     res.json({ case: summarize(db, norms, loadCase(db, c.p.id)!, new Date()) });
   });
 
@@ -759,7 +802,10 @@ export function createApp(deps: WebDeps) {
       const bot = deps.bot();
       const act = db.getActByIncident(c.incident.id);
       if (!bot || !act) throw new HttpError(404, 'Акт не найден');
-      if (!(await markActSigned(bot, req.userId!, act.id, req.body?.chair === true))) throw new HttpError(403, 'Отметить акт подписанным может тот, кто его начал');
+      // Акт уже подписан без председателя, а потом председатель расписался — отмечаем это.
+      if (act.status === 'signed' && req.body?.chair === true) {
+        if (!markChairLate(bot, req.userId!, act.id)) throw new HttpError(403, 'Отметить подпись председателя может тот, кто начал акт');
+      } else if (!(await markActSigned(bot, req.userId!, act.id, req.body?.chair === true))) throw new HttpError(403, 'Отметить акт подписанным может тот, кто его начал');
       res.json({ ok: true });
     } catch (e) {
       next(e);
