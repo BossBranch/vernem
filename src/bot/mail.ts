@@ -1,15 +1,15 @@
-// Заявление на почту УК: бот сам отправляет PDF на почту из карточки дома, житель — в копии.
+// Заявление на почту УК: бот отправляет только загруженный жителем подписанный скан, житель — в копии.
 // Дата отправки письма — дата подачи: она попадает в требование и жалобу, если перерасчёт не сделают.
 // Отправляем только в УК (почта в карточке дома — почта УК), только с согласия жителя и только с ФИО в заявлении.
 // Одно заявление уходит одним письмом: повторное нажатие или повтор запроса второе письмо не отправит.
 
-import { claimToPdf } from '../docs/pdf.ts';
 import { docAddress } from '../docs/claim.ts';
 import { claimDocFor, claimOf, loadCase } from '../services/cases.ts';
 import type { CaseBundle } from '../services/cases.ts';
 import { formatDate, formatShort } from '../calc/time.ts';
 import { isEmail, sendMail } from '../mail/smtp.ts';
 import type { Attachment } from '../mail/smtp.ts';
+import { readSignedScan, removeSignedScan, validateSignedScan } from '../files/signed-scans.ts';
 import type { Vernem } from './core.ts';
 import { ukEmailChangedByOther } from './house.ts';
 import { backRow, cb, clean } from './ui.ts';
@@ -25,7 +25,8 @@ export function claimEmailTarget(bot: Vernem, c: CaseBundle): string | null {
 }
 
 export function canEmailClaim(bot: Vernem, c: CaseBundle): boolean {
-  return (c.p.status === 'claim_ready' || c.p.status === 'ended') && !!c.p.ended_at && !!claimEmailTarget(bot, c);
+  const scan = bot.db.getSignedScan(c.p.id);
+  return (c.p.status === 'claim_ready' || c.p.status === 'ended') && !!c.p.ended_at && !!claimEmailTarget(bot, c) && !!scan?.storage_name && !scan.sent_at && scan.issued_snapshot === claimOf(c.p).issuedSnapshot;
 }
 
 /** Предупреждение перед отправкой: почту УК недавно изменил другой житель. */
@@ -35,8 +36,8 @@ export function emailTargetNote(bot: Vernem, c: CaseBundle, userId: number): str
 }
 
 /**
- * Последний PDF заявления, отправленный жителю в чат: нужен, если ФИО не сохраняли в базе.
- * Хранится только в памяти и не дольше часа — на диске PDF с ФИО не остаётся.
+ * Последний PDF заявления, отправленный жителю в чат. Храним только час в памяти: он не используется
+ * для SMTP, но удаляется вместе с делом и не остаётся на диске.
  */
 const PDF_TTL_MS = 3_600_000;
 const lastPdf = new Map<number, { pdf: Buffer; at: number }>();
@@ -106,20 +107,23 @@ export async function emailClaimFull(bot: Vernem, userId: number, pid: number, r
     // Это заявление уже ушло письмом. Изменилось — refreshClaimIssue сбросил отметку, и новое уйдёт.
     if (cl.emailedAt) return { error: `Это заявление уже отправлено на ${cl.emailedTo ?? 'почту УК'} ${formatShort(new Date(cl.emailedAt), fresh.house.tz)}` };
     const doc = claimDocFor(bot.db, bot.norms, fresh, bot.now());
-    let pdf: Buffer;
-    if (cl.fio) pdf = await claimToPdf(doc);
-    else {
-      // ФИО не сохраняли: берём PDF, который житель только что получил в чате.
-      const kept = lastPdf.get(pid);
-      if (!kept || Date.now() - kept.at > PDF_TTL_MS) return { error: 'В заявлении нет ФИО: скачайте его ещё раз — «Прислать заявление ещё раз» — и сразу отправьте' };
-      pdf = kept.pdf;
+    const scan = bot.db.getSignedScan(pid);
+    if (!scan?.storage_name || scan.sent_at || scan.issued_snapshot !== cl.issuedSnapshot) {
+      return { error: 'Сначала загрузите актуальный скан заполненного и подписанного заявления' };
+    }
+    const pdf = readSignedScan(bot.cfg.signedScanDir, scan.storage_name);
+    if (!pdf) return { error: 'Скан не найден. Загрузите подписанный PDF ещё раз' };
+    try {
+      validateSignedScan(pdf);
+    } catch {
+      return { error: 'Скан повреждён. Загрузите подписанный PDF ещё раз' };
     }
     const photos = await photoAttachments(bot, pid);
     const act = bot.db.getActByIncident(fresh.incident.id);
     const actPhoto = photos.files.some((f) => f.filename.includes('акт'));
     const actCopyMissing = act?.status === 'signed' && !actPhoto;
     const flat = cl.flat ? `, кв. ${cl.flat}` : '';
-    const attached = ['заявление (PDF)', photos.files.length ? `фотографии (${photos.files.length} шт.)` : ''].filter(Boolean).join(', ');
+    const attached = ['заполненное и подписанное заявление (скан PDF)', photos.files.length ? `фотографии (${photos.files.length} шт.)` : ''].filter(Boolean).join(', ');
     const text = [
       'Здравствуйте!',
       '',
@@ -145,7 +149,7 @@ export async function emailClaimFull(bot: Vernem, userId: number, pid: number, r
         replyTo,
         subject: `Заявление о перерасчёте платы — ${docAddress(fresh.house)}${flat}`,
         text,
-        attachments: [{ filename: doc.fileName ?? 'Заявление.pdf', content: pdf, contentType: 'application/pdf' }, ...photos.files],
+        attachments: [{ filename: scan.filename, content: pdf, contentType: scan.mime }, ...photos.files],
       });
     } catch (e) {
       console.error('[mail] не отправлено', e);
@@ -154,6 +158,8 @@ export async function emailClaimFull(bot: Vernem, userId: number, pid: number, r
     const now = bot.now().toISOString();
     const latest = claimOf(loadCase(bot.db, pid)!.p);
     bot.db.updateParticipant(pid, { claim: JSON.stringify({ ...latest, submittedAt: now, submittedVia: 'email', emailedTo: to, emailedAt: now }) });
+    bot.db.markSignedScanSent(pid, new Date(now));
+    removeSignedScan(bot.cfg.signedScanDir, scan.storage_name);
     bot.afterSubmitted(pid);
     bot.db.track(userId, 'claim_emailed', { pid });
     return { ok: true, photos: photos.files.length, missedPhotos: photos.missed, actCopyMissing };
@@ -176,7 +182,7 @@ export async function askEmailClaim(bot: Vernem, userId: number, pid: number) {
   bot.db.setState(userId, 'await_mail_reply', { pid });
   return bot.send(userId, {
     text: [
-      `📧 Отправлю заявление на почту УК **${clean(to)}** — PDF во вложении и просьба сообщить входящий номер. Дата отправки станет датой подачи.`,
+      `📧 Отправлю подписанный вами скан заявления на почту УК **${clean(to)}** и попрошу сообщить входящий номер. Дата отправки станет датой подачи.`,
       note ? `⚠️ ${note}` : '',
       'Куда УК прислать ответ? Напишите вашу почту — поставлю её в копию. Или нажмите «Без моей почты».',
     ]

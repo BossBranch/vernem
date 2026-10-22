@@ -23,11 +23,14 @@ export interface Outbox {
 
 /** Фото из сообщения MAX: token позволяет переслать его повторно, url — временная ссылка. */
 export type InPhoto = { token: string; url: string | null };
+/** PDF, присланный жителем в личный чат MAX. Содержимое скачивает только ядро после проверки состояния дела. */
+export type InFile = { url: string | null; filename: string | null; size: number | null };
 
 export type Input =
   | { kind: 'start'; userId: number; name?: string; payload?: string | null }
   | { kind: 'text'; userId: number; name?: string; text: string }
   | { kind: 'photo'; userId: number; name?: string; photos: InPhoto[] }
+  | { kind: 'file'; userId: number; name?: string; file: InFile }
   | { kind: 'button'; userId: number; name?: string; payload: string }
   | { kind: 'group_added'; chatId: number; title?: string | null }
   | { kind: 'group_removed'; chatId: number }
@@ -44,6 +47,7 @@ export type BotConfig = {
   defaultTz: string;
   adminIds: number[];
   tmpDir: string;
+  signedScanDir: string;
   /**
    * Общественное объединение потребителей, которому житель может передать дело
    * (ст. 45–46 Закона «О защите прав потребителей»). Не задано — партнёр не подключён,

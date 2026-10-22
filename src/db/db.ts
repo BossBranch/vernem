@@ -201,6 +201,18 @@ export type ActSigner = { id: number; act_id: number; user_id: number; role: 're
 
 export type PhotoKind = 'evidence' | 'receipt' | 'act';
 export type Photo = { id: number; participant_id: number; kind: PhotoKind; token: string; url: string | null; received_at: string };
+export type SignedScan = {
+  id: number;
+  participant_id: number;
+  user_id: number;
+  issued_snapshot: string;
+  filename: string;
+  mime: string;
+  bytes: number;
+  storage_name: string | null;
+  uploaded_at: string;
+  sent_at: string | null;
+};
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
@@ -364,6 +376,19 @@ CREATE TABLE IF NOT EXISTS photos (
   received_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS photos_participant ON photos(participant_id);
+CREATE TABLE IF NOT EXISTS signed_scans (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  participant_id INTEGER NOT NULL UNIQUE REFERENCES participants(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL,
+  issued_snapshot TEXT NOT NULL,
+  filename TEXT NOT NULL,
+  mime TEXT NOT NULL,
+  bytes INTEGER NOT NULL,
+  storage_name TEXT,
+  uploaded_at TEXT NOT NULL,
+  sent_at TEXT
+);
+CREATE INDEX IF NOT EXISTS signed_scans_user ON signed_scans(user_id);
 CREATE TABLE IF NOT EXISTS user_houses (
   user_id INTEGER NOT NULL,
   house_id INTEGER NOT NULL REFERENCES houses(id) ON DELETE CASCADE,
@@ -1085,6 +1110,50 @@ export class Db {
 
   listPhotos(participantId: number): Photo[] {
     return this.db.prepare('SELECT * FROM photos WHERE participant_id = ? ORDER BY received_at').all(participantId) as Photo[];
+  }
+
+  // ---------- подписанные сканы заявлений ----------
+
+  getSignedScan(participantId: number): SignedScan | undefined {
+    return this.db.prepare('SELECT * FROM signed_scans WHERE participant_id = ?').get(participantId) as SignedScan | undefined;
+  }
+
+  listSignedScansForUser(userId: number): SignedScan[] {
+    return this.db.prepare('SELECT * FROM signed_scans WHERE user_id = ?').all(userId) as SignedScan[];
+  }
+
+  /** Заменяет старый скан новым; прежнее имя возвращает для удаления файла вне транзакции SQLite. */
+  replaceSignedScan(scan: Omit<SignedScan, 'id' | 'sent_at'>): string | null {
+    this.db.exec('BEGIN');
+    try {
+      const old = this.getSignedScan(scan.participant_id);
+      this.db.prepare('DELETE FROM signed_scans WHERE participant_id = ?').run(scan.participant_id);
+      this.db
+        .prepare('INSERT INTO signed_scans (participant_id, user_id, issued_snapshot, filename, mime, bytes, storage_name, uploaded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(scan.participant_id, scan.user_id, scan.issued_snapshot, scan.filename, scan.mime, scan.bytes, scan.storage_name, scan.uploaded_at);
+      this.db.exec('COMMIT');
+      return old?.storage_name ?? null;
+    } catch (e) {
+      this.db.exec('ROLLBACK');
+      throw e;
+    }
+  }
+
+  markSignedScanSent(participantId: number, at: Date) {
+    this.db.prepare('UPDATE signed_scans SET sent_at = ?, storage_name = NULL WHERE participant_id = ?').run(at.toISOString(), participantId);
+  }
+
+  takeSignedScan(participantId: number): SignedScan | undefined {
+    const scan = this.getSignedScan(participantId);
+    if (scan) this.db.prepare('DELETE FROM signed_scans WHERE participant_id = ?').run(participantId);
+    return scan;
+  }
+
+  /** Старые сканы и их метаданные больше не нужны; файлы удаляет вызывающий код. */
+  takeExpiredSignedScans(before: Date): SignedScan[] {
+    const rows = this.db.prepare('SELECT * FROM signed_scans WHERE uploaded_at < ? OR sent_at < ?').all(before.toISOString(), before.toISOString()) as SignedScan[];
+    if (rows.length) this.db.prepare('DELETE FROM signed_scans WHERE uploaded_at < ? OR sent_at < ?').run(before.toISOString(), before.toISOString());
+    return rows;
   }
 
   // ---------- давление массой ----------

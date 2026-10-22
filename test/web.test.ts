@@ -2,6 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
 import { createServer } from 'node:http';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Harness } from '../src/sim/harness.ts';
 import { loadConfig } from '../src/config.ts';
 import { loadNorms } from '../src/calc/norms.ts';
@@ -25,7 +28,7 @@ function initFor(userId: number, authDate = Math.floor(Date.now() / 1000)) {
 
 async function withServer(fn: (base: string, h: Harness) => Promise<void>) {
   const h = new Harness();
-  const cfg = loadConfig({ MAX_BOT_TOKEN: TOKEN, PUBLIC_URL: 'https://example.test', MINIAPP_ENABLED: 'true', BOT_USERNAME: 'vernem_demo_bot' } as any);
+  const cfg = loadConfig({ MAX_BOT_TOKEN: TOKEN, PUBLIC_URL: 'https://example.test', MINIAPP_ENABLED: 'true', BOT_USERNAME: 'vernem_demo_bot', SIGNED_SCAN_DIR: mkdtempSync(join(tmpdir(), 'vernem-web-scans-')) } as any);
   const app = createApp({ db: h.db, norms: loadNorms(), cfg, bot: () => h.bot, botStatus: () => 'test' });
   const server = createServer(app);
   await new Promise<void>((ok) => server.listen(0, ok));
@@ -759,7 +762,7 @@ test('health и статика мини-приложения', async () => {
   await withServer(async (base) => {
     const health = (await (await fetch(`${base}/health`)).json()) as any;
     assert.equal(health.ok, true);
-    assert.equal(health.version, '1.4.0');
+    assert.equal(health.version, '1.4.1');
     const page = await fetch(`${base}/app/`);
     assert.equal(page.status, 200);
     const html = await page.text();

@@ -17,6 +17,7 @@ import { claimEmailTarget, emailClaim, emailTargetNote } from '../bot/mail.ts';
 import type { HouseInfo } from '../db/db.ts';
 import { claimToText } from '../docs/claim.ts';
 import { claimToPdf } from '../docs/pdf.ts';
+import { MAX_SIGNED_SCAN_BYTES, removeSignedScan } from '../files/signed-scans.ts';
 import { parseReceiptQr } from '../receipt/qr.ts';
 import { signLink, validateInitData, verifyLink } from './auth.ts';
 import { SERVICE_ORDER } from '../calc/norms.ts';
@@ -451,7 +452,11 @@ export function createApp(deps: WebDeps) {
   api.delete('/me', (req: AuthedRequest, res) => {
     const bot = deps.bot();
     if (bot) bot.deleteUser(req.userId!);
-    else db.deleteUserData(req.userId!);
+    else {
+      const scans = db.listSignedScansForUser(req.userId!);
+      db.deleteUserData(req.userId!);
+      for (const scan of scans) removeSignedScan(cfg.signedScanDir, scan.storage_name);
+    }
     res.json({ ok: true });
   });
 
@@ -643,6 +648,17 @@ export function createApp(deps: WebDeps) {
     res.json({ url: `${cfg.publicUrl ?? ''}${rel}`, fileName: claimDocFor(db, norms, loadCase(db, c.p.id)!, new Date(), extra).fileName });
   });
 
+  /** Загрузить единый PDF со всеми заполненными и подписанными страницами заявления. */
+  api.post('/cases/:id/signed-scan', express.raw({ type: 'application/octet-stream', limit: MAX_SIGNED_SCAN_BYTES }), (req: AuthedRequest, res) => {
+    const c = ownCase(req);
+    const bot = deps.bot();
+    if (!bot) throw new HttpError(503, 'Бот сейчас недоступен');
+    if (!Buffer.isBuffer(req.body)) throw new HttpError(400, 'Прикрепите PDF-файл');
+    const error = bot.saveSignedScan(req.userId!, c.p.id, req.body);
+    if (error) throw new HttpError(422, error);
+    res.json({ case: summarize(db, norms, loadCase(db, c.p.id)!, new Date()) });
+  });
+
   // ---------- акт с соседями (п. 110(1)) ----------
   api.post('/cases/:id/act', async (req: AuthedRequest, res, next) => {
     try {
@@ -688,7 +704,7 @@ export function createApp(deps: WebDeps) {
     res.json({ case: summarize(db, norms, loadCase(db, c.p.id)!, new Date()) });
   });
 
-  /** Бот отправляет заявление на почту УК; replyTo — почта жителя (копия и адрес для ответа). */
+  /** Бот отправляет загруженный подписанный скан в УК; replyTo — почта жителя для копии и ответа. */
   api.post('/cases/:id/email', async (req: AuthedRequest, res, next) => {
     try {
       const c = ownCase(req);

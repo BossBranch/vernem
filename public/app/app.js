@@ -254,6 +254,27 @@
     });
   }
 
+  /** PDF отправляем отдельным бинарным запросом: JSON и base64 не раздувают документ. */
+  function uploadPdf(url, file) {
+    var headers = { 'Content-Type': 'application/octet-stream' };
+    if (initData) headers['X-Max-Init-Data'] = initData;
+    else if (DEMO_USER) headers['X-Demo-User'] = DEMO_USER;
+    return file.arrayBuffer().then(function (bytes) {
+      return fetch(url, { method: 'POST', headers: headers, body: bytes });
+    }).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (data) {
+        if (!r.ok) {
+          var err = new Error(data.error || 'Не удалось загрузить скан. Попробуйте ещё раз.');
+          err.status = r.status;
+          throw err;
+        }
+        return data;
+      });
+    }, function () {
+      throw new Error('Нет связи с сервером. Проверьте интернет и попробуйте ещё раз.');
+    });
+  }
+
   function busy(btn, text) {
     // Сохраняем разметку целиком: на кнопке может быть иконка.
     var old = btn.innerHTML;
@@ -1694,7 +1715,7 @@
     var what = flats.length
       ? 'заявления' + (cl.executor ? ' в ' + who : ' ' + who) + ': ' + [own + (c.estimate > 0 ? ' — ≈ ' + rub(c.estimate) : '')].concat(flats.map(function (f) { return 'кв. ' + esc(f.flat) + (f.estimate > 0 ? ' — ≈ ' + rub(f.estimate) : ''); })).join('; ')
       : 'заявление' + (c.estimate > 0 ? ' на ≈ ' + rub(c.estimate) : '') + ' ' + (cl.executor ? 'в ' + who : who);
-    var text = 'Лично — два экземпляра, на своём попросите отметку о приёме. Или через «Госуслуги Дом» — приложите этот PDF к обращению.' +
+    var text = 'Лично — распечатайте, заполните и подпишите два экземпляра; на своём попросите отметку о приёме. Или через «Госуслуги Дом» — приложите скан заполненного и подписанного заявления.' +
       (c.act && c.act.status === 'signed' ? ' <b>Приложите копию акта с подписями соседей.</b>' : '') +
       (parts.length ? ' ' + parts.join(' ') : (cl.executor ? ' Адрес и почту ищите в квитанции — рядом с получателем платежа.' : ' Получатель в заявлении не указан — впишите от руки название из квитанции.'));
     // Заявление устарело — скачать новое прямо в этом шаге (одна кнопка, без отдельной плашки сверху).
@@ -1703,19 +1724,29 @@
       return nstep(1, (flats.length ? 'Скачайте новые ' : 'Скачайте новое ') + what, 'Данные изменились (плата, время, акт или получатель) — подайте новое заявление вместо прежнего. ' + text, '',
         '<div class="actions step-gap"><button class="btn primary" id="pdfOutdated">' + icon('doc') + 'Скачать новое заявление</button></div>');
     }
-    // Бот может отправить заявление на почту УК сам — это быстрее, чем нести лично.
+    var scan = c.signedScan || 'missing';
+    var scanTask = '';
+    if (scan === 'ready') {
+      scanTask = '<p class="done">✓ Подписанный скан заявления загружен.</p>';
+    } else if (scan === 'sent') {
+      scanTask = '<p class="done">✓ Подписанный скан уже отправлен в УК.</p>';
+    } else {
+      scanTask = '<p class="note' + (scan === 'outdated' ? ' warn' : '') + '">Для электронной подачи: скачайте заявление, распечатайте, заполните пустые поля, поставьте дату и подпись. Отсканируйте все страницы в один PDF и загрузите его здесь. Исходный PDF без подписи отправлять нельзя.</p>' +
+        '<label for="scanFile">Подписанный скан заявления (PDF, до 10 МБ)</label><input id="scanFile" type="file" accept="application/pdf,.pdf">';
+    }
+    // Бот может отправить заявление на почту УК сам, но только после загрузки подписанного скана.
     var mail = '';
     if (cl.emailedAt) mail = '<p class="done">✓ Отправлено на почту УК ' + esc(cl.emailedTo || '') + ' ' + esc(when(cl.emailedAt, c.tz)) + '</p>';
-    else if (c.mailTo) {
+    else if (c.mailTo && scan === 'ready') {
       mail = '<div class="actions step-gap"><button class="btn primary" id="mailOpen">' + icon('doc') + 'Отправить в УК на почту</button></div>' +
-        '<div id="mailBox" hidden><p class="muted">Отправлю заявление на <b>' + esc(c.mailTo) + '</b> с просьбой сообщить входящий номер. Дата отправки станет датой подачи. Фото к делу приложу.</p>' +
+        '<div id="mailBox" hidden><p class="muted">Отправлю подписанный вами скан заявления на <b>' + esc(c.mailTo) + '</b> с просьбой сообщить входящий номер. Дата отправки станет датой подачи. Фото к делу приложу.</p>' +
         (c.mailNote ? '<p class="note">' + esc(c.mailNote) + '</p>' : '') +
         '<label for="replyTo">Ваша почта для ответа УК — необязательно</label><input id="replyTo" type="email" inputmode="email" autocomplete="email" placeholder="name@example.ru">' +
         '<div class="actions"><button class="btn primary" id="mailSend">Отправить</button></div></div>';
     }
     // Кнопка обычная (не главная), чтобы не отвлекать от шага «Отметьте, когда подали», но сразу под заголовком.
     return nstep(1, 'Подайте ' + what, text, '',
-      mail + '<div class="actions step-gap"><button class="btn" id="pdfTop">' + icon('doc') + (flats.length ? 'Скачать заявление: ' + own : 'Скачать заявление (PDF)') + '</button>' +
+      scanTask + mail + '<div class="actions step-gap"><button class="btn" id="pdfTop">' + icon('doc') + (flats.length ? 'Скачать заявление: ' + own : 'Скачать заявление (PDF)') + '</button>' +
       flats.map(function (f, i) { return '<button class="btn" data-xf-pdf="' + i + '">' + icon('doc') + 'Скачать заявление: кв. ' + esc(f.flat) + '</button>'; }).join('') + '</div>');
   }
 
@@ -1865,6 +1896,26 @@
         return data;
       });
     }
+
+    var scanFile = $('scanFile');
+    if (scanFile) scanFile.onchange = function () {
+      var file = scanFile.files && scanFile.files[0];
+      if (!file) return;
+      if (scanFile.files.length !== 1 || file.size > 10 * 1024 * 1024 || !/\.pdf$/i.test(file.name)) {
+        toast('Нужен один PDF со сканом заполненного и подписанного заявления, до 10 МБ.');
+        scanFile.value = '';
+        return;
+      }
+      scanFile.disabled = true;
+      uploadPdf('/api/cases/' + c.id + '/signed-scan', file).then(function () {
+        haptic('success');
+        toast('Подписанный скан сохранён. Теперь его можно отправить в УК на почту.');
+        renderCase(c.id);
+      }).catch(function (e) {
+        toast(e.message);
+        scanFile.disabled = false;
+      });
+    };
 
     // Введённое сохраняется само — уйти с экрана, не нажав «Скачать», можно без потерь.
     var autoTimer = null;

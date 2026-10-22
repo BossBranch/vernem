@@ -52,6 +52,7 @@ async function main() {
     defaultTz: cfg.defaultTz,
     adminIds: cfg.adminIds,
     tmpDir: cfg.tmpDir,
+    signedScanDir: cfg.signedScanDir,
     partnerName: cfg.partnerName,
     partnerUrl: cfg.partnerUrl,
     mail: cfg.mail,

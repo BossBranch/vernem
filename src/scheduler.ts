@@ -52,6 +52,7 @@ export class Scheduler {
       if (now.getTime() - this.lastHousekeeping >= 3_600_000) {
         this.lastHousekeeping = now.getTime();
         await this.bot.expireDispatchers();
+        this.bot.purgeSignedScans(new Date(now.getTime() - 30 * 24 * 3_600_000));
       }
     } finally {
       this.running = false;

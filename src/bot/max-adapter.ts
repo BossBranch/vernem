@@ -111,11 +111,19 @@ export function wireBot(bot: Bot, handle: (input: Input) => Promise<void>) {
     const text = m.body?.text ?? '';
     if (m.recipient.chat_type === 'dialog') {
       // Фото (в том числе с подписью) — доказательство к случаю: сохраняем токен, чтобы переслать позже.
-      const photos = ((m.body?.attachments ?? []) as { type: string; payload?: { token?: string; url?: string } }[])
+      const attachments = (m.body?.attachments ?? []) as { type: string; payload?: { token?: string; url?: string }; filename?: string; size?: number }[];
+      const photos = attachments
         .filter((a) => a.type === 'image' && a.payload?.token)
         .map((a) => ({ token: a.payload!.token!, url: a.payload!.url ?? null }));
       if (photos.length) {
         await handle({ kind: 'photo', userId: sender.user_id, name: nameOf(sender), photos });
+        return;
+      }
+      // Скан заявления принимаем только как PDF-файл. Его URL MAX временный: ядро скачивает его сразу
+      // и только когда пользователь явно ждёт загрузку скана для своего дела.
+      const file = attachments.find((a) => a.type === 'file' && a.payload?.url);
+      if (file) {
+        await handle({ kind: 'file', userId: sender.user_id, name: nameOf(sender), file: { url: file.payload?.url ?? null, filename: file.filename ?? null, size: typeof file.size === 'number' ? file.size : null } });
         return;
       }
       if (!text) {

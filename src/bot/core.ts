@@ -57,7 +57,9 @@ import {
   remindDispatch,
   tellDispatchersRestored,
 } from './dispatch.ts';
-import { askEmailClaim, canEmailClaim, claimEmailTarget, finishEmail, forgetClaimPdfs, onEmailReply, rememberClaimPdf } from './mail.ts';
+import { askEmailClaim, canEmailClaim, finishEmail, forgetClaimPdfs, onEmailReply, rememberClaimPdf } from './mail.ts';
+import { MAX_SIGNED_SCAN_BYTES, removeSignedScan, saveSignedScan } from '../files/signed-scans.ts';
+import type { StoredSignedScan } from '../files/signed-scans.ts';
 import {
   STATUS_TITLE,
   statusTitle,
@@ -74,7 +76,7 @@ import {
 } from '../services/cases.ts';
 import type { CaseBundle } from '../services/cases.ts';
 import { resetDemoCases } from '../sim/demo-cases.ts';
-import type { BotConfig, Btn, Input, OutMessage, Outbox } from './types.ts';
+import type { BotConfig, Btn, InFile, Input, OutMessage, Outbox } from './types.ts';
 import {
   ICON,
   SEND_HOWTO,
@@ -158,7 +160,13 @@ export class Vernem {
         return this.onText(input.userId, input.text.trim());
       case 'photo':
         this.db.ensureUser(input.userId, input.name);
+        if (this.db.getState(input.userId).state === 'await_signed_scan') {
+          return this.send(input.userId, { text: 'Для заявления нужен один PDF со сканом всех заполненных и подписанных страниц. Прикрепите его через скрепку → файл.', buttons: [[cb('⬅️ К случаю', `cs:${this.db.getState<{ pid?: number }>(input.userId).data.pid ?? ''}`)]] });
+        }
         return onPhoto(this, input.userId, input.photos);
+      case 'file':
+        this.db.ensureUser(input.userId, input.name);
+        return this.onSignedScanFile(input.userId, input.file);
       case 'button':
         this.db.ensureUser(input.userId, input.name);
         return this.onButton(input.userId, input.payload);
@@ -236,7 +244,96 @@ export class Vernem {
   /** Удаление всех данных жителя (/delete_me и «Удалить мои данные» в приложении). */
   deleteUser(userId: number) {
     forgetClaimPdfs(this.db.listUserParticipants(userId).map((p) => p.id));
+    const scans = this.db.listSignedScansForUser(userId);
     this.db.deleteUserData(userId);
+    for (const scan of scans) removeSignedScan(this.cfg.signedScanDir, scan.storage_name);
+  }
+
+  /** Скан относится к конкретной версии заявления: изменили расчёт или шапку — нужен новый. */
+  saveSignedScan(userId: number, pid: number, data: Buffer): string | null {
+    const c = this.ownCase(userId, pid);
+    const claim = c ? claimOf(c.p) : null;
+    const snapshot = claim?.issuedSnapshot;
+    if (!c || !claim || c.p.status !== 'claim_ready' || !snapshot || c.incident.demo || snapshotChanged(snapshot, claimSnapshot(this.db, this.norms, c, this.now()), snapshotIgnore(claim))) {
+      return 'Сначала скачайте актуальное заявление';
+    }
+    let stored: StoredSignedScan;
+    try {
+      stored = saveSignedScan(this.cfg.signedScanDir, data);
+    } catch (e) {
+      return (e as Error).message;
+    }
+    try {
+      const old = this.db.replaceSignedScan({
+        participant_id: pid,
+        user_id: userId,
+        issued_snapshot: snapshot,
+        filename: stored.filename,
+        mime: stored.mime,
+        bytes: stored.bytes,
+        storage_name: stored.storageName,
+        uploaded_at: this.now().toISOString(),
+      });
+      removeSignedScan(this.cfg.signedScanDir, old);
+      this.db.track(userId, 'signed_scan_uploaded', { pid, bytes: stored.bytes });
+      return null;
+    } catch (e) {
+      removeSignedScan(this.cfg.signedScanDir, stored.storageName);
+      return 'Не удалось сохранить скан. Попробуйте ещё раз.';
+    }
+  }
+
+  removeSignedScan(pid: number) {
+    const scan = this.db.takeSignedScan(pid);
+    removeSignedScan(this.cfg.signedScanDir, scan?.storage_name);
+  }
+
+  purgeSignedScans(before: Date) {
+    for (const scan of this.db.takeExpiredSignedScans(before)) removeSignedScan(this.cfg.signedScanDir, scan.storage_name);
+  }
+
+  private async askSignedScan(userId: number, pid: number) {
+    const c = this.ownCase(userId, pid);
+    if (!c || c.p.status !== 'claim_ready' || !claimOf(c.p).issuedSnapshot || c.incident.demo) return this.stale(userId);
+    this.db.setState(userId, 'await_signed_scan', { pid });
+    return this.send(userId, {
+      text: 'Распечатайте заявление, заполните пустые поля, поставьте дату и собственноручную подпись. Затем отсканируйте **все страницы в один PDF** и пришлите сюда файлом. Исходный PDF без подписи не отправляю в УК.',
+      buttons: [[cb('⬅️ К случаю', `cs:${pid}`)]],
+    });
+  }
+
+  private async onSignedScanFile(userId: number, file: InFile) {
+    const state = this.db.getState<{ pid?: number }>(userId);
+    const pid = state.data.pid;
+    if (state.state !== 'await_signed_scan' || !pid || !this.ownCase(userId, pid)) return this.stale(userId);
+    if (!file.url || !file.url.startsWith('https://')) {
+      return this.send(userId, { text: 'Не смог получить файл от MAX. Откройте мини-приложение и загрузите PDF там.', buttons: [[cb('⬅️ К случаю', `cs:${pid}`)]] });
+    }
+    if (file.size !== null && file.size > MAX_SIGNED_SCAN_BYTES) {
+      return this.send(userId, { text: 'Скан больше 10 МБ. Сожмите PDF и пришлите его снова.', buttons: [[cb('⬅️ К случаю', `cs:${pid}`)]] });
+    }
+    try {
+      const response = await fetch(file.url, { redirect: 'error', signal: AbortSignal.timeout(15_000) });
+      const contentLength = Number(response.headers.get('content-length') ?? 0);
+      if (!response.ok || (contentLength && contentLength > MAX_SIGNED_SCAN_BYTES)) throw new Error('size');
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error('body');
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      while (true) {
+        const next = await reader.read();
+        if (next.done) break;
+        size += next.value.byteLength;
+        if (size > MAX_SIGNED_SCAN_BYTES) throw new Error('size');
+        chunks.push(next.value);
+      }
+      const error = this.saveSignedScan(userId, pid, Buffer.concat(chunks));
+      if (error) return this.send(userId, { text: `Не принял скан: ${error}.`, buttons: [[cb('📎 Попробовать снова', `scan:${pid}`)], [cb('⬅️ К случаю', `cs:${pid}`)]] });
+      this.db.setState(userId, 'idle');
+      return this.send(userId, { text: '✅ Подписанный скан получил. Теперь его можно отправить в УК на почту из карточки дела.', buttons: [[cb('📋 К случаю', `cs:${pid}`)]] });
+    } catch {
+      return this.send(userId, { text: 'Не смог скачать файл из MAX. Откройте мини-приложение и загрузите PDF там.', buttons: [[cb('⬅️ К случаю', `cs:${pid}`)]] });
+    }
   }
 
   // =====================================================================
@@ -425,6 +522,7 @@ export class Vernem {
   deleteFromApp(userId: number, pid: number): string | null {
     const c = this.ownCase(userId, pid);
     if (!c) return 'Дело не найдено';
+    this.removeSignedScan(pid);
     this.db.deleteParticipant(pid);
     return null;
   }
@@ -544,6 +642,7 @@ export class Vernem {
     const { submittedAt, incomingNumber, submittedVia, emailedTo, emailedAt, ...rest } = cl;
     const next = changed ? { ...rest, createdAt: this.now().toISOString(), issuedSnapshot: snap } : { ...cl, issuedSnapshot: snap };
     this.db.updateParticipant(pid, { claim: JSON.stringify(next) });
+    if (changed) this.removeSignedScan(pid);
     // Новое заявление ещё не подано: квитанцию по старому не ждём, спросим о подаче нового.
     if (changed && c.p.status === 'claim_ready') {
       this.db.cancelReminders(pid, 'ask_receipt');
@@ -656,6 +755,8 @@ export class Vernem {
         return onDispatchNumber(this, userId, text, data);
       case 'await_photo':
         return this.send(userId, { text: 'Жду фото: прикрепите его к сообщению (скрепка → фото).', buttons: [[cb('⬅️ К случаю', `cs:${data.pid}`)]] });
+      case 'await_signed_scan':
+        return this.send(userId, { text: 'Жду один PDF: распечатайте заявление, заполните пустые поля, подпишите и прикрепите скан через скрепку → файл.', buttons: [[cb('⬅️ К случаю', `cs:${data.pid}`)]] });
       default:
         return this.send(userId, {
           text: 'Я работаю через кнопки. Выберите, что случилось, или откройте свои случаи.',
@@ -862,6 +963,8 @@ export class Vernem {
         return onPhotoPick(this, userId, pid);
       case 'phadd':
         return this.askPhoto(userId, pid, (['evidence', 'receipt', 'act'].includes(b) ? b : 'evidence') as PhotoKind);
+      case 'scan':
+        return this.askSignedScan(userId, pid);
       case 'esc':
       case 'escm': {
         // Требование и жалоба — только когда перерасчёт не сделали или сделали не полностью.
@@ -1798,9 +1901,8 @@ export class Vernem {
     const weak = c.incident.evidence === 'self' && !c.p.own_ads_number && act?.status !== 'signed';
     const lateNumber = c.incident.evidence === 'self' && !!c.p.own_ads_number && act?.status !== 'signed';
     const rows: Btn[][] = weak || lateNumber ? actButtons(this, fresh) : [];
-    // Почта УК есть в карточке дома — бот отправит заявление сам.
-    const mailTo = claimEmailTarget(this, loadCase(this.db, pid)!);
-    if (mailTo) rows.unshift([cb('📧 Отправить в УК на почту', `mail:${pid}`)]);
+    // Для электронной подачи нужен именно скан заполненного и подписанного заявления.
+    rows.unshift([cb('📎 Прислать подписанный скан', `scan:${pid}`)]);
     rows.push([cb('✅ Я подал(а) заявление', `sub:${pid}`)]);
     rows.push([cb('👥 Позвать соседей', `nb:${pid}`), cb('⬅️ Меню', 'menu')]);
     return this.send(userId, {
@@ -1809,6 +1911,7 @@ export class Vernem {
         lateNumber ? '⚠️ Номер заявки получен позже начала: время до звонка подтвердит только акт с соседями.' : '',
         act?.status === 'signed' ? '📎 Акт указан в приложениях — приложите его копию.' : '',
         act?.status === 'signed' && act.chair_signed === 0 ? '⚠️ В акте нет подписи председателя совета дома, а по правилам она нужна. Если председатель есть — попросите его подписать.' : '',
+        '📎 Для почты или «Госуслуг Дом»: распечатайте заявление, заполните и подпишите его, затем пришлите мне один PDF со сканом всех страниц.',
         SEND_HOWTO,
         'Подадите — нажмите «Я подал(а) заявление»: с этой даты я жду квитанцию с перерасчётом.',
         save ? '' : 'ФИО и квартиру из базы удалил — они остались только в PDF.',
@@ -2065,8 +2168,11 @@ export class Vernem {
     if (c.p.status === 'ended') rows.push([cb('▶️ Продолжить расчёт', `calc:${pid}`)]);
     if (c.p.status === 'claim_ready' || c.p.status === 'refused' || c.p.status === 'refunded') rows.push([cb('📄 Прислать заявление ещё раз', `doc:${pid}`)]);
     const cl = claimOf(c.p);
+    const scan = this.db.getSignedScan(pid);
+    const scanReady = !!scan?.storage_name && !scan.sent_at && scan.issued_snapshot === cl.issuedSnapshot;
     if (cl.emailedAt) lines.push(`📧 Отправлено на почту УК ${formatShort(new Date(cl.emailedAt), tz)}.`);
-    else if (canEmailClaim(this, c) && c.p.status === 'claim_ready') rows.push([cb('📧 Отправить в УК на почту', `mail:${pid}`)]);
+    else if (scanReady && canEmailClaim(this, c) && c.p.status === 'claim_ready') rows.push([cb('📧 Отправить в УК на почту', `mail:${pid}`)]);
+    else if (c.p.status === 'claim_ready' && !c.incident.demo) rows.push([cb('📎 Прислать подписанный скан', `scan:${pid}`)]);
     if (cl.submittedAt && !cl.emailedAt) lines.push(`Подано ${formatDate(new Date(cl.submittedAt), tz)}${cl.incomingNumber ? `, вх. № ${clean(cl.incomingNumber)}` : ''}.`);
     // «Не сделали» — только после подачи: от неё считаются сроки, дата нужна в требовании.
     if (c.p.status === 'claim_ready' && !cl.submittedAt) rows.push([cb('✅ Я подал(а) заявление', `sub:${pid}`)], [cb('✅ Перерасчёт уже пришёл', `rc:${pid}:y`)]);
@@ -2085,6 +2191,7 @@ export class Vernem {
     if (!confirmed) {
       return this.send(userId, { text: 'Удалить этот случай вместе с расчётом и заявлением?', buttons: [[cb('🗑 Да, удалить', `stop:${pid}:y`), cb('Отмена', `cs:${pid}`)]] });
     }
+    this.removeSignedScan(pid);
     this.db.deleteParticipant(pid);
     return this.send(userId, { text: 'Случай удалён.', buttons: this.menu() });
   }

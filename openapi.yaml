@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: «Вернём» — REST мини-приложения
-  version: 1.4.0
+  version: 1.4.1
   license:
     name: MIT
   description: |
@@ -47,7 +47,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Health' }
-              example: { ok: true, db: ok, bot: running (webhook), version: 1.4.0 }
+              example: { ok: true, db: ok, bot: running (webhook), version: 1.4.1 }
         '503':
           description: База недоступна
           content:
@@ -558,7 +558,7 @@ paths:
       - $ref: '#/components/parameters/CaseId'
     post:
       tags: [Документы]
-      summary: Отправить заявление на почту УК — дата отправки становится датой подачи
+      summary: Отправить загруженный подписанный скан заявления на почту УК — дата отправки становится датой подачи
       requestBody:
         content:
           application/json:
@@ -566,6 +566,26 @@ paths:
               type: object
               properties:
                 replyTo: { type: string, description: 'Почта жителя: копия письма и адрес для ответа УК' }
+      responses:
+        '200': { $ref: '#/components/responses/CaseResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /api/cases/{id}/signed-scan:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+    post:
+      tags: [Документы]
+      summary: Загрузить PDF со сканом заполненного и подписанного заявления
+      description: Один PDF до 10 МиБ, только для своей актуальной выданной версии заявления. Пользователь загружает скан заполненного и подписанного экземпляра; сервис не подтверждает подлинность подписи.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
       responses:
         '200': { $ref: '#/components/responses/CaseResponse' }
         '400': { $ref: '#/components/responses/BadRequest' }
@@ -1056,6 +1076,7 @@ components:
         estimateComplete: { type: boolean }
         refundAmount: { type: number, nullable: true }
         claim: { type: object, description: 'Данные заявления, дата и входящий номер подачи' }
+        signedScan: { type: string, enum: [missing, ready, outdated, sent], description: 'Статус подписанного скана текущей версии заявления' }
         claimOutdated: { type: boolean, description: 'Заявление выдавали, а расчёт, время или получатель с тех пор изменились' }
         act:
           type: object

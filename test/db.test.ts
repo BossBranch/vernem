@@ -39,6 +39,7 @@ test('миграция: БД первой версии получает новы
   assert.ok(house.code, 'старому дому выдан код приглашения');
   assert.equal(db.getHouseByCode(house.code!)!.id, 1);
   assert.deepEqual(db.listPhotos(1), []);
+  assert.equal(db.getSignedScan(1), undefined, 'таблица подписанных сканов добавлена без изменения старых данных');
   db.close();
 });
 

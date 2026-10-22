@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { isValidTimeZone } from './calc/time.ts';
 import { mailConfigFrom } from './mail/smtp.ts';
 
@@ -26,6 +27,7 @@ export function loadConfig(env = process.env) {
   if (botMode !== 'webhook' && botMode !== 'polling') throw new Error('BOT_MODE: webhook или polling');
   if (botMode === 'webhook' && !publicUrl) throw new Error('BOT_MODE=webhook требует PUBLIC_URL');
 
+  const dbPath = env.DB_PATH?.trim() || 'data/vernem.db';
   return {
     token,
     botUsername: env.BOT_USERNAME?.trim().replace(/^@/, '') || '',
@@ -33,7 +35,9 @@ export function loadConfig(env = process.env) {
     botMode,
     webhookSecret: env.WEBHOOK_SECRET?.trim() || (token ? createHash('sha256').update(`webhook:${token}`).digest('hex').slice(0, 48) : ''),
     port: num(env.PORT, 3000),
-    dbPath: env.DB_PATH?.trim() || 'data/vernem.db',
+    dbPath,
+    // Подписанные сканы содержат ПДн, поэтому лежат вне public рядом с persistent SQLite volume.
+    signedScanDir: env.SIGNED_SCAN_DIR?.trim() || join(dbPath === ':memory:' ? tmpdir() : dirname(dbPath), 'signed-scans'),
     normsPath: env.NORMS_PATH?.trim() || 'norms/norms.yaml',
     defaultTz,
     demoMode: bool(env.DEMO_MODE, true),

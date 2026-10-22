@@ -1077,6 +1077,10 @@ test('заявление на почту УК: бот отправляет PDF, 
   const house = h.db.listUserHouses(1)[0];
   h.db.setHouseInfo(house.id, { ukEmail: 'uk@example.ru' });
   await finishWithClaim(h, 1);
+  const scanPid = h.db.listUserParticipants(1)[0].id;
+  const signedPdf = Buffer.from('%PDF-1.7\nподписанное заявление');
+  assert.equal(h.bot.saveSignedScan(1, scanPid, signedPdf), null);
+  await h.bot.showCase(1, scanPid);
   await h.press(1, 'Отправить в УК на почту');
   assert.match(h.last(1).text, /на почту УК \*\*uk@example\.ru\*\*/);
   await h.text(1, 'не почта');
@@ -1090,10 +1094,10 @@ test('заявление на почту УК: бот отправляет PDF, 
   assert.match(m.data, /^Reply-To: <ivanov@mail\.ru>$/m);
   assert.match(m.data, /Subject: =\?UTF-8\?B\?/);
   assert.match(m.data, /Content-Type: application\/pdf/);
-  // Вложение — настоящий PDF (base64 от «%PDF»), с ФИО, хотя данные не сохраняли.
-  assert.match(m.data, /^JVBERi/m);
+  // Вложение — именно сохранённый скан, а не сгенерированный неподписанный шаблон.
+  assert.ok(m.data.includes(signedPdf.toString('base64')));
   const body = Buffer.from(m.data.split('Content-Transfer-Encoding: base64\n\n')[1].split('\n--')[0].replace(/\n/g, ''), 'base64').toString('utf8');
-  assert.match(body, /Прошу зарегистрировать обращение и сообщить входящий номер/);
+  assert.match(body, /Во вложении: заполненное и подписанное заявление \(скан PDF\)/);
   assert.match(body, /Ответ прошу направить на ivanov@mail\.ru/);
 
   const p = h.db.listUserParticipants(1)[0];
@@ -1112,6 +1116,9 @@ test('заявление на почту: сервер отказал — жит
   await reportHotWater(h, 1);
   h.db.setHouseInfo(h.db.listUserHouses(1)[0].id, { ukEmail: 'uk@example.ru' });
   await finishWithClaim(h, 1);
+  const scanPid = h.db.listUserParticipants(1)[0].id;
+  assert.equal(h.bot.saveSignedScan(1, scanPid, Buffer.from('%PDF-1.7\nподписанное заявление')), null);
+  await h.bot.showCase(1, scanPid);
   await h.press(1, 'Отправить в УК на почту');
   await h.press(1, 'Без моей почты');
   assert.match(h.last(1).text, /Письмо не ушло/);
@@ -1126,6 +1133,26 @@ test('заявление на почту: сервер отказал — жит
   await smtp.close();
   h.close();
   h2.close();
+});
+
+test('на почту нельзя отправить шаблон: нужен актуальный подписанный скан', async () => {
+  const smtp = await fakeSmtp();
+  const mail = { host: '127.0.0.1', port: smtp.port, user: 'bot@vernem.test', pass: 'secret', from: 'bot@vernem.test', fromName: 'Вернём' };
+  const h = new Harness({ start: START, config: { mail } });
+  await reportHotWater(h, 1);
+  h.db.setHouseInfo(h.db.listUserHouses(1)[0].id, { ukEmail: 'uk@example.ru' });
+  await finishWithClaim(h, 1);
+  const p = h.db.listUserParticipants(1)[0];
+  const { emailClaim } = await import('../src/bot/mail.ts');
+  assert.match(String(await emailClaim(h.bot, 1, p.id, null)), /Сначала загрузите актуальный скан/);
+  assert.equal(h.bot.saveSignedScan(1, p.id, Buffer.from('%PDF-1.7\nподписанное заявление')), null);
+  const claim = JSON.parse(h.db.getParticipant(p.id)!.claim!);
+  h.db.updateParticipant(p.id, { claim: JSON.stringify({ ...claim, executor: 'ООО «Другая УК»' }) });
+  assert.equal(h.bot.refreshClaimIssue(p.id), true);
+  assert.match(String(await emailClaim(h.bot, 1, p.id, null)), /Сначала загрузите актуальный скан/);
+  assert.equal(h.db.getSignedScan(p.id), undefined);
+  await smtp.close();
+  h.close();
 });
 
 test('документы: без приписки «расчёт ориентировочный» и ссылки на КонсультантПлюс, адрес УК одинаковый в заявлении и требовании', async () => {
@@ -1400,6 +1427,7 @@ test('заявление на почту уходит один раз; прил�
   await h.photo(1, 'tok-1'); // ссылка на фото не открывается — фото пойдёт отдельно
   await finishWithClaim(h, 1);
   const p = h.db.listUserParticipants(1)[0];
+  assert.equal(h.bot.saveSignedScan(1, p.id, Buffer.from('%PDF-1.7\nподписанное заявление')), null);
   const { emailClaim } = await import('../src/bot/mail.ts');
   const [a, b] = await Promise.all([emailClaim(h.bot, 1, p.id, null), emailClaim(h.bot, 1, p.id, null)]);
   assert.equal([a, b].filter((x) => x === null).length, 1, 'одно письмо из двух одновременных нажатий');
@@ -1407,7 +1435,7 @@ test('заявление на почту уходит один раз; прил�
   assert.match(String(await emailClaim(h.bot, 1, p.id, null)), /уже отправлено/);
   assert.equal(smtp.mails.length, 1);
   const body = Buffer.from(smtp.mails[0].data.split('Content-Transfer-Encoding: base64\n\n')[1].split('\n--')[0].replace(/\n/g, ''), 'base64').toString('utf8');
-  assert.match(body, /Во вложении: заявление \(PDF\)\./);
+  assert.match(body, /Во вложении: заполненное и подписанное заявление \(скан PDF\)\./);
   assert.match(body, /Ещё 1 фото направлю отдельно/);
   // С даты отправки бот ждёт квитанцию.
   assert.ok(h.db.db.prepare("SELECT 1 FROM reminders WHERE kind = 'ask_receipt' AND sent_at IS NULL").get());

@@ -81,6 +81,7 @@ export class Harness {
         defaultTz: 'Europe/Moscow',
         adminIds: [1],
         tmpDir: mkdtempSync(join(tmpdir(), 'vernem-')),
+        signedScanDir: mkdtempSync(join(tmpdir(), 'vernem-scans-')),
         ...opts.config,
       },
       () => new Date(this.clock),

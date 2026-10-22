@@ -321,6 +321,8 @@ export type CaseSummary = {
   estimateComplete: boolean;
   refundAmount: number | null;
   claim: Claim;
+  /** Скан связан со снимком заявления: после правки нужен новый, старый не отправляется. */
+  signedScan: 'missing' | 'ready' | 'outdated' | 'sent';
   readings: { id: number; at: string; tempC: number }[];
   cardMid: string | null;
   /** mine — житель вписан в акт или начал его; initiator — может отметить «подписан». */
@@ -380,6 +382,8 @@ export function summarize(db: Db, norms: Norms, c: CaseBundle, now: Date): CaseS
   const calc = calcFor(db, norms, c, now);
   const bills = billsOf(c.p);
   const claim = claimOf(c.p);
+  const scan = db.getSignedScan(c.p.id);
+  const signedScan = !scan ? 'missing' : scan.sent_at ? 'sent' : scan.storage_name && scan.issued_snapshot === claim.issuedSnapshot ? 'ready' : 'outdated';
   const est = estimate(calc, bills, claim);
   const hints = billHints(db, c);
   // Заявления на другие квартиры в этом доме — со своей платой из квитанции.
@@ -439,7 +443,8 @@ export function summarize(db: Db, norms: Norms, c: CaseBundle, now: Date): CaseS
     estimate: est.sum,
     estimateComplete: est.complete,
     refundAmount: c.p.refund_amount,
-    claim: claimOf(c.p),
+    claim,
+    signedScan,
     readings: db.listReadings(c.p.id).map((r) => ({ id: r.id, at: r.at, tempC: r.temp_c })),
     cardMid: c.p.last_card_mid,
     act: actSummary(db, c.incident.id, c.p.user_id, !!c.incident.demo),
