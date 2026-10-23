@@ -1498,19 +1498,19 @@ test('свет: два ввода — свойство дома, в заявле
   h.close();
 });
 
-test('в пользовательских текстах нет упоминания «Госуслуг»', () => {
-  for (const f of [
-    'src/bot/ui.ts',
-    'src/bot/core.ts',
-    'src/bot/house.ts',
-    'src/bot/acts.ts',
-    'src/bot/dispatch.ts',
-    'src/bot/photos.ts',
-    'src/bot/escalate.ts',
-    'src/bot/mail.ts',
-    'public/app/app.js',
-    'src/web/server.ts',
-  ]) {
-    assert.doesNotMatch(readFileSync(new URL(`../${f}`, import.meta.url), 'utf8'), /Госуслуг/, f);
-  }
+test('инструкции различают номер первоначальной заявки, заявление и жалобу', () => {
+  const core = readFileSync(new URL('../src/bot/core.ts', import.meta.url), 'utf8');
+  const ui = readFileSync(new URL('../src/bot/ui.ts', import.meta.url), 'utf8');
+  const escalation = readFileSync(new URL('../src/bot/escalate.ts', import.meta.url), 'utf8');
+  const app = readFileSync(new URL('../public/app/app.js', import.meta.url), 'utf8');
+  const server = readFileSync(new URL('../src/web/server.ts', import.meta.url), 'utf8');
+
+  assert.match(core, /заявку через ГИС ЖКХ или «Госуслуги Дом», сохраните номер обращения/);
+  assert.match(app, /Ранее направили заявку через ГИС ЖКХ или «Госуслуги Дом»\? Укажите номер обращения/);
+  assert.match(server, /номер обращения из ГИС ЖКХ или «Госуслуги Дом»/);
+  assert.match(ui, /Как подать подписанное заявление о перерасчёте/);
+  assert.match(ui, /через ГИС ЖКХ, по электронной почте или через официальный чат УК в MAX/);
+  assert.match(escalation, /через ГИС ЖКХ, лично или по электронной почте/);
+  assert.doesNotMatch(escalation, /Госуслуг|MAX/);
+  assert.match(app, /Жалоба скачивается[\s\S]*через ГИС ЖКХ, лично или по электронной почте/);
 });

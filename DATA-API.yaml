@@ -2,7 +2,7 @@
 # Описание методов — openapi.yaml (OpenAPI 3.0). Секретов в этом файле нет.
 
 api: REST мини-приложения «Вернём»
-version: 1.4.2
+version: 1.4.3
 spec: openapi.yaml
 base_url:
   production: https://vernem.xyz
@@ -36,7 +36,7 @@ test_access:
 checks:
   - name: Сервис жив
     request: GET https://vernem.xyz/health
-    expect: 200 {"ok":true,"db":"ok","bot":"running (webhook)","version":"1.4.2"}
+    expect: 200 {"ok":true,"db":"ok","bot":"running (webhook)","version":"1.4.3"}
   - name: Без подписи — отказ
     request: GET https://vernem.xyz/api/me
     expect: 401

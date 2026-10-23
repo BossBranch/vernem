@@ -599,6 +599,9 @@ test('исправить время: то же время без секунд �
     const bad = await fetch(`${base}/api/report`, { method: 'POST', headers, body: JSON.stringify({ houseId, service: 'cold_water_off', evidence: 'ads', number: '!!!', startedAt: new Date().toISOString() }) });
     assert.equal(bad.status, 400);
     assert.match(((await bad.json()) as any).fields.number, /Номер должен содержать цифры/);
+    const written = await fetch(`${base}/api/report`, { method: 'POST', headers, body: JSON.stringify({ houseId, service: 'cold_water_off', evidence: 'written', startedAt: new Date().toISOString() }) });
+    assert.equal(written.status, 400);
+    assert.match(((await written.json()) as any).fields.number, /ГИС ЖКХ или «Госуслуги Дом»/);
   });
 });
 
@@ -762,7 +765,7 @@ test('health и статика мини-приложения', async () => {
   await withServer(async (base) => {
     const health = (await (await fetch(`${base}/health`)).json()) as any;
     assert.equal(health.ok, true);
-    assert.equal(health.version, '1.4.2');
+    assert.equal(health.version, '1.4.3');
     const page = await fetch(`${base}/app/`);
     assert.equal(page.status, 200);
     const html = await page.text();

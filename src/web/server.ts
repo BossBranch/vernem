@@ -408,7 +408,7 @@ export function createApp(deps: WebDeps) {
       const numberRaw = typeof b.number === 'string' ? b.number.trim() : '';
       if (evidence !== 'self' && numberRaw.length > 60) throw fieldError('number', 'Номер не должен превышать 60 символов');
       if (evidence !== 'self' && !str(b.number, 60)) {
-        throw fieldError('number', evidence === 'written' ? 'Укажите номер обращения, направленного через ГИС ЖКХ' : 'Укажите номер заявки или выберите «Номера нет»');
+        throw fieldError('number', evidence === 'written' ? 'Укажите номер обращения из ГИС ЖКХ или «Госуслуги Дом»' : 'Укажите номер заявки или выберите «Номера нет»');
       }
       // В номере всегда есть цифры: «не назвали» или «нет» — это не номер, для них есть вариант «Номера нет».
       if (evidence !== 'self' && !/\d/.test(numberRaw)) {
@@ -784,7 +784,7 @@ export function createApp(deps: WebDeps) {
       let amount: number | null = null;
       if (action === 'yes' && req.body?.amount !== undefined && req.body.amount !== '') {
         if (/^\s*0+([.,]0+)?\s*(₽|руб\.?)?\s*$/i.test(String(req.body.amount))) {
-          throw fieldError('refundAmount', c.p.status === 'refunded' ? 'Если перерасчёт отсутствует, выберите «Снять отметку «вернули»», затем «Перерасчёт не выполнен»' : 'Если перерасчёт отсутствует, выберите «Перерасчёт не выполнен»');
+          throw fieldError('refundAmount', c.p.status === 'refunded' ? 'Если перерасчёт отсутствует, снимите отметку «Перерасчёт получен», затем выберите «Перерасчёт не выполнен»' : 'Если перерасчёт отсутствует, выберите «Перерасчёт не выполнен»');
         }
         const rawAmount = String(req.body.amount);
         amount = parseRubles(rawAmount);
