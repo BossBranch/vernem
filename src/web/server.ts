@@ -56,12 +56,12 @@ function checkAll(errors: Record<string, string>) {
 }
 
 // Неразрывные пробелы и дефисы: номер в подсказке не рвётся на две строки.
-const PHONE_ERROR = 'Телефон — цифрами, например +7\u00a0495\u00a0123\u201145\u201167 или 112';
-const TEMP_ERROR = 'Температура — число, например 16 или 15,5';
+const PHONE_ERROR = 'Укажите телефон цифрами, например +7\u00a0495\u00a0123\u201145\u201167 или 112';
+const TEMP_ERROR = 'Укажите температуру числом, например 16 или 15,5';
 /** Разумные пределы: в комнате 0…+40 °C, горячая вода 0…+99 °C. */
 const TEMP_LIMITS: Record<string, [number, number, string]> = {
-  heating_temp: [0, 40, 'Температура в комнате — от 0 до +40 °C. Проверьте число'],
-  hot_water_temp: [0, 99, 'Температура воды — от 0 до +99 °C. Проверьте число'],
+  heating_temp: [0, 40, 'Температура в комнате должна быть от 0 до +40 °C. Проверьте значение'],
+  hot_water_temp: [0, 99, 'Температура воды должна быть от 0 до +99 °C. Проверьте значение'],
 };
 /** Температура из поля формы: null — поле пустое; иначе число или ошибка у поля. */
 function tempOf(v: unknown, field: string, service = 'heating_temp'): number | null {
@@ -82,7 +82,7 @@ function billError(raw: string): { amount: number } | { error: string } {
   if (amount === null && /^\s*[1-9][\d\s\u00a0]*([.,]\d+)?\s*(₽|руб\.?|р\.?)?\s*$/i.test(raw)) {
     return { error: 'Проверьте сумму: плата за одну услугу за месяц обычно меньше 100 000 ₽' };
   }
-  if (amount === null) return { error: 'Сумма — число больше нуля, например 1200 или 1 250,50' };
+  if (amount === null) return { error: 'Укажите сумму больше нуля, например 1200 или 1 250,50' };
   if (amount > 100_000) return { error: 'Проверьте сумму: плата за одну услугу за месяц обычно меньше 100 000 ₽' };
   return { amount };
 }
@@ -92,7 +92,7 @@ function fioError(fio: string): string | null {
   return fio.split(' ').length < 2 || /\d/.test(fio) ? 'Фамилия и имя полностью, например «Иванова Анна Петровна»' : null;
 }
 const isPhone = (v: string) => !/[^\d\s+()\-.]/.test(v) && v.replace(/\D/g, '').length >= 3;
-const ENTRANCE_ERROR = 'Номер подъезда — цифрами, например 2 или 2А';
+const ENTRANCE_ERROR = 'Укажите номер подъезда цифрами, например 2 или 2А';
 const entranceOf = (v: unknown): string | null | undefined => {
   if (v === null) return null;
   const s = str(v, 4);
@@ -309,7 +309,7 @@ export function createApp(deps: WebDeps) {
     db.track(req.userId!, 'dispatch_invite', { house: id, via: 'app' });
     res.json({
       url,
-      text: `Заявки жителей дома ${h.address}: жители сообщают об отключениях через бот «Вернём». Подключите сотрудника или диспетчера — заявки будут приходить ему в MAX, принять их можно одной кнопкой. Подключиться: ${url}`,
+      text: `Заявки жителей дома ${h.address}: жители сообщают об отключениях через бот «Вернём». Подключите сотрудника или диспетчера. Заявки будут поступать в MAX, где их можно принять одной кнопкой. Подключиться: ${url}`,
     });
   });
 
@@ -388,7 +388,7 @@ export function createApp(deps: WebDeps) {
   api.post('/report', async (req: AuthedRequest, res, next) => {
     try {
       const bot = deps.bot();
-      if (!bot) throw new HttpError(503, 'Бот сейчас недоступен — сообщите о проблеме в чате с ботом');
+      if (!bot) throw new HttpError(503, 'Бот временно недоступен. Сообщите о проблеме в чате с ботом');
       const b = req.body ?? {};
       if (!SERVICE_ORDER.includes(b.service)) throw new HttpError(400, 'Выберите, что случилось');
       if (!Number.isInteger(b.houseId)) throw new HttpError(400, 'Выберите адрес');
@@ -403,16 +403,16 @@ export function createApp(deps: WebDeps) {
       const startedAt = b.startedAt ? new Date(b.startedAt) : new Date();
       if (Number.isNaN(startedAt.getTime())) throw fieldError('started', 'Укажите дату и время');
       if (!plannedAhead && startedAt.getTime() > Date.now() + 5 * 60_000) throw fieldError('started', 'Это время ещё не наступило');
-      if (Date.now() - startedAt.getTime() > 366 * 24 * 3_600_000) throw fieldError('started', 'Это было больше года назад — такое проще решать через жилищную инспекцию');
+      if (Date.now() - startedAt.getTime() > 366 * 24 * 3_600_000) throw fieldError('started', 'Событие произошло более года назад. Рекомендуем обратиться в жилищную инспекцию');
       const temp = tempOf(b.temp, 'temp', b.service) ?? undefined;
       const numberRaw = typeof b.number === 'string' ? b.number.trim() : '';
-      if (evidence !== 'self' && numberRaw.length > 60) throw fieldError('number', 'Номер слишком длинный — до 60 знаков');
+      if (evidence !== 'self' && numberRaw.length > 60) throw fieldError('number', 'Номер не должен превышать 60 символов');
       if (evidence !== 'self' && !str(b.number, 60)) {
-        throw fieldError('number', evidence === 'written' ? 'Впишите номер обращения — он есть в «Госуслугах Дом» или ГИС ЖКХ' : 'Впишите номер заявки или выберите «Номера нет»');
+        throw fieldError('number', evidence === 'written' ? 'Укажите номер обращения, направленного через ГИС ЖКХ' : 'Укажите номер заявки или выберите «Номера нет»');
       }
       // В номере всегда есть цифры: «не назвали» или «нет» — это не номер, для них есть вариант «Номера нет».
       if (evidence !== 'self' && !/\d/.test(numberRaw)) {
-        throw fieldError('number', 'В номере должны быть цифры, например 4512 или А-17. Номера не дали — выберите «Номера нет»');
+        throw fieldError('number', 'Номер должен содержать цифры, например 4512 или А-17. Если номер не сообщили, выберите «Номера нет»');
       }
       const r = await bot.reportFromApp(req.userId!, {
         houseId: b.houseId,
@@ -537,7 +537,7 @@ export function createApp(deps: WebDeps) {
         if (!(volume > 0 && volume <= 100)) errors[`ct_vol_${month}`] = 'Объём горячей воды за месяц в м³, например 3,5';
         if (!(hot > 0 && hot <= 2000)) errors[`ct_hot_${month}`] = 'Тариф горячей воды, ₽ за м³, например 250';
         if (!(cold > 0 && cold <= 2000)) errors[`ct_cold_${month}`] = 'Тариф холодной воды, ₽ за м³, например 55';
-        if (hot > 0 && cold > 0 && cold >= hot) errors[`ct_cold_${month}`] = 'Холодная вода должна стоить меньше горячей — проверьте тарифы';
+        if (hot > 0 && cold > 0 && cold >= hot) errors[`ct_cold_${month}`] = 'Стоимость холодной воды должна быть меньше стоимости горячей. Проверьте тарифы';
         coldIn[month] = { volume, hot, cold };
       }
     }
@@ -605,7 +605,7 @@ export function createApp(deps: WebDeps) {
     });
     const own = claimOf(c.p).flat ?? db.getUserHouse(c.p.user_id, c.house.id)?.flat;
     flats.forEach((f: { flat: string }, i: number) => {
-      if (own && f.flat && f.flat.toUpperCase() === own.toUpperCase()) errors[`xf_flat_${i}`] = 'Это ваша основная квартира — её заявление выше';
+      if (own && f.flat && f.flat.toUpperCase() === own.toUpperCase()) errors[`xf_flat_${i}`] = 'Это основная квартира. Заявление по ней указано выше';
     });
     checkAll(errors);
     db.updateParticipant(c.p.id, { claim: JSON.stringify({ ...claimOf(c.p), extraFlats: flats.length ? flats : undefined }) });
@@ -624,10 +624,10 @@ export function createApp(deps: WebDeps) {
     if (date.getTime() < new Date(c.p.started_at).getTime() - 24 * 3_600_000) throw fieldError('submittedAt', 'Заявление не могли подать раньше отключения');
     const created = claimOf(c.p).createdAt;
     if (created && raw!.slice(0, 10) < new Date(created).toLocaleDateString('sv-SE', { timeZone: c.house.tz })) {
-      throw fieldError('submittedAt', `Заявление датировано ${new Date(created).toLocaleDateString('ru-RU', { timeZone: c.house.tz })} — подать его раньше нельзя`);
+      throw fieldError('submittedAt', `Заявление датировано ${new Date(created).toLocaleDateString('ru-RU', { timeZone: c.house.tz })}. Его нельзя подать раньше этой даты`);
     }
     const numRaw = typeof req.body?.number === 'string' ? req.body.number.replace(/^\s*(вх\.?\s*)?№\s*/i, '').trim() : '';
-    if (numRaw.length > 40) throw fieldError('incoming', 'Входящий номер — до 40 знаков');
+    if (numRaw.length > 40) throw fieldError('incoming', 'Входящий номер не должен превышать 40 символов');
     const claim = { ...claimOf(c.p), submittedAt: date.toISOString(), incomingNumber: str(numRaw, 40) };
     db.updateParticipant(c.p.id, { claim: JSON.stringify(claim) });
     // С даты подачи ждём квитанцию с перерасчётом.
@@ -763,13 +763,13 @@ export function createApp(deps: WebDeps) {
     const err = bot.addReadingFromApp(req.userId!, c.p.id, temp, at);
     if (err) throw new HttpError(422, err, { newTempAt: err });
     const threshold = bot.normThreshold(c.incident.service_key, !!c.p.corner);
-    const note = threshold !== null && temp >= threshold ? `${fmtTemp(temp)} — это уже норма. Если так и осталось, отметьте «${c.incident.service_key === 'heating_temp' ? 'Стало тепло' : 'Вода горячая'}».` : null;
+    const note = threshold !== null && temp >= threshold ? `${fmtTemp(temp)} соответствует норме. Если температура не изменилась, отметьте «${c.incident.service_key === 'heating_temp' ? 'Температура восстановлена' : 'Температура воды соответствует норме'}».` : null;
     res.json({ case: summarize(db, norms, loadCase(db, c.p.id)!, new Date()), note });
   });
 
   api.delete('/cases/:id/readings/:rid', (req: AuthedRequest, res) => {
     const c = ownCase(req);
-    if (c.p.status === 'refunded' || c.p.status === 'refused' || c.p.status === 'claim_ready') throw new HttpError(422, 'Заявление уже готово — замеры в нём не меняем');
+    if (c.p.status === 'refunded' || c.p.status === 'refused' || c.p.status === 'claim_ready') throw new HttpError(422, 'Заявление уже подготовлено. Изменение замеров недоступно');
     if (!db.deleteReading(c.p.id, Number(req.params.rid))) throw new HttpError(404, 'Замер не найден');
     res.json({ case: summarize(db, norms, loadCase(db, c.p.id)!, new Date()) });
   });
@@ -784,14 +784,14 @@ export function createApp(deps: WebDeps) {
       let amount: number | null = null;
       if (action === 'yes' && req.body?.amount !== undefined && req.body.amount !== '') {
         if (/^\s*0+([.,]0+)?\s*(₽|руб\.?)?\s*$/i.test(String(req.body.amount))) {
-          throw fieldError('refundAmount', c.p.status === 'refunded' ? 'Если не вернули ничего — нажмите «Снять отметку «вернули»», потом «Не сделали»' : 'Если не вернули ничего — нажмите «Не сделали»');
+          throw fieldError('refundAmount', c.p.status === 'refunded' ? 'Если перерасчёт отсутствует, выберите «Снять отметку «вернули»», затем «Перерасчёт не выполнен»' : 'Если перерасчёт отсутствует, выберите «Перерасчёт не выполнен»');
         }
         const rawAmount = String(req.body.amount);
         amount = parseRubles(rawAmount);
         // parseRubles отсекает всё больше миллиона: «2000000» — не «не число», а слишком большая сумма.
         const tooBig = (amount !== null && amount > 100_000) || (amount === null && /^\s*[1-9][\d\s\u00a0]*([.,]\d+)?\s*(₽|руб\.?|р\.?)?\s*$/i.test(rawAmount));
         if (tooBig) throw fieldError('refundAmount', 'Проверьте сумму: перерасчёт по одной услуге обычно меньше 100 000 ₽');
-        if (amount === null) throw fieldError('refundAmount', 'Сумма — число, например 115 или 115,20');
+        if (amount === null) throw fieldError('refundAmount', 'Укажите сумму числом, например 115 или 115,20');
       }
       const err = await bot.receiptFromApp(req.userId!, c.p.id, action, amount);
       if (err) throw new HttpError(422, err);
@@ -806,8 +806,8 @@ export function createApp(deps: WebDeps) {
     const c = ownCase(req);
     const kind = String(req.body?.kind ?? '');
     if (!ESC_FILES[kind]) throw new HttpError(400, 'Неизвестный документ');
-    if (!c.p.ended_at) throw new HttpError(409, 'Сначала отметьте, что починили');
-    if (c.p.status !== 'refused' && c.p.status !== 'refunded') throw new HttpError(409, 'Эти документы нужны, если перерасчёт не сделали — отметьте это, когда придёт квитанция');
+    if (!c.p.ended_at) throw new HttpError(409, 'Сначала отметьте восстановление услуги');
+    if (c.p.status !== 'refused' && c.p.status !== 'refunded') throw new HttpError(409, 'Эти документы доступны, если перерасчёт не выполнен. Укажите результат после получения квитанции');
     const path = `/files/esc/${c.p.id}-${kind}.pdf`;
     res.json({ url: `${cfg.publicUrl ?? ''}${signLink(path, cfg.linkSecret, 600)}`, fileName: ESC_FILES[kind] });
   });

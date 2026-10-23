@@ -11,9 +11,9 @@ import type { Vernem } from './core.ts';
 import { ICON, backRow, cb } from './ui.ts';
 
 const PROMPT: Record<PhotoKind, string> = {
-  evidence: 'Пришлите фото — например, термометр рядом с экраном телефона, где видно время, пустой кран или объявление об отключении на подъезде. Можно несколько.',
-  receipt: 'Сфотографируйте квитанцию целиком, чтобы были видны строки начислений и перерасчётов. Сохраню её к делу.',
-  act: 'Пришлите фото подписанного акта — все страницы.',
+  evidence: 'Направьте фото: например, термометр рядом с экраном телефона, на котором видно время, пустой кран или объявление об отключении в подъезде. Можно направить несколько фото.',
+  receipt: 'Сфотографируйте квитанцию целиком, чтобы были видны строки начислений и перерасчёта. Фото будет сохранено в деле.',
+  act: 'Направьте фото подписанного акта: все страницы.',
 };
 
 const KIND_TITLE: Record<PhotoKind, string> = { evidence: 'фото', receipt: 'фото квитанции', act: 'фото акта' };
@@ -35,7 +35,7 @@ export async function onPhoto(bot: Vernem, userId: number, photos: InPhoto[]) {
   const open = bot.db.listUserParticipants(userId).filter((p) => OPEN.has(p.status));
   if (!open.length) {
     return bot.send(userId, {
-      text: 'Фото получил, но случая, к которому его приложить, пока нет. Нажмите «Что-то сломалось», а потом пришлите фото снова.',
+      text: 'Фото получено, но пока нет обращения, к которому его можно приложить. Нажмите «Сообщить о проблеме», затем направьте фото повторно.',
       buttons: bot.menu(),
     });
   }
@@ -46,7 +46,7 @@ export async function onPhoto(bot: Vernem, userId: number, photos: InPhoto[]) {
     const c = loadCase(bot.db, p.id)!;
     return [cb(`${ICON[c.incident.service_key]} ${bot.norms.services[c.incident.service_key].button}, с ${formatShort(new Date(p.started_at), c.house.tz)}`.slice(0, 64), `ph:${p.id}`)];
   });
-  return bot.send(userId, { text: 'К какому случаю приложить фото?', buttons: [...rows, backRow()] });
+  return bot.send(userId, { text: 'Выберите обращение, к которому нужно приложить фото.', buttons: [...rows, backRow()] });
 }
 
 export async function onPhotoPick(bot: Vernem, userId: number, pid: number) {
@@ -64,10 +64,10 @@ async function save(bot: Vernem, userId: number, c: CaseBundle, kind: PhotoKind,
   bot.db.track(userId, 'photo_added', { kind, n: photos.length });
   if (!keepWaiting) bot.db.setState(userId, 'idle');
   const norm = bot.norms.services[c.incident.service_key];
-  const lines = [`📷 Сохранил ${photos.length > 1 ? `${photos.length} ${KIND_TITLE[kind]}` : KIND_TITLE[kind]} к случаю «${norm.title}», получено ${formatShort(now, c.house.tz)}.`];
+  const lines = [`📷 ${photos.length > 1 ? `${photos.length} ${KIND_TITLE[kind]}` : KIND_TITLE[kind]} сохранено в обращении «${norm.title}». Получено: ${formatShort(now, c.house.tz)}.`];
   if (before === 0) {
-    lines.push('', 'Фото — дополнительное доказательство: главное — номер из аварийной службы или акт. В заявлении я перечислю фото в приложениях со временем получения.');
+    lines.push('', 'Фото является дополнительным доказательством. Основное доказательство: номер аварийной заявки или акт. В заявлении фото будут указаны в приложениях с временем получения.');
   }
-  if (keepWaiting) lines.push('', 'Можно прислать ещё.');
+  if (keepWaiting) lines.push('', 'Можно направить дополнительные фото.');
   return bot.send(userId, { text: lines.join('\n'), buttons: [[cb('⬅️ К случаю', `cs:${c.p.id}`)]] });
 }

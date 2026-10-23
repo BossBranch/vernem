@@ -36,8 +36,9 @@ async function typeAddress(h: Harness, user: number, address: string, entrance?:
     }
   }
   await h.text(user, address);
-  const existing = lastButtons(h, user).find((b) => b.text.startsWith('🏠'));
-  await h.press(user, existing ? existing.text : 'Моего дома нет');
+  const addressButton = lastButtons(h, user).find((b) => b.type === 'callback' && (b.payload === 'adrnew' || b.payload.startsWith('adrpick:')));
+  assert.ok(addressButton && addressButton.type === 'callback', 'не найдена кнопка выбора или добавления дома');
+  await h.pressPayload(user, addressButton.payload);
   if (lastButtons(h, user).some((b) => b.type === 'callback' && b.payload === 'ent:skip')) await h.press(user, entrance ?? 'Пропустить');
 }
 
@@ -49,11 +50,11 @@ function claimText(h: Harness, user: number, idx = 0) {
 
 async function reportHotWater(h: Harness, user: number, address = 'ул. Примерная, д. 5') {
   await h.start(user);
-  await h.press(user, 'Что-то сломалось');
+  await h.press(user, 'Сообщить о проблеме');
   await h.press(user, 'Нет горячей воды');
   if (!h.db.listUserHouses(user).length) await typeAddress(h, user, address);
   await h.press(user, 'Внезапно');
-  await h.press(user, 'Позвонил');
+  await h.press(user, 'Указать номер заявки');
   await h.text(user, '4512');
   await h.press(user, 'Ввести время');
   await h.text(user, '20.09 08:10');
@@ -62,13 +63,13 @@ async function reportHotWater(h: Harness, user: number, address = 'ул. При�
 test('основной сценарий: фиксация → напоминание → расчёт → заявление → перерасчёт', async () => {
   const h = new Harness({ start: START });
   await reportHotWater(h, 1);
-  assert.match(textOf(h, 1), /Записал\./);
+  assert.match(textOf(h, 1), /✅ \*\*Обращение зарегистрировано\.\*\*/);
   assert.match(textOf(h, 1), /заявка № 4512/);
 
   // Через 3 часа бот сам спрашивает, дали ли воду.
   const mark = h.out.log.length;
   assert.equal(await h.advance(3 * H), 1);
-  assert.match(textOf(h, 1, mark), /Починили\?/);
+  assert.match(textOf(h, 1, mark), /🚿 Услуга восстановлена\? Горячее водоснабжение, Москва, ул\. Примерная, д\. 5\./);
 
   await h.press(1, 'Да, восстановили');
   await h.press(1, 'Только что'); // 22.09 15:00 → 54 ч 50 мин, превышение 46 ч
@@ -91,7 +92,7 @@ test('основной сценарий: фиксация → напоминан
   const pdf = msgs.find((m) => m.file)?.file;
   assert.ok(pdf && existsSync(pdf.path), 'PDF отправлен');
   assert.equal(readFileSync(pdf!.path).subarray(0, 4).toString(), '%PDF');
-  assert.match(msgs.map((m) => m.text).join('\n'), /Заявление готово.*82,80 ₽/);
+  assert.match(msgs.map((m) => m.text).join('\n'), /📄 \*\*Заявление подготовлено\*\*\. Ориентировочная сумма: 82,80 ₽\./);
   assert.doesNotMatch(msgs.map((m) => m.text).join('\n'), /ЗАЯВЛЕНИЕ О ПЕРЕРАСЧЁТЕ/);
 
   // «Не сохранять»: персональные данные стёрты из БД; в документе — реквизиты по форме.
@@ -115,12 +116,12 @@ test('основной сценарий: фиксация → напоминан
 
   // Подал заявление — с этой даты бот ждёт квитанцию.
   await submitClaim(h, 1);
-  assert.match(h.last(1).text, /Записал: подано 22\.09\.2026/);
+  assert.match(h.last(1).text, /Подача заявления зафиксирована: 22\.09\.2026/);
 
   // Через месяц — вопрос о квитанции.
   const mark2 = h.out.log.length;
   await h.advance(31 * 24 * H);
-  assert.match(textOf(h, 1, mark2), /Пришла новая квитанция/);
+  assert.match(textOf(h, 1, mark2), /Получена новая квитанция/);
   await h.press(1, 'Да, вернули');
   await h.text(1, '82,80');
   assert.match(textOf(h, 1), /Всего вы вернули с ботом: \*\*82,80 ₽\*\*/);
@@ -140,14 +141,14 @@ test('два отключения в одном месяце: лимит общ�
   // Второе отключение того же дня недели позже: 23.09 08:00–13:00.
   await h.advance(17 * H);
   await h.start(1);
-  await h.press(1, 'Что-то сломалось');
+  await h.press(1, 'Сообщить о проблеме');
   await h.press(1, 'Нет горячей воды');
   await h.press(1, 'Внезапно');
-  await h.press(1, 'Позвонил');
+  await h.press(1, 'Указать номер заявки');
   await h.text(1, '4600');
   await h.press(1, 'Только что');
   await h.advance(5 * H);
-  await h.press(1, 'Воду дали');
+  await h.press(1, 'Водоснабжение восстановлено');
   await h.press(1, 'Только что');
   const [second, first] = h.db.listUserParticipants(1);
   assert.equal(calcFor(h.db, h.bot.norms, loadCase(h.db, first.id)!, h.now()).months[0].percent, 6.9);
@@ -156,7 +157,7 @@ test('два отключения в одном месяце: лимит общ�
   assert.equal(m.percent, 0.75);
   const text = m.lines.join(' ');
   assert.match(text, /Допустимая продолжительность 8 ч установлена на месяц, поэтому учтён также предыдущий перерыв/);
-  assert.match(text, /Из них 6,9% приходится на предыдущий перерыв \(заявлено отдельно\); по данному перерыву — 0,75%/);
+  assert.match(text, /Из них 6,9% приходится на предыдущий перерыв \(заявлено отдельно\)\. По данному перерыву: 0,75%/);
   h.close();
 });
 
@@ -175,7 +176,7 @@ test('соседи: карточка со ссылкой в тексте → п�
   await h.start(2, payload);
   assert.match(textOf(h, 2), /у вас то же самое/);
   await h.press(2, 'Да, у меня тоже');
-  assert.match(textOf(h, 2), /Есть свой номер заявки/);
+  assert.match(textOf(h, 2), /Есть собственный номер заявки/);
   assert.match(textOf(h, 1), /Присоединился сосед\. Вас уже 2/);
   assert.equal(h.db.getUser(2)!.house_id, h.db.getUser(1)!.house_id);
   assert.equal(h.db.listUserHouses(2).length, 1, 'дом соседа попал в его адреса');
@@ -184,9 +185,9 @@ test('соседи: карточка со ссылкой в тексте → п�
   await h.text(2, '4513');
 
   await h.advance(1 * H);
-  await h.press(1, 'Воду дали');
+  await h.press(1, 'Водоснабжение восстановлено');
   await h.press(1, 'Только что');
-  assert.match(textOf(h, 2), /Сосед отметил/);
+  assert.match(textOf(h, 2), /Сосед указал, что услуга восстановлена/);
   await h.press(2, 'Да');
   assert.match(textOf(h, 2), /Сколько начислено/);
   const p2 = h.db.listUserParticipants(2)[0];
@@ -199,11 +200,11 @@ test('адрес выбирается из списка: сосед, напис�
   const h = new Harness({ start: START });
   await reportHotWater(h, 1, 'ул. Примерная, д. 5');
   await h.start(3);
-  await h.press(3, 'Что-то сломалось');
+  await h.press(3, 'Сообщить о проблеме');
   await h.press(3, 'Нет горячей воды');
   await h.press(3, 'Москва');
   await h.text(3, '5 примерная');
-  assert.match(h.last(3).text, /Выберите свой дом/);
+  assert.match(h.last(3).text, /Выберите дом:/);
   await h.press(3, '🏠 Москва, ул. Примерная, д. 5');
   await h.press(3, 'Пропустить');
   assert.match(textOf(h, 3), /Соседи уже сообщили/);
@@ -230,11 +231,11 @@ test('несколько адресов: бот спрашивает «Где?»
     ],
   );
   await h.press(1, 'Меню');
-  await h.press(1, 'Что-то сломалось');
+  await h.press(1, 'Сообщить о проблеме');
   await h.press(1, 'Нет газа');
-  assert.match(h.last(1).text, /Где случилось/);
+  assert.match(h.last(1).text, /Укажите адрес, где произошло нарушение/);
   await h.press(1, '📍 Москва, Садовая 10');
-  await h.press(1, 'Позвонил');
+  await h.press(1, 'Указать номер заявки');
   await h.text(1, '7');
   await h.press(1, 'Только что');
   const inc = h.db.getIncident(h.db.listUserParticipants(1)[0].incident_id)!;
@@ -252,13 +253,13 @@ test('город: одна и та же улица в разных города�
   await h.start(2);
   await h.press(2, 'Мои адреса');
   await h.press(2, 'Добавить адрес');
-  assert.match(h.last(2).text, /В каком городе/);
+  assert.match(h.last(2).text, /Укажите город, в котором находится дом/);
   await h.press(2, '✏️ Другой город');
   await h.text(2, 'г. екатеринбург');
   assert.match(h.last(2).text, /Екатеринбург/);
   await h.text(2, 'Садовая 10');
-  assert.doesNotMatch(h.last(2).text, /Выберите свой дом/, 'московский дом в Екатеринбурге не предлагается');
-  await h.press(2, 'Моего дома нет');
+  assert.doesNotMatch(h.last(2).text, /Выберите дом:/, 'московский дом в Екатеринбурге не предлагается');
+  await h.pressPayload(2, 'adrnew');
   const ekb = h.db.listUserHouses(2)[0];
   assert.equal(ekb.address, 'Екатеринбург, Садовая 10');
   assert.equal(ekb.tz, 'Asia/Yekaterinburg');
@@ -285,21 +286,21 @@ test('карточка дома: данные из квитанции, теле�
   const card = h.last(1).text;
   assert.match(card, /УК \/ ТСЖ: ООО "УК Пример", ИНН 7700000009/);
   assert.match(card, /Аварийная служба: \+7 495 000-00-00/);
-  assert.match(card, /Данные внесли жители/);
+  assert.match(card, /Данные внесены жителями/);
 
   await h.press(1, 'Меню');
-  await h.press(1, 'Что-то сломалось');
+  await h.press(1, 'Сообщить о проблеме');
   await h.press(1, 'Нет горячей воды');
   await h.press(1, 'Внезапно');
-  assert.match(h.last(1).text, /Позвоните в аварийную службу\*\*: \+7 495 000-00-00/);
-  await h.press(1, 'Позвонил');
+  assert.match(h.last(1).text, /Обратитесь в аварийную службу\*\*: \+7 495 000-00-00/);
+  await h.press(1, 'Указать номер заявки');
   await h.text(1, '1');
   await h.press(1, 'Ввести время');
   await h.text(1, '20.09 08:10');
-  await h.press(1, 'Воду дали');
+  await h.press(1, 'Водоснабжение восстановлено');
   await h.press(1, 'Только что');
   await h.text(1, '1000');
-  assert.match(h.last(1).text, /Заявление — в «ООО "УК Пример"» \(из карточки дома\)/);
+  assert.match(h.last(1).text, /Направить заявление в «ООО "УК Пример"» из карточки дома/);
   await h.press(1, 'Да');
   await h.text(1, 'Иванов Иван Иванович');
   await h.text(1, '5');
@@ -323,12 +324,12 @@ test('получатель из карточки дома: за мусор, га
 test('отопление: угловая комната, +15 °C, новый замер, расчёт', async () => {
   const h = new Harness({ start: START });
   await h.start(1);
-  await h.press(1, 'Что-то сломалось');
+  await h.press(1, 'Сообщить о проблеме');
   await h.press(1, 'Холодно в квартире');
   await typeAddress(h, 1, 'пр-т Мира, 12');
   await h.press(1, 'Угловая');
   await h.text(1, '15');
-  await h.press(1, 'Позвонил');
+  await h.press(1, 'Указать номер заявки');
   await h.text(1, 'А-77');
   await h.press(1, 'Только что');
   await h.advance(5 * H);
@@ -338,7 +339,7 @@ test('отопление: угловая комната, +15 °C, новый з�
   await h.advance(5 * H);
   await h.press(1, 'Стало тепло');
   await h.press(1, 'Только что');
-  await h.press(1, 'Не знаю — посчитать в процентах');
+  await h.press(1, 'Не знаю. Рассчитать в процентах');
   // 12:00–17:00 при +15 (норма +20): 5 × 5 = 25; 17:00–22:00 при +17,5: 5 × 2,5 = 12,5 → 37,5 × 0,15% = 5,63%
   assert.match(textOf(h, 1), /5,63%/);
   h.close();
@@ -351,12 +352,12 @@ test('отопление: сосед с угловой комнатой прис
   await h.press(2, 'Добавить адрес');
   await typeAddress(h, 2, 'пр-т Мира, 12');
   await h.start(1);
-  await h.press(1, 'Что-то сломалось');
+  await h.press(1, 'Сообщить о проблеме');
   await h.press(1, 'Холодно в квартире');
   await typeAddress(h, 1, 'пр-т Мира, 12');
   await h.press(1, 'Обычная');
   await h.text(1, '16');
-  await h.press(1, 'Позвонил');
+  await h.press(1, 'Указать номер заявки');
   await h.text(1, 'Б-1');
   await h.press(1, 'Только что');
   await h.press(2, 'У меня тоже');
@@ -372,48 +373,48 @@ test('отопление: сосед с угловой комнатой прис
 test('температура в норме: бот не обрывает сценарий, можно ввести новый замер', async () => {
   const h = new Harness({ start: START });
   await h.start(1);
-  await h.press(1, 'Что-то сломалось');
+  await h.press(1, 'Сообщить о проблеме');
   await h.press(1, 'Холодно в квартире');
   await typeAddress(h, 1, 'Ленина 3');
   await h.press(1, 'Обычная');
   await h.text(1, '19');
-  assert.match(h.last(1).text, /это норма/);
+  assert.match(h.last(1).text, /соответствует норме/);
   assert.equal(h.db.listUserParticipants(1).length, 0);
   await h.text(1, '16'); // замер в другой комнате
-  assert.match(h.last(1).text, /Позвоните в аварийную службу/);
+  assert.match(h.last(1).text, /Обратитесь в аварийную службу/);
   h.close();
 });
 
 test('плановое отключение горячей воды: в срок — денег нет, не дали в срок — перерыв со срока окончания работ', async () => {
   const h = new Harness({ start: START });
   await h.start(1);
-  await h.press(1, 'Что-то сломалось');
+  await h.press(1, 'Сообщить о проблеме');
   await h.press(1, 'Нет горячей воды');
   await typeAddress(h, 1, 'Ленина 3');
   await h.press(1, 'По плану');
-  assert.match(h.last(1).text, /До какого времени объявили отключение/);
+  assert.match(h.last(1).text, /Укажите объявленный срок окончания работ/);
   // Срок ещё не прошёл — дела нет.
   await h.text(1, '30.09 18:00');
-  assert.match(h.last(1).text, /Пока он не прошёл, снижения платы нет/);
+  assert.match(h.last(1).text, /До этого времени снижение платы не применяется/);
   assert.equal(h.db.listUserParticipants(1).length, 0);
 
   // Срок прошёл, воду не дали: перерыв считается с 21.09 18:00, раньше — нельзя.
-  await h.press(1, 'Что-то сломалось');
+  await h.press(1, 'Сообщить о проблеме');
   await h.press(1, 'Нет горячей воды');
   await h.press(1, 'По плану');
   await h.text(1, '21.09 18:00');
-  await h.press(1, 'Не дозвонился');
-  await h.press(1, 'Записать время → акт');
-  assert.match(h.last(1).text, /Работы объявили до 21\.09 18:00/);
+  await h.press(1, 'Не удалось дозвониться');
+  await h.press(1, 'Составить акт');
+  assert.match(h.last(1).text, /Работы были объявлены до 21\.09 18:00/);
   await h.press(1, 'Ввести время');
   await h.text(1, '21.09 10:00');
-  assert.match(h.last(1).text, /шли объявленные работы/);
-  await h.press(1, 'когда обещали дать воду');
+  assert.match(h.last(1).text, /проводились объявленные работы/);
+  await h.pressPayload(1, 'ts:planned');
   const p = h.db.listUserParticipants(1)[0];
   const inc = h.db.getIncident(p.incident_id)!;
   assert.equal(new Date(inc.started_at).getTime(), fromLocal(2026, 9, 21, 18, 0, TZ).getTime());
   assert.ok(inc.planned_until);
-  await h.press(1, 'Воду дали');
+  await h.press(1, 'Водоснабжение восстановлено');
   await h.press(1, 'Только что');
   assert.match(claimText(h, 1), /Плановое отключение горячего водоснабжения было объявлено до 21\.09\.2026 18:00; в объявленный срок горячее водоснабжение не возобновлено/);
   h.close();
@@ -422,19 +423,19 @@ test('плановое отключение горячей воды: в срок
 test('короткое отключение света — снижения платы не положено', async () => {
   const h = new Harness({ start: START });
   await h.start(1);
-  await h.press(1, 'Что-то сломалось');
+  await h.press(1, 'Сообщить о проблеме');
   await h.press(1, 'Нет света');
   await typeAddress(h, 1, 'Ленина 3');
   await h.press(1, 'Один / не знаю');
-  await h.press(1, 'Не дозвонился');
-  assert.match(h.last(1).text, /5 минут или перезвонить за 10 \(п\. 13 ПП № 416\)/);
-  await h.press(1, 'Записать время → акт');
+  await h.press(1, 'Не удалось дозвониться');
+  assert.match(h.last(1).text, /в течение 5 минут или перезвонить в течение 10 минут/);
+  await h.press(1, 'Составить акт');
   await h.press(1, '1 ч назад');
   assert.match(textOf(h, 1), /без номера заявки/);
-  await h.press(1, 'Свет дали');
+  await h.press(1, 'Электроснабжение восстановлено');
   await h.press(1, 'Только что');
-  assert.match(textOf(h, 1), /Снижения платы не положено/);
-  assert.doesNotMatch(textOf(h, 1), /Скажите об этом аварийной службе/, 'не дозвонился — в аварийку не отправляем');
+  assert.match(textOf(h, 1), /Снижение платы не применяется/);
+  assert.doesNotMatch(textOf(h, 1), /Сообщите об этом в аварийную службу/, 'при отсутствии номера в аварийную службу не отправляем');
   assert.equal(h.db.listUserParticipants(1)[0].status, 'closed');
   h.close();
 });
@@ -442,18 +443,18 @@ test('короткое отключение света — снижения пл
 test('ошибки ввода не ломают сценарий', async () => {
   const h = new Harness({ start: START });
   await h.start(1);
-  await h.press(1, 'Что-то сломалось');
+  await h.press(1, 'Сообщить о проблеме');
   await h.press(1, 'Нет холодной воды');
   await h.text(1, '123');
-  assert.match(textOf(h, 1), /Название города буквами/);
+  assert.match(textOf(h, 1), /Укажите название города буквами/);
   await h.text(1, 'москва');
   await h.text(1, 'дом');
-  assert.match(textOf(h, 1), /Нужны улица и номер дома/);
+  assert.match(textOf(h, 1), /Укажите улицу и номер дома/);
   await typeAddress(h, 1, 'Садовая 10');
-  await h.press(1, 'Позвонил');
+  await h.press(1, 'Указать номер заявки');
   // «не назвали» — не номер: бот просит цифры и сразу даёт кнопку «Номера нет».
   await h.text(1, 'не назвали');
-  assert.match(h.last(1).text, /В номере должны быть цифры/);
+  assert.match(h.last(1).text, /Номер должен содержать цифры/);
   assert.ok(lastButtons(h, 1).some((b) => b.text === 'Номера нет'));
   await h.text(1, '99');
   await h.press(1, 'Ввести время');
@@ -462,15 +463,15 @@ test('ошибки ввода не ломают сценарий', async () => {
   await h.text(1, 'завтра');
   assert.match(textOf(h, 1), /Не понял время/);
   await h.text(1, 'сегодня 10:00');
-  assert.match(textOf(h, 1), /Записал\./);
-  await h.press(1, 'Воду дали');
+  assert.match(textOf(h, 1), /Обращение зарегистрировано/);
+  await h.press(1, 'Водоснабжение восстановлено');
   await h.press(1, 'Ввести время');
   await h.text(1, 'сегодня 9:00');
   assert.match(textOf(h, 1), /должно быть позже начала/);
   await h.bot.handle({ kind: 'button', userId: 1, payload: 'cs:99999' });
-  assert.match(h.last(1).text, /кнопка уже неактуальна/);
+  assert.match(h.last(1).text, /Эта кнопка уже неактуальна/);
   await h.bot.handle({ kind: 'button', userId: 2, payload: `rest:${h.db.listUserParticipants(1)[0].id}:y` });
-  assert.match(h.last(2).text, /кнопка уже неактуальна/, 'чужой случай недоступен');
+  assert.match(h.last(2).text, /Эта кнопка уже неактуальна/, 'чужой случай недоступен');
   h.close();
 });
 
@@ -486,7 +487,7 @@ test('демо-режим: сценарий до заявления, насто�
   assert.match(h.last(1).text, /Какой случай показать/);
   await h.press(1, 'Есть номер заявки');
   assert.match(textOf(h, 1), /Демо 1: есть номер заявки/);
-  await h.press(1, 'Воду дали');
+  await h.press(1, 'Водоснабжение восстановлено');
   await h.press(1, 'Только что');
   await h.text(1, '1200');
   const t = textOf(h, 1);
@@ -531,10 +532,10 @@ test('ночью бот не беспокоит: напоминание пере
   const late = fromLocal(2026, 9, 22, 21, 30, TZ);
   const h = new Harness({ start: late });
   await h.start(1);
-  await h.press(1, 'Что-то сломалось');
+  await h.press(1, 'Сообщить о проблеме');
   await h.press(1, 'Нет газа');
   await typeAddress(h, 1, 'Садовая 10');
-  await h.press(1, 'Позвонил');
+  await h.press(1, 'Указать номер заявки');
   await h.text(1, '1');
   await h.press(1, 'Только что');
   const r = h.db.db.prepare('SELECT due_at FROM reminders').get() as { due_at: string };
@@ -568,18 +569,18 @@ async function joinHouse(h: Harness, user: number, address = 'ул. Пример
 
 /** Житель отмечает, что подал заявление сегодня, без входящего номера. */
 async function submitClaim(h: Harness, user: number) {
-  await h.press(user, 'Я подал(а) заявление');
+  await h.press(user, 'Заявление подано');
   await h.press(user, 'Сегодня');
   await h.press(user, 'Номера нет');
 }
 
 async function finishWithClaim(h: Harness, user: number, opts: { executor?: string } = {}) {
-  await h.press(user, 'Воду дали');
+  await h.press(user, 'Водоснабжение восстановлено');
   await h.press(user, 'Только что');
   await h.text(user, '1200');
   await h.press(user, 'УК / ТСЖ');
   // Житель уже в акте — ФИО и квартиру бот берёт оттуда.
-  if (/Заявление от:/.test(h.last(user).text)) await h.press(user, '✅ Да');
+  if (/Использовать данные для заявления:/.test(h.last(user).text)) await h.press(user, '✅ Да');
   else {
     await h.text(user, 'Иванов Иван Иванович');
     await h.text(user, '42');
@@ -593,7 +594,7 @@ async function finishWithClaim(h: Harness, user: number, opts: { executor?: stri
 test('сеть дома: сосед получает «у вас тоже?» и присоединяется одной кнопкой', async () => {
   const h = new Harness({ start: START });
   await joinHouse(h, 2);
-  assert.match(textOf(h, 2), /В сети дома — 1 житель/);
+  assert.match(textOf(h, 2), /В сети дома: 1 житель/);
   assert.match(h.last(2).text, /ул\. Примерная, д\. 5\*\*, подъезд 2/);
 
   await reportHotWater(h, 1, 'Примерная 5');
@@ -627,10 +628,10 @@ test('ночью уведомление соседу уходит в 08:00; от
 
   const mark2 = h.out.log.length;
   await h.start(3);
-  await h.press(3, 'Что-то сломалось');
+  await h.press(3, 'Сообщить о проблеме');
   await h.press(3, 'Нет газа');
   await typeAddress(h, 3, 'Примерная 5');
-  await h.press(3, 'Позвонил');
+  await h.press(3, 'Указать номер заявки');
   await h.text(3, '77');
   await h.press(3, 'Только что');
   assert.equal(h.sentTo(2, mark2).length, 0, 'отписанный житель уведомлений не получает');
@@ -647,7 +648,7 @@ test('приглашение в сеть дома по ссылке показы
   const url = h.lastLink(1, '?start=h_');
   assert.ok(textOf(h, 1).includes(url), 'ссылка-приглашение продублирована в тексте');
   await h.start(4, new URL(url).searchParams.get('start')!);
-  assert.match(textOf(h, 4), /Вы в сети дома \*\*Москва, ул\. Примерная, д\. 5\*\*/);
+  assert.match(textOf(h, 4), /Вы подключены к сети дома \*\*Москва, ул\. Примерная, д\. 5\*\*/);
   assert.equal(h.db.getUser(4)!.house_id, h.db.getUser(1)!.house_id);
   await h.press(4, 'у меня тоже');
   assert.equal(h.db.listUserParticipants(4).length, 1);
@@ -660,15 +661,15 @@ test('акт без исполнителя: бот сам собирает со�
   await joinHouse(h, 3);
   // Житель 1 не дозвонился в аварийную службу.
   await h.start(1);
-  await h.press(1, 'Что-то сломалось');
+  await h.press(1, 'Сообщить о проблеме');
   await h.press(1, 'Нет горячей воды');
   await typeAddress(h, 1, 'Примерная 5', '3');
   await h.press(1, 'Внезапно');
-  await h.press(1, 'Не дозвонился');
-  await h.press(1, 'Записать время → акт');
+  await h.press(1, 'Не удалось дозвониться');
+  await h.press(1, 'Составить акт');
   await h.press(1, 'Ввести время');
   await h.text(1, '20.09 08:10');
-  assert.match(textOf(h, 1), /нужен акт с соседями/);
+  assert.match(textOf(h, 1), /составьте акт с соседями/);
   await h.press(2, 'У меня тоже');
   await h.press(3, 'У меня тоже');
 
@@ -678,8 +679,8 @@ test('акт без исполнителя: бот сам собирает со�
   await h.text(1, '5');
   // PDF для подписи — сразу, не дожидаясь соседей в боте.
   assert.ok(h.files(1, mark0).some((f) => f.name.startsWith('Акт_')), 'акт сразу в PDF');
-  assert.match(textOf(h, 1), /Акт готов к подписи/);
-  assert.match(textOf(h, 1), /Ещё отправил его 2 соседям/);
+  assert.match(textOf(h, 1), /Акт подготовлен для подписания/);
+  assert.match(textOf(h, 1), /Акт направлен 2 соседям в бот/);
   assert.match(textOf(h, 2), /Соседи составляют акт/);
 
   const mark = h.out.log.length;
@@ -717,17 +718,17 @@ test('акт без исполнителя: бот сам собирает со�
 test('акт в одиночку: заявление без доказательства предупреждает, PDF акта сразу с пустыми строками', async () => {
   const h = new Harness({ start: START });
   await h.start(1);
-  await h.press(1, 'Что-то сломалось');
+  await h.press(1, 'Сообщить о проблеме');
   await h.press(1, 'Нет горячей воды');
   await typeAddress(h, 1, 'Садовая 10');
   await h.press(1, 'Внезапно');
-  await h.press(1, 'Не дозвонился');
-  await h.press(1, 'Записать время → акт');
+  await h.press(1, 'Не удалось дозвониться');
+  await h.press(1, 'Составить акт');
   await h.press(1, 'Ввести время');
   await h.text(1, '20.09 08:10');
   await h.advance(1 * H);
   await finishWithClaim(h, 1);
-  assert.match(textOf(h, 1), /В заявлении нет доказательства/);
+  assert.match(textOf(h, 1), /В заявлении нет номера заявки или акта/);
 
   // Соседей в боте нет — акт всё равно приходит сразу, с пустыми строками для подписей на бумаге.
   await h.press(1, 'Акт с соседями');
@@ -764,7 +765,7 @@ test('демо 2: не дозвонились — акт с двумя демо-
   await h.press(1, 'Акт с соседями');
   await h.text(1, 'Петров Пётр Петрович');
   await h.text(1, '7');
-  assert.match(textOf(h, 1), /Соседи \(демо\) Петрова А\. С\. и Сидоров О\. И\. подтвердили/);
+  assert.match(textOf(h, 1), /Соседи в демо-режиме: Петрова А\. С\. и Сидоров О\. И\./);
   const incident = h.db.getIncident(h.db.listUserParticipants(1)[0].incident_id)!;
   assert.equal(incident.service_key, 'cold_water_off', 'другая услуга, чем в демо 1: расчёты не складываются');
   const act = h.db.getActByIncident(incident.id)!;
@@ -777,12 +778,12 @@ test('демо 2: не дозвонились — акт с двумя демо-
   assert.ok(!h.out.log.some((r) => r.to === 'user' && r.id < 0));
   await h.press(1, 'К делу');
   await h.advance(2 * H); // воду дали через 2 часа после того, как составили акт
-  await h.press(1, 'Воду дали');
+  await h.press(1, 'Водоснабжение восстановлено');
   await h.press(1, 'Только что');
   await h.text(1, '600');
   await h.press(1, 'УК / ТСЖ');
   // ФИО и квартира — как в акте: заново не спрашиваем.
-  assert.match(h.last(1).text, /Заявление от: Петров Пётр Петрович, кв\. 7\?/);
+  assert.match(h.last(1).text, /Использовать данные для заявления: Петров Пётр Петрович, квартира 7\?/);
   await h.press(1, '✅ Да');
   await h.press(1, 'Пропустить');
   await h.press(1, 'Пропустить');
@@ -792,7 +793,7 @@ test('демо 2: не дозвонились — акт с двумя демо-
   assert.match(doc, /Сообщение в аварийно-диспетчерскую службу исполнителя не удалось зарегистрировать/);
   assert.match(doc, /подтверждено актом от .* и председателем совета многоквартирного дома без участия исполнителя \(п\. 110\(1\) Правил\)/);
   assert.match(doc, /Копия акта о нарушении качества/);
-  // Акт составили до «Воду дали»: скачанная позже копия совпадает с подписанной бумагой.
+  // Акт составили до восстановления услуги: скачанная позже копия совпадает с подписанной бумагой.
   const actText = actDocFor(h.db, h.bot.norms, act.id, h.now())!.facts.join(' ');
   assert.match(actText, /на момент составления акта не устранено/);
   assert.doesNotMatch(actText, / по \d{2}\.\d{2}\.\d{4}/);
@@ -805,17 +806,17 @@ test('демо 2: не дозвонились — акт с двумя демо-
 test('проверка через 2 часа: никто не пришёл → акт с причиной «не пришли на замер»', async () => {
   const h = new Harness({ start: START });
   await h.start(1);
-  await h.press(1, 'Что-то сломалось');
+  await h.press(1, 'Сообщить о проблеме');
   await h.press(1, 'Холодно в квартире');
   await typeAddress(h, 1, 'пр-т Мира, 12');
   await h.press(1, 'Обычная');
   await h.text(1, '15');
-  await h.press(1, 'Позвонил');
+  await h.press(1, 'Указать номер заявки');
   await h.text(1, 'А-1');
   await h.press(1, 'Только что');
   const mark = h.out.log.length;
   await h.advance(2 * H);
-  assert.match(textOf(h, 1, mark), /Приходили из УК замерить/);
+  assert.match(textOf(h, 1, mark), /Представители УК приходили для замера/);
   await h.press(1, 'Никто');
   const p = h.db.listUserParticipants(1)[0];
   assert.equal(p.inspection, 'no_show');
@@ -828,11 +829,11 @@ test('фото прикрепляется к открытому случаю и 
   const h = new Harness({ start: START });
   await h.start(1);
   await h.photo(1, 'early');
-  assert.match(h.last(1).text, /случая, к которому его приложить, пока нет/);
+  assert.match(h.last(1).text, /нет обращения, к которому его можно приложить/);
 
   await reportHotWater(h, 1);
   await h.photo(1, 'tok-1');
-  assert.match(h.last(1).text, /Сохранил фото к случаю «Горячее водоснабжение»/);
+  assert.match(h.last(1).text, /фото сохранено в обращении «Горячее водоснабжение»/);
   const p = h.db.listUserParticipants(1)[0];
   assert.equal(h.db.listPhotos(p.id).length, 1);
   assert.equal(h.db.listPhotos(p.id)[0].token, 'tok-1');
@@ -854,13 +855,13 @@ test('перерасчёт не пришёл: штраф 50%, жалоба в Г
   await h.advance(31 * 24 * H);
   await h.press(1, '❌ Нет');
   const menu = h.last(1).text;
-  assert.match(menu, /Перерасчёт не сделали/);
-  assert.match(menu, /Штраф ≈ 38,70 ₽/); // 43 ч × 0,15% = 6,45% от 1 200 ₽ = 77,40 ₽ → 50%
+  assert.match(menu, /Перерасчёт не выполнен/);
+  assert.match(menu, /Расчётный размер штрафа: 38,70 ₽/); // 43 ч × 0,15% = 6,45% от 1 200 ₽ = 77,40 ₽ → 50%
   assert.match(menu, /нарушения в 2 домах/);
 
   let mark = h.out.log.length;
   await h.press(1, 'Требование о штрафе 50%');
-  assert.match(textOf(h, 1, mark), /Штраф 50% ≈ 38,70 ₽/);
+  assert.match(textOf(h, 1, mark), /Расчётный размер штрафа 50%: 38,70 ₽/);
   assert.ok(h.files(1, mark).some((f) => f.name.startsWith('Требование_')));
 
   await h.press(1, 'Другие варианты');
@@ -890,15 +891,15 @@ test('перерасчёт меньше положенного — бот пре
   await h.text(1, '40');
   assert.match(h.last(1).text, /положено ≈ 77,40 ₽, а вернули 40 ₽/);
   await h.press(1, 'Потребовать остальное');
-  assert.match(h.last(1).text, /Перерасчёт сделали не полностью/);
-  assert.match(h.last(1).text, /Штраф ≈ 18,70 ₽/); // (77,40 − 40) × 50%
+  assert.match(h.last(1).text, /Перерасчёт выполнен не полностью/);
+  assert.match(h.last(1).text, /Расчётный размер штрафа: 18,70 ₽/); // (77,40 − 40) × 50%
   h.close();
 });
 
 test('главное меню: «Открыть приложение» — первой кнопкой; «Ещё нет», а не «Нет ещё»', async () => {
   const { mainMenu } = await import('../src/bot/ui.ts');
   assert.equal(mainMenu({ demo: false, app: true })[0][0].text, '📱 Открыть приложение');
-  assert.equal(mainMenu({ demo: false, app: false })[0][0].text, '🚨 Что-то сломалось');
+  assert.equal(mainMenu({ demo: false, app: false })[0][0].text, '🚨 Сообщить о проблеме');
   const src = readFileSync(new URL('../src/bot/core.ts', import.meta.url), 'utf8');
   assert.doesNotMatch(src, /'Нет ещё'/);
 });
@@ -922,7 +923,7 @@ async function houseWithUk(h: Harness) {
 }
 
 async function reportViaUk(h: Harness, user: number) {
-  await h.press(user, 'Что-то сломалось');
+  await h.press(user, 'Сообщить о проблеме');
   await h.press(user, 'Нет горячей воды');
   await h.press(user, 'Внезапно');
   await h.press(user, 'Отправить заявку в УК');
@@ -931,21 +932,21 @@ async function reportViaUk(h: Harness, user: number) {
 test('УК в боте: подключение, заявка, «Принять» → номер у жителей, «Устранено» → житель подтверждает', async () => {
   const h = new Harness({ start: START });
   const { code } = await houseWithUk(h);
-  assert.match(textOf(h, 50), /Заявки жителей дома .*Лесная.* будут приходить сюда/);
-  assert.match(textOf(h, 1), /подключилась УК: Иванова А\. П\./);
+  assert.match(textOf(h, 50), /Заявки жителей дома .*Лесная.* будут поступать в этот чат/);
+  assert.match(textOf(h, 1), /подключена УК: Иванова А\. П\./);
 
   // Житель того же дома не может принимать заявки как УК.
   await h.start(2, `d_${code}`);
-  assert.match(h.last(2).text, /Вы житель этого дома/);
+  assert.match(h.last(2).text, /Вы указаны как житель этого дома/);
 
   let mark = h.out.log.length;
   await reportViaUk(h, 1);
-  assert.match(textOf(h, 1, mark), /Отправил заявку в УК/);
+  assert.match(textOf(h, 1, mark), /Заявка направлена в УК/);
   assert.match(textOf(h, 50, mark), /Заявка жителей.*Нет горячей воды|Заявка жителей/);
-  assert.doesNotMatch(textOf(h, 1, mark), /нужен акт с соседями/);
+  assert.doesNotMatch(textOf(h, 1, mark), /составьте акт с соседями/);
 
   // Сосед присоединяется к тому же отключению — заявка общая.
-  await h.press(2, 'Что-то сломалось');
+  await h.press(2, 'Сообщить о проблеме');
   await h.press(2, 'Нет горячей воды');
   await h.press(2, 'Да, присоединиться');
 
@@ -970,7 +971,7 @@ test('УК в боте: подключение, заявка, «Принять»
   await h.press(50, 'Устранено');
   assert.match(textOf(h, 1, mark), /устранено в 22\.09 14:00/);
   await h.press(1, 'Да, с 14:00');
-  assert.match(textOf(h, 1, mark), /Записал: починили в 22\.09 14:00\. УК об этом знает/);
+  assert.match(textOf(h, 1, mark), /Восстановление услуги зафиксировано: 22\.09 14:00\. УК уведомлена/);
 
   const p1 = h.db.listUserParticipants(1)[0];
   const text = claimTextFor(h.db, h.bot.norms, loadCase(h.db, p1.id)!, h.now());
@@ -991,7 +992,7 @@ test('УК в боте: свой номер диспетчера; молчани
   await reportViaUk(h, 1);
   await h.press(50, 'Принять со своим номером');
   await h.text(50, 'нет');
-  assert.match(h.last(50).text, /должны быть цифры/);
+  assert.match(h.last(50).text, /Номер должен содержать цифры/);
   await h.text(50, 'АДС-778');
   assert.match(textOf(h, 1), /№ АДС-778/);
   await h.bot.handle({ kind: 'button', userId: 1, payload: `rest:${h.db.listUserParticipants(1)[0].id}:y` });
@@ -1000,11 +1001,11 @@ test('УК в боте: свой номер диспетчера; молчани
   // Молчание: через 30 минут бот предупреждает, это попадает в заявление.
   const mark = h.out.log.length;
   await h.start(2);
-  await h.press(2, 'Что-то сломалось');
+  await h.press(2, 'Сообщить о проблеме');
   await h.press(2, 'Нет холодной воды');
   await h.press(2, 'Отправить заявку в УК');
   await h.advance(31 * 60_000);
-  assert.match(textOf(h, 2, mark), /УК не ответила на заявку за 31 мин/);
+  assert.match(textOf(h, 2, mark), /УК не ответила на заявку в течение 31 мин/);
   const p2 = h.db.listUserParticipants(2)[0];
   await h.bot.handle({ kind: 'button', userId: 2, payload: `rest:${p2.id}:y` });
   await h.press(2, 'Только что');
@@ -1013,12 +1014,12 @@ test('УК в боте: свой номер диспетчера; молчани
   // «Не наш дом»: жители получают совет позвонить, кнопка «Отправить в УК» возвращается.
   await h.advance(H);
   const m2 = h.out.log.length;
-  await h.press(1, 'Что-то сломалось');
+  await h.press(1, 'Сообщить о проблеме');
   await h.press(1, 'Нет света');
   if (lastButtons(h, 1).some((b) => b.text.startsWith('Два'))) await h.press(1, 'Два');
   await h.press(1, 'Отправить заявку в УК');
   await h.press(50, 'Не наш дом');
-  assert.match(textOf(h, 1, m2), /УК ответила, что дом .* не обслуживает/);
+  assert.match(textOf(h, 1, m2), /УК сообщила, что не обслуживает дом/);
   h.close();
 });
 
@@ -1082,11 +1083,11 @@ test('заявление на почту УК: бот отправляет PDF, 
   assert.equal(h.bot.saveSignedScan(1, scanPid, signedPdf), null);
   await h.bot.showCase(1, scanPid);
   await h.press(1, 'Отправить в УК на почту');
-  assert.match(h.last(1).text, /на почту УК \*\*uk@example\.ru\*\*/);
+  assert.match(h.last(1).text, /на электронную почту УК \*\*uk@example\.ru\*\*/);
   await h.text(1, 'не почта');
   assert.match(h.last(1).text, /name@example\.ru/);
   await h.text(1, 'Ivanov@Mail.ru');
-  assert.match(h.last(1).text, /Отправил заявление на uk@example\.ru в 22\.09 12:00, копия — на ivanov@mail\.ru/);
+  assert.match(h.last(1).text, /Заявление направлено на uk@example\.ru: 22\.09 12:00, копия направлена на ivanov@mail\.ru/);
 
   assert.equal(smtp.mails.length, 1);
   const m = smtp.mails[0];
@@ -1121,7 +1122,7 @@ test('заявление на почту: сервер отказал — жит
   await h.bot.showCase(1, scanPid);
   await h.press(1, 'Отправить в УК на почту');
   await h.press(1, 'Без моей почты');
-  assert.match(h.last(1).text, /Письмо не ушло/);
+  assert.match(h.last(1).text, /Письмо не отправлено/);
   const cl = JSON.parse(h.db.getParticipant(h.db.listUserParticipants(1)[0].id)!.claim!);
   assert.equal(cl.submittedAt, undefined);
   // Без настроенной почты кнопки нет.
@@ -1160,7 +1161,7 @@ test('документы: без приписки «расчёт ориенти�
   await reportHotWater(h, 1);
   const house = h.db.listUserHouses(1)[0];
   h.db.setHouseInfo(house.id, { ukName: 'ООО «УК Пример»', ukAddress: 'г. Москва, ул. Строителей, 1' });
-  await h.press(1, 'Воду дали');
+  await h.press(1, 'Водоснабжение восстановлено');
   await h.press(1, 'Только что');
   await h.text(1, '1200');
   await h.press(1, '✅ Да'); // получатель из карточки дома
@@ -1192,7 +1193,7 @@ test('демо-дела заново: из меню «Демо» — три но
   await h.press(1, 'Меню');
   await h.press(1, 'Демо');
   await h.press(1, 'Все демо-дела заново');
-  assert.match(h.last(1).text, /3 демо-дела заново/);
+  assert.match(h.last(1).text, /Создано демо-дел: 3/);
   const parts = h.db.listUserParticipants(1).map((p) => h.db.getIncident(p.incident_id)!.demo);
   assert.deepEqual(parts.filter((d) => d).sort(), [1, 1, 3]);
   assert.equal(parts.filter((d) => !d).length, 1, 'настоящее дело осталось');
@@ -1222,16 +1223,16 @@ test('сроки идут от подачи: без отметки о подач
   // Через месяц квитанцию не проверяем: заявление не подано.
   mark = h.out.log.length;
   await h.advance(31 * 24 * H);
-  assert.doesNotMatch(textOf(h, 1, mark), /Пришла новая квитанция/);
+  assert.doesNotMatch(textOf(h, 1, mark), /Получена новая квитанция/);
   // «Не сделали» без подачи — нельзя: сначала дата подачи.
   await h.bot.handle({ kind: 'button', userId: 1, payload: `rc:${p.id}:n` });
   assert.match(h.last(1).text, /Сначала отметьте, когда подали заявление/);
   assert.equal(h.db.getParticipant(p.id)!.status, 'claim_ready');
   // Подать раньше даты заявления нельзя; другой день — текстом.
-  await h.press(1, 'Я подал(а) заявление');
+  await h.press(1, 'Заявление подано');
   await h.press(1, 'Другой день');
   await h.text(1, '01.09');
-  assert.match(h.last(1).text, /подать его раньше нельзя/);
+  assert.match(h.last(1).text, /Его нельзя подать раньше этой даты/);
   await h.press(1, 'Другой день');
   await h.text(1, '23.09');
   await h.text(1, 'вх. № 77');
@@ -1286,8 +1287,8 @@ test('напоминание не потерялось: MAX не принял с
   h.out.failUsers.clear();
   const mark = h.out.log.length;
   await h.advance(11 * 60_000);
-  assert.match(textOf(h, 1, mark), /Починили\?/);
-  assert.match(textOf(h, 2, mark), /У вас тоже\?/);
+  assert.match(textOf(h, 1, mark), /Услуга восстановлена\?/);
+  assert.match(textOf(h, 2, mark), /Нарушение затронуло и вас\?/);
   h.close();
 });
 
@@ -1314,9 +1315,9 @@ test('демо-дела заново не меняют текущий адрес
   assert.deepEqual(h.db.listUserHouses(1).map((x) => x.address), ['Москва, ул. Примерная, д. 5']);
   // Новое сообщение идёт на настоящий адрес, а не на демо.
   await h.press(1, 'Меню');
-  await h.press(1, 'Что-то сломалось');
+  await h.press(1, 'Сообщить о проблеме');
   await h.press(1, 'Нет света');
-  assert.doesNotMatch(h.last(1).text, /Где случилось/);
+  assert.doesNotMatch(h.last(1).text, /Укажите адрес, где произошло нарушение/);
   h.close();
 });
 
@@ -1324,11 +1325,11 @@ test('удаление данных: у соседей остаются дело
   const h = new Harness({ start: START });
   await joinHouse(h, 2);
   await h.start(1);
-  await h.press(1, 'Что-то сломалось');
+  await h.press(1, 'Сообщить о проблеме');
   await h.press(1, 'Нет холодной воды');
   await typeAddress(h, 1, 'Примерная 5');
-  await h.press(1, 'Не дозвонился');
-  await h.press(1, 'Записать время → акт');
+  await h.press(1, 'Не удалось дозвониться');
+  await h.press(1, 'Составить акт');
   await h.press(1, '1 ч назад');
   await h.press(2, 'У меня тоже');
   const inc = h.db.getIncident(h.db.listUserParticipants(1)[0].incident_id)!;
@@ -1356,7 +1357,7 @@ test('домовой чат с несколькими адресами: дом �
   await typeAddress(h, 1, 'Ленина 3');
   await h.bot.handle({ kind: 'group_added', chatId: -700, title: 'Ленина 3' });
   await h.bot.handle({ kind: 'group_text', chatId: -700, userId: 1, text: '/dom' });
-  assert.match(h.out.log.at(-1)!.msg.text, /выберите дом в личных сообщениях/);
+  assert.match(h.out.log.at(-1)!.msg.text, /Выберите дом в личных сообщениях/);
   await h.press(1, 'Ленина 3');
   assert.match(h.out.log.filter((r) => r.to === 'chat' && r.id === -700).at(-1)!.msg.text, /Чат привязан к дому: Москва, Ленина 3/);
   // Карточка горячей воды по Примерной в чат дома на Ленина не уходит.
@@ -1397,7 +1398,7 @@ test('УК в боте: житель не может принимать заяв
   await h.text(61, 'Петрова А. А., ООО «УК Лесная»');
   await h.advance(91 * 24 * H);
   assert.equal(h.db.getDispatcher(house.id, 61), undefined);
-  assert.match(h.last(61).text, /Подключение к дому .* закончилось/);
+  assert.match(h.last(61).text, /Подключение к дому .* прекращено/);
   h.close();
 });
 
@@ -1432,7 +1433,7 @@ test('заявление на почту уходит один раз; прил�
   const [a, b] = await Promise.all([emailClaim(h.bot, 1, p.id, null), emailClaim(h.bot, 1, p.id, null)]);
   assert.equal([a, b].filter((x) => x === null).length, 1, 'одно письмо из двух одновременных нажатий');
   assert.match(String(a ?? b), /уже отправляется|уже отправлено/);
-  assert.match(String(await emailClaim(h.bot, 1, p.id, null)), /уже отправлено/);
+  assert.match(String(await emailClaim(h.bot, 1, p.id, null)), /уже направлено/);
   assert.equal(smtp.mails.length, 1);
   const body = Buffer.from(smtp.mails[0].data.split('Content-Transfer-Encoding: base64\n\n')[1].split('\n--')[0].replace(/\n/g, ''), 'base64').toString('utf8');
   assert.match(body, /Во вложении: заполненное и подписанное заявление \(скан PDF\)\./);
@@ -1467,7 +1468,7 @@ test('акт без председателя: бот прямо говорит, 
   await h.press(1, 'Акт с соседями');
   await h.text(1, 'Иванов Иван Иванович');
   await h.text(1, '1');
-  assert.match(textOf(h, 1), /По правилам нужна и его подпись/);
+  assert.match(textOf(h, 1), /подписи не менее двух соседей и председателя/);
   await h.press(1, 'Акт подписан');
   await h.press(1, 'Да, без председателя');
   assert.match(h.last(1).text, /Без подписи председателя акт неполный/);
@@ -1480,15 +1481,15 @@ test('акт без председателя: бот прямо говорит, 
 test('свет: два ввода — свойство дома, в заявлении без догадки «лифт или 9 этажей»', async () => {
   const h = new Harness({ start: START });
   await h.start(1);
-  await h.press(1, 'Что-то сломалось');
+  await h.press(1, 'Сообщить о проблеме');
   await h.press(1, 'Нет света');
   await typeAddress(h, 1, 'Ленина 3');
-  assert.match(h.last(1).text, /два независимых ввода электричества\? Это записано в техпаспорте/);
+  assert.match(h.last(1).text, /два независимых ввода электричества\? Эти сведения указаны в техническом паспорте/);
   await h.press(1, 'Два независимых');
-  await h.press(1, 'Позвонил');
+  await h.press(1, 'Указать номер заявки');
   await h.text(1, '12');
   await h.press(1, '3 ч назад');
-  await h.press(1, 'Свет дали');
+  await h.press(1, 'Электроснабжение восстановлено');
   await h.press(1, 'Только что');
   const text = claimText(h, 1);
   assert.match(text, /при наличии двух независимых взаимно резервирующих источников питания\)/);
@@ -1497,8 +1498,19 @@ test('свет: два ввода — свойство дома, в заявле
   h.close();
 });
 
-test('в текстах бота и приложения нет разделителя «·»', () => {
-  for (const f of ['src/bot/core.ts', 'src/bot/house.ts', 'src/bot/dispatch.ts', 'src/bot/photos.ts', 'src/bot/acts.ts', 'src/bot/escalate.ts', 'src/bot/ui.ts', 'src/bot/mail.ts', 'public/app/app.js']) {
-    assert.doesNotMatch(readFileSync(new URL(`../${f}`, import.meta.url), 'utf8'), /·/, f);
+test('в пользовательских текстах нет упоминания «Госуслуг»', () => {
+  for (const f of [
+    'src/bot/ui.ts',
+    'src/bot/core.ts',
+    'src/bot/house.ts',
+    'src/bot/acts.ts',
+    'src/bot/dispatch.ts',
+    'src/bot/photos.ts',
+    'src/bot/escalate.ts',
+    'src/bot/mail.ts',
+    'public/app/app.js',
+    'src/web/server.ts',
+  ]) {
+    assert.doesNotMatch(readFileSync(new URL(`../${f}`, import.meta.url), 'utf8'), /Госуслуг/, f);
   }
 });

@@ -85,7 +85,7 @@ services:
     interruption:
       monthly_hours: 24
       single_hours: 16
-      single_hours_note: "16 ч при температуре в квартире от +12 °C до нормы; 8 ч — от +10 до +12 °C; 4 ч — от +8 до +10 °C"
+      single_hours_note: "16 ч при температуре в квартире от +12 °C до нормативной; 8 ч при температуре от +10 до +12 °C; 4 ч при температуре от +8 до +10 °C"
       rate_percent: 0.15
       unit_hours: 1
 
@@ -150,11 +150,11 @@ services:
     item: "п. 17 Приложения № 1"
     url: "https://www.consultant.ru/document/cons_doc_LAW_114247/03d663952dce02f58fbdbec6844ac743d3b5a765/"
     kind: interruption
-    executor_hint: "Исполнитель по этой услуге — обычно региональный оператор по обращению с ТКО (смотрите получателя в квитанции)."
+    executor_hint: "Исполнитель этой услуги: обычно региональный оператор по обращению с ТКО. Проверьте получателя платежа в квитанции."
     interruption:
       monthly_hours: 72
       single_hours: 48
       single_hours_warm: 24
-      single_hours_note: "48 ч при среднесуточной температуре +5 °C и ниже, 24 ч — выше +5 °C"
+      single_hours_note: "48 ч при среднесуточной температуре +5 °C и ниже; 24 ч при температуре выше +5 °C"
       rate_percent: 3.3
       unit_hours: 24

@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: «Вернём» — REST мини-приложения
-  version: 1.4.1
+  version: 1.4.2
   license:
     name: MIT
   description: |
@@ -47,7 +47,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Health' }
-              example: { ok: true, db: ok, bot: running (webhook), version: 1.4.1 }
+              example: { ok: true, db: ok, bot: running (webhook), version: 1.4.2 }
         '503':
           description: База недоступна
           content:

@@ -49,14 +49,14 @@ export async function sendDispatchInvite(bot: Vernem, userId: number, houseId: n
   const h = bot.db.getUserHouse(userId, houseId);
   if (!h) return bot.stale(userId);
   const url = dispatchInviteLink(bot, h);
-  if (!url) return bot.send(userId, { text: 'Ссылка для УК появится, когда бот подключён к MAX.', buttons: [backRow()] });
+  if (!url) return bot.send(userId, { text: 'Ссылка для УК будет доступна после подключения бота к MAX.', buttons: [backRow()] });
   bot.db.track(userId, 'dispatch_invite', { house: h.id });
-  await bot.send(userId, { text: 'Перешлите сообщение ниже в УК: в её чат в MAX, диспетчеру или на почту.' });
+  await bot.send(userId, { text: 'Перешлите сообщение ниже в чат УК в MAX, диспетчеру или по электронной почте.' });
   return bot.send(userId, {
     // Ссылка в тексте: при пересылке MAX убирает кнопки, а ссылка продолжает работать.
     text: [
       `🏢 **Заявки жителей дома ${h.address}**`,
-      'Жители этого дома сообщают об отключениях через бот «Вернём». Подключите сотрудника или диспетчера: заявки будут приходить ему в MAX, принять их можно одной кнопкой, а номер заявки жители получат сразу.',
+      'Жители этого дома сообщают об отключениях через бот «Вернём». Подключите сотрудника или диспетчера: заявки будут поступать ему в MAX. После принятия заявки жители получат её номер.',
       `👉 Подключиться: ${url}`,
     ].join('\n'),
     buttons: [[link('🏢 Подключиться', url)]],
@@ -69,10 +69,10 @@ const isResident = (bot: Vernem, userId: number, houseId: number) => !!bot.db.ge
 /** Сотрудник УК открыл ссылку `d_<код>`. */
 export async function onDispatcherLink(bot: Vernem, userId: number, code: string) {
   const house = bot.db.getHouseByDispatchCode(code);
-  if (!house) return bot.send(userId, { text: 'Ссылка для УК не найдена. Попросите жителей прислать новую.', buttons: bot.menu() });
+  if (!house) return bot.send(userId, { text: 'Ссылка для УК не найдена. Запросите у жителей новую ссылку.', buttons: bot.menu() });
   if (isResident(bot, userId, house.id)) {
     return bot.send(userId, {
-      text: 'Вы житель этого дома, поэтому не можете принимать его заявки от имени УК: иначе житель подтверждал бы заявку сам себе. Подключите отдельный аккаунт сотрудника УК.',
+      text: 'Вы указаны как житель этого дома, поэтому не можете принимать его заявки от имени УК. Для этого подключите отдельный аккаунт сотрудника УК.',
       buttons: bot.menu(),
     });
   }
@@ -82,7 +82,7 @@ export async function onDispatcherLink(bot: Vernem, userId: number, code: string
     text: [
       `🏢 Подключение к дому **${house.address}**.`,
       existing ? `Сейчас вы указаны как: ${clean(existing.title)}.` : '',
-      'Как вас указывать в заявках? Напишите имя и организацию, например «Иванова А. П., диспетчер ООО «УК Пример»». Это увидят жители, и это попадёт в их заявления.',
+      'Укажите имя и организацию, например: «Иванова А. П., диспетчер ООО «УК Пример»». Эти сведения увидят жители, они будут указаны в заявлениях.',
     ]
       .filter(Boolean)
       .join('\n'),
@@ -93,7 +93,7 @@ export async function onDispatcherLink(bot: Vernem, userId: number, code: string
 export async function onDispatcherTitle(bot: Vernem, userId: number, text: string, data: { houseId: number }) {
   const title = clean(text).slice(0, 120);
   if (title.length < 5 || !/\p{L}{2}/u.test(title)) {
-    return bot.send(userId, { text: 'Напишите имя и организацию, например «Иванова А. П., диспетчер ООО «УК Пример»».', buttons: [backRow()] });
+    return bot.send(userId, { text: 'Укажите имя и организацию, например: «Иванова А. П., диспетчер ООО «УК Пример»».', buttons: [backRow()] });
   }
   const house = bot.db.getHouse(data.houseId);
   if (!house || isResident(bot, userId, house.id)) return bot.stale(userId);
@@ -105,9 +105,9 @@ export async function onDispatcherTitle(bot: Vernem, userId: number, text: strin
   bot.db.track(userId, 'dispatcher_added', { house: house.id });
   await bot.send(userId, {
     text: [
-      `✅ Готово. Заявки жителей дома **${house.address}** будут приходить сюда.`,
-      'В заявке кнопки: «Принять» — жители сразу получат номер; потом «Выехали» и «Устранено».',
-      `Жители дома видят, кто подключён, и могут отключить сотрудника. Без заявок ${DISPATCHER_TTL_DAYS} дней подключение закончится само.`,
+      `✅ Заявки жителей дома **${house.address}** будут поступать в этот чат.`,
+      'В карточке заявки доступны действия: «Принять», «Выехали» и «Устранено». После принятия жители получат номер заявки.',
+      `Жители дома видят подключённых сотрудников и могут отключить сотрудника. При отсутствии заявок в течение ${DISPATCHER_TTL_DAYS} дней подключение прекращается.`,
     ].join('\n'),
     buttons: [[cb('🚫 Отключиться от дома', `dsx:${house.id}`)], [cb('⬅️ Меню', 'menu')]],
   });
@@ -120,7 +120,7 @@ export async function onDispatcherTitle(bot: Vernem, userId: number, text: strin
   // Жителям — что теперь можно отправлять заявки прямо из бота. И кнопка на случай, если это не их УК.
   for (const u of bot.db.houseSubscribers(house.id)) {
     await bot.safeSend(u.id, {
-      text: `🏢 К дому ${house.address} подключилась УК: ${title}. Теперь заявку об отключении можно отправить ей прямо из бота — кнопка «📨 Отправить заявку в УК».\nЕсли это не ваша УК — отключите.`,
+      text: `🏢 К дому ${house.address} подключена УК: ${title}. Теперь заявку об отключении можно направить через бот кнопкой «📨 Отправить заявку в УК».\nЕсли это не ваша УК, отключите её.`,
       buttons: [[cb('🚫 Это не наша УК', `dsr:${house.id}:${me.id}`)]],
     });
   }
@@ -132,24 +132,24 @@ export async function onDispatcherRemove(bot: Vernem, userId: number, houseId: n
   if (!d || d.house_id !== houseId || !bot.db.getUserHouse(userId, houseId)) return bot.stale(userId);
   if (!confirmed) {
     return bot.send(userId, {
-      text: `Отключить «${clean(d.title)}» от приёма заявок вашего дома? Отправленные раньше заявки и номера в делах останутся.`,
+      text: `Отключить «${clean(d.title)}» от приёма заявок по вашему дому? Ранее отправленные заявки и их номера сохранятся в обращениях.`,
       buttons: [[cb('🚫 Да, отключить', `dsr:${houseId}:${d.id}:y`), cb('Отмена', `hs:card:${houseId}`)]],
     });
   }
   const err = removeDispatcherByResident(bot, userId, houseId, d.id);
   if (err) return bot.send(userId, { text: err, buttons: bot.menu() });
-  return bot.send(userId, { text: `Готово: «${clean(d.title)}» больше не принимает заявки вашего дома.`, buttons: [[cb('🏠 Карточка дома', `hs:card:${houseId}`)]] });
+  return bot.send(userId, { text: `Сотрудник «${clean(d.title)}» отключён от приёма заявок по вашему дому.`, buttons: [[cb('🏠 Карточка дома', `hs:card:${houseId}`)]] });
 }
 
 /** Отключение сотрудника жителем — общее для бота и приложения. Возвращает текст ошибки или null. */
 export function removeDispatcherByResident(bot: Vernem, userId: number, houseId: number, dispatcherId: number): string | null {
   const d = bot.db.getDispatcherById(dispatcherId);
-  if (!d || d.house_id !== houseId) return 'Сотрудник уже отключён';
-  if (!bot.db.getUserHouse(userId, houseId)) return 'Отключить сотрудника может только житель этого дома';
+  if (!d || d.house_id !== houseId) return 'Сотрудник уже отключён.';
+  if (!bot.db.getUserHouse(userId, houseId)) return 'Отключить сотрудника может только житель этого дома.';
   bot.db.removeDispatcher(houseId, d.user_id);
   bot.db.track(userId, 'dispatcher_removed_by_resident', { house: houseId });
   const house = bot.db.getHouse(houseId)!;
-  void bot.safeSend(d.user_id, { text: `Жители дома ${house.address} отключили вас от приёма заявок. Если это ошибка — попросите у них новую ссылку.`, buttons: bot.menu() });
+  void bot.safeSend(d.user_id, { text: `Жители дома ${house.address} отключили вас от приёма заявок. Если это произошло по ошибке, запросите у них новую ссылку.`, buttons: bot.menu() });
   return null;
 }
 
@@ -160,7 +160,7 @@ export async function expireDispatchers(bot: Vernem) {
     const house = bot.db.getHouse(d.house_id);
     bot.db.track(d.user_id, 'dispatcher_expired', { house: d.house_id });
     await bot.safeSend(d.user_id, {
-      text: `Подключение к дому ${house?.address ?? ''} закончилось: ${DISPATCHER_TTL_DAYS} дней не было заявок. Чтобы снова принимать заявки, попросите у жителей новую ссылку.`,
+      text: `Подключение к дому ${house?.address ?? ''} прекращено: в течение ${DISPATCHER_TTL_DAYS} дней не было заявок. Чтобы снова принимать заявки, запросите у жителей новую ссылку.`,
     });
   }
 }
@@ -170,7 +170,7 @@ export async function onDispatcherLeave(bot: Vernem, userId: number, houseId: nu
   if (!house || !bot.db.getDispatcher(houseId, userId)) return bot.stale(userId);
   bot.db.removeDispatcher(houseId, userId);
   bot.db.track(userId, 'dispatcher_removed', { house: houseId });
-  return bot.send(userId, { text: `Вы отключились от дома ${house.address}: заявки по нему больше не придут.`, buttons: bot.menu() });
+  return bot.send(userId, { text: `Вы отключены от дома ${house.address}. Заявки по нему больше не будут поступать.`, buttons: bot.menu() });
 }
 
 // ---------------------------------------------------------------------
@@ -180,15 +180,15 @@ export async function onDispatcherLeave(bot: Vernem, userId: number, houseId: nu
 /** Житель отправляет заявку по своему делу. Возвращает текст ошибки или null. */
 export async function dispatchCase(bot: Vernem, userId: number, pid: number): Promise<string | null> {
   const c = bot.ownCase(userId, pid);
-  if (!c) return 'Дело не найдено';
-  if (c.p.status !== 'tracking') return 'Услугу уже восстановили — заявка в УК не нужна';
-  if (c.incident.demo) return 'В демо заявка в УК не отправляется';
+  if (!c) return 'Обращение не найдено.';
+  if (c.p.status !== 'tracking') return 'Услуга уже восстановлена. Направлять заявку в УК не требуется.';
+  if (c.incident.demo) return 'В демо-режиме заявка в УК не направляется.';
   const dispatchers = bot.db.listDispatchers(c.house.id);
-  if (!dispatchers.length) return 'УК этого дома ещё не подключена к боту';
+  if (!dispatchers.length) return 'УК этого дома ещё не подключена к боту.';
   const existing = bot.db.dispatchFor(c.incident.id);
   // Повторное нажатие или сосед отправляет ту же заявку — не дублируем.
   if (existing && existing.status !== 'declined') return null;
-  if (c.incident.ads_number) return 'У этого отключения уже есть номер заявки';
+  if (c.incident.ads_number) return 'Для этого отключения уже указан номер заявки.';
   if (existing) bot.db.deleteDispatch(existing.id);
   const d = bot.db.createDispatch(c.incident.id, c.house.id, userId, bot.now());
   for (const disp of dispatchers) await sendCard(bot, disp.user_id, d);
@@ -259,14 +259,14 @@ async function accept(bot: Vernem, userId: number, d: Dispatch, me: Dispatcher, 
   for (const p of bot.db.listParticipants(inc.id)) bot.db.cancelReminders(p.id, 'dispatch_timeout');
   bot.db.track(userId, 'dispatch_accepted', { incident: inc.id });
   await bot.send(userId, {
-    text: `✅ Приняли заявку № ${number}. Жители уже видят номер. Когда выедете и когда устраните — нажмите:`,
+    text: `✅ Заявка № ${number} принята. Жители уже видят номер. После выезда и устранения отметьте соответствующий статус:`,
     buttons: [[cb('🚗 Выехали', `dsp:${d.id}:go`), cb('✅ Устранено', `dsp:${d.id}:fix`)]],
   });
   for (const other of bot.db.listDispatchers(d.house_id)) {
     if (other.user_id !== userId) await bot.safeSend(other.user_id, { text: `ℹ️ Заявку по ${house.address} принял(а) ${clean(me.title)}: № ${number}.` });
   }
   await notifyParticipants(bot, inc.id, (pid) => ({
-    text: `✅ **УК приняла заявку**: № ${number}, ${formatShort(now, house.tz)}. Принял(а): ${clean(me.title)}.\nНомер уже в вашем деле и попадёт в заявление.`,
+    text: `✅ **УК приняла заявку**: № ${number}, ${formatShort(now, house.tz)}. Принял(а): ${clean(me.title)}.\nНомер сохранён в обращении и будет указан в заявлении.`,
     buttons: [caseRow(pid)],
   }));
 }
@@ -276,7 +276,7 @@ export async function onDispatchButton(bot: Vernem, userId: number, dispatchId: 
   const d = bot.db.getDispatch(dispatchId);
   if (!d) return bot.stale(userId);
   const me = bot.db.getDispatcher(d.house_id, userId);
-  if (!me) return bot.send(userId, { text: 'Вы больше не подключены к этому дому.', buttons: bot.menu() });
+  if (!me) return bot.send(userId, { text: 'Вы не подключены к этому дому.', buttons: bot.menu() });
   const house = bot.db.getHouse(d.house_id)!;
   const now = bot.now();
   switch (action) {
@@ -285,7 +285,7 @@ export async function onDispatchButton(bot: Vernem, userId: number, dispatchId: 
     case 'num':
       if (d.status !== 'sent') return bot.send(userId, { text: takenText(d, userId) });
       bot.db.setState(userId, 'await_dispatch_number', { dispatchId: d.id });
-      return bot.send(userId, { text: 'Напишите номер заявки из вашего журнала:', buttons: [[cb('Отмена', `dsp:${d.id}:card`)]] });
+      return bot.send(userId, { text: 'Укажите номер заявки из журнала:', buttons: [[cb('Отмена', `dsp:${d.id}:card`)]] });
     case 'card':
       bot.db.setState(userId, 'idle');
       return d.status === 'sent' ? sendCard(bot, userId, d) : bot.send(userId, { text: takenText(d, userId) });
@@ -300,13 +300,13 @@ export async function onDispatchButton(bot: Vernem, userId: number, dispatchId: 
         bot,
         d.incident_id,
         (pid) => ({
-          text: `🏢 УК ответила, что дом ${house.address} не обслуживает. Позвоните в аварийную службу${phone ? `: ${phone}` : ' — телефон есть в квитанции'} и запишите номер заявки.`,
+          text: `🏢 УК сообщила, что не обслуживает дом ${house.address}. Позвоните в аварийную службу${phone ? `: ${phone}` : '. Телефон указан в квитанции.'} Запишите номер заявки.`,
           buttons: [[cb('✏️ Ввести номер заявки', `own:${pid}`)], caseRow(pid)],
         }),
         true,
       );
       return bot.send(userId, {
-        text: 'Отметил: это не ваш дом, жители предупреждены. Если вас подключили к чужому дому по ошибке — отключитесь.',
+        text: 'Отметка сохранена, жители уведомлены. Если вас подключили к чужому дому по ошибке, отключитесь.',
         buttons: [[cb('🚫 Отключиться от дома', `dsx:${house.id}`)]],
       });
     }
@@ -319,7 +319,7 @@ export async function onDispatchButton(bot: Vernem, userId: number, dispatchId: 
         if (d.status !== 'accepted') return bot.send(userId, { text: 'Этот статус уже отмечен.', buttons: [[cb('✅ Устранено', `dsp:${d.id}:fix`)]] });
         bot.db.updateDispatch(d.id, { status: 'onsite', onsite_at: now.toISOString() });
         await notifyParticipants(bot, d.incident_id, (pid) => ({ text: `🚗 УК по заявке № ${clean(d.number)}: выехали на место (${formatShort(now, house.tz)}).`, buttons: [caseRow(pid)] }), true);
-        return bot.send(userId, { text: 'Отметил: выехали. Когда устраните — нажмите:', buttons: [[cb('✅ Устранено', `dsp:${d.id}:fix`)]] });
+        return bot.send(userId, { text: 'Выезд отмечен. После устранения нажмите:', buttons: [[cb('✅ Устранено', `dsp:${d.id}:fix`)]] });
       }
       if (d.status === 'fixed') return bot.send(userId, { text: 'Уже отмечено: устранено.' });
       bot.db.updateDispatch(d.id, { status: 'fixed', fixed_at: now.toISOString() });
@@ -334,7 +334,7 @@ export async function onDispatchButton(bot: Vernem, userId: number, dispatchId: 
         }),
         true,
       );
-      return bot.send(userId, { text: `Отметил: устранено в ${at}. Жители подтвердят у себя.` });
+      return bot.send(userId, { text: `Устранение отмечено: ${at}. Жители подтвердят восстановление услуги.` });
     }
   }
   return bot.stale(userId);
@@ -344,7 +344,7 @@ export async function onDispatchNumber(bot: Vernem, userId: number, text: string
   const number = clean(text).slice(0, 40);
   const d = bot.db.getDispatch(data.dispatchId);
   if (!d) return bot.stale(userId);
-  if (!/\d/.test(number)) return bot.send(userId, { text: 'В номере должны быть цифры, например 4512 или А-17.', buttons: [[cb('Отмена', `dsp:${d.id}:card`)]] });
+  if (!/\d/.test(number)) return bot.send(userId, { text: 'Номер должен содержать цифры, например: 4512 или А-17.', buttons: [[cb('Отмена', `dsp:${d.id}:card`)]] });
   const me = bot.db.getDispatcher(d.house_id, userId);
   if (!me) return bot.stale(userId);
   bot.db.setState(userId, 'idle');
@@ -366,8 +366,8 @@ export async function remindDispatch(bot: Vernem, pid: number) {
     const pc = loadCase(bot.db, p.id)!;
     await bot.safeSend(p.user_id, {
       text: [
-        `⏰ УК не ответила на заявку за ${minutes} мин. Я это записал: заявка отправлена ${formatShort(new Date(d.sent_at), c.house.tz)}, ответа нет — это тоже попадёт в заявление.`,
-        `Позвоните в аварийную службу${phone ? `: ${phone}` : ' — телефон есть в квитанции'} и запишите номер. Не дозвонитесь — соберите акт с соседями.`,
+        `⏰ УК не ответила на заявку в течение ${minutes} мин. Заявка направлена ${formatShort(new Date(d.sent_at), c.house.tz)}, ответ не получен. Эти сведения будут указаны в заявлении.`,
+        `Позвоните в аварийную службу${phone ? `: ${phone}` : '. Телефон указан в квитанции.'} Запишите номер заявки. Если не удастся дозвониться, составьте акт с соседями.`,
       ].join('\n'),
       buttons: [[cb('✏️ Ввести номер заявки', `own:${p.id}`)], ...actButtons(bot, pc), caseRow(p.id)],
     });
@@ -398,7 +398,7 @@ export async function tellDispatchersRestored(bot: Vernem, incidentId: number, e
 export function dispatchLine(d: Dispatch, tz: string): string {
   const t = (iso: string | null) => (iso ? formatShort(new Date(iso), tz) : '');
   if (d.status === 'declined') return '🚫 УК ответила, что не обслуживает этот дом.';
-  if (d.status === 'sent') return d.timeout_at ? `📨 Заявка в УК отправлена ${t(d.sent_at)} — УК не ответила.` : `📨 Заявка в УК отправлена ${t(d.sent_at)}, ждём ответа.`;
+  if (d.status === 'sent') return d.timeout_at ? `📨 Заявка в УК направлена ${t(d.sent_at)}. УК не ответила.` : `📨 Заявка в УК направлена ${t(d.sent_at)}. Ожидается ответ.`;
   const parts = [`✅ УК приняла заявку: № ${clean(d.number)}, ${t(d.accepted_at)} (${clean(d.accepted_title)}).`];
   if (d.onsite_at) parts.push(`Выехали ${t(d.onsite_at)}.`);
   if (d.fixed_at) parts.push(`Сообщили: устранено ${t(d.fixed_at)}.`);

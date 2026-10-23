@@ -1,7 +1,7 @@
 // Три демо-дела для жителя — те же, что на стенде (npm run demo). Создаются обычным сценарием бота
 // на отдельных «часах» и помечаются как демо:
 //   демо 1 — дозвонились, есть номер заявки: заявление готово;
-//   демо 2 — не дозвонились: акт с соседями собран, осталось отметить «подписан» и «Воду дали»;
+//   демо 2 — не дозвонились: акт с соседями собран, осталось отметить «подписан» и восстановление услуги;
 //   демо 3 — архив: заявление подано, вернули меньше положенного (видно, как потребовать остальное).
 // Прежние демо-дела жителя удаляются, настоящие дела, ФИО, текущий адрес и состояние диалога не трогаются.
 
@@ -45,7 +45,7 @@ export async function resetDemoCases(db: Db, userId: number, now = new Date()): 
     await h.start(userId);
     await h.press(userId, 'Демо');
     await h.press(userId, 'Есть номер заявки');
-    await h.press(userId, 'Воду дали');
+    await h.press(userId, 'Водоснабжение восстановлено');
     await h.press(userId, 'Только что');
     await h.text(userId, '1200');
     await h.press(userId, '✅ Да'); // получатель — из карточки дома
@@ -54,7 +54,7 @@ export async function resetDemoCases(db: Db, userId: number, now = new Date()): 
     await h.press(userId, 'Пропустить');
     await h.press(userId, 'Запомнить');
     const archive = mine()[0];
-    await h.press(userId, 'Я подал(а) заявление');
+    await h.press(userId, 'Заявление подано');
     await h.press(userId, 'Сегодня');
     await h.text(userId, 'ДЕМО-118');
     // Подали в тот же день — дата и входящий номер попадут в требование и жалобу (без пустых «___»).
@@ -69,7 +69,7 @@ export async function resetDemoCases(db: Db, userId: number, now = new Date()): 
     await h.advance(4 * 24 * H);
     await h.press(userId, 'Демо');
     await h.press(userId, 'Есть номер заявки');
-    await h.press(userId, 'Воду дали');
+    await h.press(userId, 'Водоснабжение восстановлено');
     await h.press(userId, 'Только что');
     await h.text(userId, '1250');
     await h.press(userId, '✅ Да');

@@ -45,7 +45,7 @@ async function demoCase(h: Harness, user: number) {
   await h.start(user);
   await h.press(user, 'Демо');
   await h.press(user, 'Есть номер заявки');
-  await h.press(user, 'Воду дали');
+  await h.press(user, 'Водоснабжение восстановлено');
   await h.press(user, 'Только что');
   await h.text(user, '1200');
   return h.db.listUserParticipants(user)[0].id;
@@ -310,7 +310,7 @@ test('дело в мини-приложении: повтор, правка вр
     assert.equal((await fetch(`${base}/api/cases/${cold.caseId}/readings`, { method: 'POST', headers, body: JSON.stringify({ temp: 'холодно' }) })).status, 400);
     const withReading = (await (await fetch(`${base}/api/cases/${cold.caseId}/readings`, { method: 'POST', headers, body: JSON.stringify({ temp: '14,5' }) })).json()) as any;
     assert.equal(withReading.case.readings.length, 2);
-    assert.equal(withReading.case.statusTitle, 'Слежу за температурой');
+    assert.equal(withReading.case.statusTitle, 'Ведётся контроль температуры');
     assert.equal((await fetch(`${base}/api/cases/${cold.caseId}`, { method: 'DELETE', headers })).status, 200);
     assert.equal(h.db.getParticipant(cold.caseId), undefined);
   });
@@ -371,7 +371,7 @@ test('строгая проверка: документы не противор�
     const cold = (await (await fetch(`${base}/api/report`, { method: 'POST', headers, body: JSON.stringify({ service: 'heating_temp', houseId: b.house.id, evidence: 'self', temp: '15' }) })).json()) as any;
     assert.equal((await fetch(`${base}/api/cases/${cold.caseId}/readings`, { method: 'POST', headers, body: JSON.stringify({ temp: '150' }) })).status, 400);
     const warmReading = (await (await fetch(`${base}/api/cases/${cold.caseId}/readings`, { method: 'POST', headers, body: JSON.stringify({ temp: '22' }) })).json()) as any;
-    assert.match(warmReading.note, /это уже норма/);
+    assert.match(warmReading.note, /соответствует норме/);
     const rid = warmReading.case.readings.at(-1).id;
     const afterDel = (await (await fetch(`${base}/api/cases/${cold.caseId}/readings/${rid}`, { method: 'DELETE', headers })).json()) as any;
     assert.equal(afterDel.case.readings.length, 1);
@@ -429,7 +429,7 @@ test('третий строгий отчёт: даты документов, у�
     await post(`/api/cases/${hw.caseId}/end`, { endedAt: hours(5) });
     const warm = await post('/api/report', { houseId: house.id, service: 'hot_water_temp', evidence: 'self', startedAt: hours(8), temp: '40' });
     assert.equal(warm.status, 422);
-    assert.match(((await warm.json()) as any).error, /Одни и те же часы нельзя оплатить дважды/);
+    assert.match(((await warm.json()) as any).error, /Одни и те же часы нельзя учитывать дважды/);
     // Вода −5 °C — ошибка у поля.
     assert.equal((await post('/api/report', { houseId: house.id, service: 'hot_water_temp', evidence: 'self', startedAt: hours(3), temp: '-5' })).status, 400);
 
@@ -546,7 +546,7 @@ test('повторное сообщение: замер не теряется, �
     const short = await report({ service: 'cold_water_off', evidence: 'ads', number: '1', startedAt: new Date(Date.now() - 3_600_000).toISOString() });
     const ended = (await (await fetch(`${base}/api/cases/${short.caseId}/end`, { method: 'POST', headers, body: JSON.stringify({}) })).json()) as any;
     assert.equal(ended.case.status, 'closed');
-    assert.equal(ended.case.statusTitle, 'Денег не положено — отключение было коротким');
+    assert.equal(ended.case.statusTitle, 'Снижение платы не применяется: отключение было кратковременным');
   });
 });
 
@@ -563,7 +563,7 @@ test('кто принял заявку — в заявлении; после п�
     assert.equal(bad.status, 400, 'завтрашняя дата подачи — ошибка');
     // Приложение шлёт «сегодня, 12:00» — до полудня это не «будущее»: сравниваем по дню.
     const ok = (await (await fetch(`${base}/api/cases/${pid}/submitted`, { method: 'POST', headers, body: JSON.stringify({ date: `${day(0)}T12:00:00` }) })).json()) as any;
-    assert.match(ok.case.statusTitle, /^Подано — ждём квитанцию за [а-я]+ \d{4}$/);
+    assert.match(ok.case.statusTitle, /^Заявление подано\. Ожидается квитанция за [а-я]+ \d{4}$/);
   });
 });
 
@@ -598,7 +598,7 @@ test('исправить время: то же время без секунд �
     const houseId = h.db.listUserHouses(71)[0]?.id ?? (await (await fetch(`${base}/api/me/houses`, { method: 'POST', headers, body: JSON.stringify({ address: 'Лесная 9', city: 'Москва' }) })).json() as any).house.id;
     const bad = await fetch(`${base}/api/report`, { method: 'POST', headers, body: JSON.stringify({ houseId, service: 'cold_water_off', evidence: 'ads', number: '!!!', startedAt: new Date().toISOString() }) });
     assert.equal(bad.status, 400);
-    assert.match(((await bad.json()) as any).fields.number, /должны быть цифры/);
+    assert.match(((await bad.json()) as any).fields.number, /Номер должен содержать цифры/);
   });
 });
 
@@ -762,7 +762,7 @@ test('health и статика мини-приложения', async () => {
   await withServer(async (base) => {
     const health = (await (await fetch(`${base}/health`)).json()) as any;
     assert.equal(health.ok, true);
-    assert.equal(health.version, '1.4.1');
+    assert.equal(health.version, '1.4.2');
     const page = await fetch(`${base}/app/`);
     assert.equal(page.status, 200);
     const html = await page.text();
@@ -839,9 +839,13 @@ test('демо-дела заново через приложение: три д�
     await h.start(44);
     const me = (await (await fetch(`${base}/api/me`, { headers })).json()) as any;
     assert.equal(me.demoMode, true);
-    const r = (await (await fetch(`${base}/api/demo/reset`, { method: 'POST', headers })).json()) as any;
+    const reset = await fetch(`${base}/api/demo/reset`, { method: 'POST', headers });
+    assert.equal(reset.status, 200);
+    const r = (await reset.json()) as any;
     assert.equal(r.cases.filter((c: any) => c.demo).length, 3);
-    const again = (await (await fetch(`${base}/api/demo/reset`, { method: 'POST', headers })).json()) as any;
+    const resetAgain = await fetch(`${base}/api/demo/reset`, { method: 'POST', headers });
+    assert.equal(resetAgain.status, 200);
+    const again = (await resetAgain.json()) as any;
     assert.equal(again.cases.length, 3, 'прежние демо удалены, а не задвоены');
   });
 });

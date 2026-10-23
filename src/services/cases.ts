@@ -106,8 +106,8 @@ function calcRaw(db: Db, norms: Norms, c: CaseBundle, now: Date): CalcResult {
         `Допустимая продолжительность ${allowed} ч установлена на месяц, поэтому ${many ? 'учтены также предыдущие перерывы' : 'учтён также предыдущий перерыв'}: ${dates.join(', ')}.`,
         ...total.lines,
         before.percent > 0
-          ? `Из них ${fmtPercent(before.percent)} приходится на ${many ? 'предыдущие перерывы' : 'предыдущий перерыв'} (заявлено отдельно); по данному перерыву — ${fmtPercent(percent)}.`
-          : `По ${many ? 'предыдущим перерывам' : 'предыдущему перерыву'} снижение не положено; по данному перерыву — ${fmtPercent(percent)}.`,
+          ? `Из них ${fmtPercent(before.percent)} приходится на ${many ? 'предыдущие перерывы' : 'предыдущий перерыв'} (заявлено отдельно). По данному перерыву: ${fmtPercent(percent)}.`
+          : `По ${many ? 'предыдущим перерывам' : 'предыдущему перерыву'} снижение платы не применяется. По данному перерыву: ${fmtPercent(percent)}.`,
       ],
     };
   });
@@ -136,7 +136,7 @@ function withoutSummer(calc: CalcResult): CalcResult {
     ...calc,
     months: calc.months.map((m) => {
       const month = Number(m.month.split('-')[1]);
-      return month >= 6 && month <= 8 ? { ...m, percent: 0, lines: ['Летом (июнь–август) отопление не подаётся — этот месяц не считается.'] } : m;
+      return month >= 6 && month <= 8 ? { ...m, percent: 0, lines: ['Летом, с июня по август, отопление не подаётся. Этот месяц не учитывается.'] } : m;
     }),
   };
 }
@@ -276,16 +276,16 @@ export function claimTextFor(db: Db, norms: Norms, c: CaseBundle, now: Date): st
 
 /** Статус по-человечески: для холода и еле тёплой воды «отключения» нет — следим за температурой. */
 export function statusTitle(status: ParticipantStatus, kind: string, service?: string): string {
-  if (status === 'tracking' && service === 'waste_off') return 'Слежу, пока не вывезут';
-  if (status === 'tracking' && kind !== 'interruption') return 'Слежу за температурой';
-  if (status === 'ended' && kind !== 'interruption') return 'Стало нормально — осталось скачать заявление';
+  if (status === 'tracking' && service === 'waste_off') return 'Ожидается вывоз отходов';
+  if (status === 'tracking' && kind !== 'interruption') return 'Ведётся контроль температуры';
+  if (status === 'ended' && kind !== 'interruption') return 'Температура восстановлена. Скачайте заявление';
   return STATUS_TITLE[status];
 }
 
 export const STATUS_TITLE: Record<ParticipantStatus, string> = {
-  tracking: 'Слежу за отключением',
-  ended: 'Починили — осталось скачать заявление',
-  claim_ready: 'Заявление готово — осталось подать',
+  tracking: 'Ведётся контроль нарушения',
+  ended: 'Услуга восстановлена. Скачайте заявление',
+  claim_ready: 'Заявление подготовлено. Направьте его исполнителю',
   refunded: 'Перерасчёт получен',
   refused: 'Перерасчёт не сделали',
   closed: 'Закрыто',
@@ -400,13 +400,13 @@ export function summarize(db: Db, norms: Norms, c: CaseBundle, now: Date): CaseS
     // Подали — дальше ждём квитанцию за месяц подачи: там должен появиться перерасчёт.
     statusTitle:
       c.p.status === 'claim_ready' && claim.submittedAt
-        ? `Подано — ждём квитанцию за ${monthTitle(monthKey(new Date(claim.submittedAt), c.house.tz))}`
+        ? `Заявление подано. Ожидается квитанция за ${monthTitle(monthKey(new Date(claim.submittedAt), c.house.tz))}`
         : c.p.status === 'closed' && c.p.ended_at && !hasMoney(calc)
           ? norm.kind === 'interruption'
             ? c.incident.service_key === 'waste_off'
-              ? 'Денег не положено — перерыв был коротким'
-              : 'Денег не положено — отключение было коротким'
-            : 'Денег не положено — отклонение было недолгим'
+              ? 'Снижение платы не применяется: перерыв был кратковременным'
+              : 'Снижение платы не применяется: отключение было кратковременным'
+            : 'Снижение платы не применяется: отклонение было кратковременным'
           : statusTitle(c.p.status, norm.kind, c.incident.service_key),
     kind: norm.kind,
     // Свой номер жителя при отключении «без номера» — тоже доказательство.

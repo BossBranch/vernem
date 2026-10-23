@@ -75,7 +75,7 @@ export async function startAct(bot: Vernem, userId: number, pid: number) {
   const known: ActReason | null = c.p.inspection === 'no_show' ? 'no_inspection' : c.incident.evidence === 'self' ? 'no_ads' : null;
   if (known) return createAct(bot, userId, pid, known);
   return bot.send(userId, {
-    text: `${ACT_VS_CLAIM}\n\nАкт составляют, если аварийка не ответила или никто не пришёл на замер. Что у вас?`,
+    text: `${ACT_VS_CLAIM}\n\nАкт составляют, если аварийная служба не ответила или представитель исполнителя не пришёл на проверку. Укажите ситуацию.`,
     buttons: [[cb('Не дозвонился', `ak:rs:${pid}:no_ads`)], [cb('Не пришли на замер', `ak:rs:${pid}:no_inspection`)], backRow()],
   });
 }
@@ -97,7 +97,7 @@ function askSigner(bot: Vernem, userId: number, actId: number) {
   const u = ctx ? bot.db.personFor(userId, ctx.house.id) : { fio: null, flat: null };
   if (u.fio && u.flat) {
     return bot.send(userId, {
-      text: `Вписать в акт: ${clean(u.fio)}, кв. ${clean(u.flat)}?`,
+      text: `Внести в акт: ${clean(u.fio)}, кв. ${clean(u.flat)}?`,
       buttons: [[cb('✅ Да', `ak:me:${actId}`), cb('Другие данные', `ak:data:${actId}`)]],
     });
   }
@@ -107,7 +107,7 @@ function askSigner(bot: Vernem, userId: number, actId: number) {
 function askFio(bot: Vernem, userId: number, actId: number) {
   bot.db.setState(userId, 'await_act_fio', { actId });
   return bot.send(userId, {
-    text: 'Ваши ФИО для акта? Их увидят соседи, которые его подписывают, и УК.',
+    text: 'Укажите ФИО для акта. Эти данные увидят подписывающие акт соседи и УК.',
     buttons: [backRow()],
   });
 }
@@ -115,11 +115,11 @@ function askFio(bot: Vernem, userId: number, actId: number) {
 export async function onActText(bot: Vernem, userId: number, state: string, text: string, data: { actId: number; fio?: string }) {
   const value = clean(text).replace(/\s+/g, ' ').slice(0, 150);
   if (state === 'await_act_fio') {
-    if (value.length < 5 || /\d/.test(value)) return bot.send(userId, { text: 'Фамилия, имя и отчество буквами, например «Иванова Анна Петровна».' });
+    if (value.length < 5 || /\d/.test(value)) return bot.send(userId, { text: 'Укажите фамилию, имя и отчество буквами, например: «Иванова Анна Петровна».' });
     bot.db.setState(userId, 'await_act_flat', { ...data, fio: value });
-    return bot.send(userId, { text: 'Номер квартиры?', buttons: [backRow()] });
+    return bot.send(userId, { text: 'Укажите номер квартиры.', buttons: [backRow()] });
   }
-  if (!/^[\dА-Яа-яA-Za-z/-]{1,10}$/.test(value)) return bot.send(userId, { text: 'Номер квартиры, например 42 или 12А.' });
+  if (!/^[\dА-Яа-яA-Za-z/-]{1,10}$/.test(value)) return bot.send(userId, { text: 'Укажите номер квартиры, например: 42 или 12А.' });
   return confirmSigner(bot, userId, data.actId, data.fio!, value);
 }
 
@@ -147,10 +147,10 @@ async function confirmSigner(bot: Vernem, userId: number, actId: number, fio: st
     }
     await bot.send(userId, {
       text: [
-        '📄 **Акт готов к подписи.** Распечатайте и попросите расписаться 2+ соседей и председателя совета дома (в ТСЖ — председателя ТСЖ). По правилам нужна и его подпись.',
-        'Председателя нет или он отказался — всё равно подпишите с соседями и отметьте «без председателя». Такой акт подтверждает нарушение в жалобе, но УК может его не принять.',
-        demo ? `🧪 Соседи (демо) ${DEMO_SIGNERS.map(([, f]) => shortName(f)).join(' и ')} подтвердили в боте — их имена уже в акте.` : '',
-        sent ? `Ещё отправил его ${sent} ${sent === 1 ? 'соседу' : 'соседям'} в бот — кто подтвердит, того впишу сам.` : '',
+        '📄 **Акт подготовлен для подписания.** Распечатайте его и получите подписи не менее двух соседей и председателя совета дома. В ТСЖ требуется подпись председателя ТСЖ.',
+        'Если председателя нет или он отказался подписывать акт, подпишите его с соседями и отметьте «без председателя». Такой акт подтверждает нарушение для жалобы, но УК может его не принять.',
+        demo ? `🧪 Соседи в демо-режиме: ${DEMO_SIGNERS.map(([, f]) => shortName(f)).join(' и ')}. Их имена уже внесены в акт.` : '',
+        sent ? `Акт направлен ${sent} ${sent === 1 ? 'соседу' : 'соседям'} в бот. Подтвердившие участие будут внесены в акт.` : '',
       ]
         .filter(Boolean)
         .join('\n'),
@@ -158,11 +158,11 @@ async function confirmSigner(bot: Vernem, userId: number, actId: number, fio: st
     await sendActPdf(bot, userId, actId);
     const pid = bot.db.getParticipantFor(fresh.incident.id, userId)!.id;
     return bot.send(userId, {
-      text: 'Когда подпишут — отметьте. Акт попадёт в ваше заявление.',
+      text: 'После подписания отметьте это. Акт будет приложен к заявлению.',
       buttons: [[cb('✅ Акт подписан', `ak:done:${actId}`)], [cb('👥 Позвать соседей', `nb:${pid}`)]],
     });
   }
-  await bot.send(userId, { text: '✍️ Вы в акте.' });
+  await bot.send(userId, { text: '✍️ Ваши данные внесены в акт.' });
   if (userId !== fresh.act.initiator_user_id) {
     await bot.safeSend(fresh.act.initiator_user_id, { text: `✍️ ${shortName(fio)} подтвердил(а) акт. Жителей в акте: ${n}.` });
   }
@@ -184,7 +184,7 @@ async function sendActRequest(bot: Vernem, ctx: ActCtx, userId: number) {
     text: [
       '✍️ **Соседи составляют акт о нарушении**',
       ...actSummaryLines(bot, ctx),
-      'Он заменит проверку УК. Подтвердите, что у вас то же самое, — впишу ваши ФИО и квартиру.',
+      'Этот акт оформляется вместо проверки УК. Подтвердите, что нарушение затронуло и вас. Затем внесу ваши ФИО и номер квартиры.',
     ].join('\n'),
     buttons: [[cb('✍️ Подтверждаю', `ak:sg:${ctx.act.id}`), cb('Не могу', `ak:no:${ctx.act.id}`)]],
   });
@@ -221,10 +221,10 @@ async function finalize(bot: Vernem, actId: number) {
   for (const uid of recipients) {
     const initiator = uid === ctx.act.initiator_user_id;
     await bot.safeSend(uid, {
-      text: '📄 **Акт с именами соседей.** Распечатайте и подпишите вместе с председателем совета дома, если он есть. Галочка в боте — не подпись.',
+      text: '📄 **Акт с именами соседей.** Распечатайте и подпишите его вместе с председателем совета дома, если он есть. Отметка в боте не заменяет подпись.',
     });
     await sendActPdf(bot, uid, actId);
-    if (initiator) await bot.safeSend(uid, { text: 'Когда подпишут — отметьте:', buttons: [[cb('✅ Акт подписан', `ak:done:${actId}`)]] });
+    if (initiator) await bot.safeSend(uid, { text: 'После подписания отметьте это:', buttons: [[cb('✅ Акт подписан', `ak:done:${actId}`)]] });
   }
 }
 
@@ -302,8 +302,8 @@ export async function showAct(bot: Vernem, userId: number, actId: number) {
       `✍️ **Акт: ${ACT_STATUS_TITLE[ctx.act.status]}**`,
       ...actSummaryLines(bot, ctx),
       ...ctx.signers.map((s, i) => `${i + 1}. ${shortName(s.fio)}${s.flat ? `, кв. ${s.flat}` : ''}`),
-      open(ctx) ? `Нужны подписи минимум ${MIN_RESIDENTS} жителей и председателя совета дома (в ТСЖ — председателя ТСЖ). Без председателя акт неполный: УК может его не принять.` : '',
-      ctx.act.status === 'signed' && ctx.act.chair_signed === 0 ? '⚠️ Подписан без председателя. Подпишет позже — отметьте.' : '',
+       open(ctx) ? `Требуются подписи не менее ${MIN_RESIDENTS} жителей и председателя совета дома. В ТСЖ требуется подпись председателя ТСЖ. Без подписи председателя УК может не принять акт.` : '',
+       ctx.act.status === 'signed' && ctx.act.chair_signed === 0 ? '⚠️ Акт подписан без председателя. Если он подпишет позже, отметьте это.' : '',
     ]
       .filter(Boolean)
       .join('\n'),
@@ -314,7 +314,7 @@ export async function showAct(bot: Vernem, userId: number, actId: number) {
 async function askJoinFirst(bot: Vernem, userId: number, ctx: ActCtx) {
   const norm = bot.norms.services[ctx.incident.service_key];
   return bot.send(userId, {
-    text: `Сначала отметьте, что у вас тоже: ${norm.button.toLowerCase()}, ${ctx.house.address}. Потом пришлю акт.`,
+    text: `Сначала подтвердите, что нарушение затронуло и вас: ${norm.button.toLowerCase()}, ${ctx.house.address}. Затем направлю акт.`,
     buttons: [[cb('✅ У меня тоже', `jn:${ctx.incident.id}`)], backRow()],
   });
 }
@@ -347,8 +347,8 @@ export async function onActButton(bot: Vernem, userId: number, action: string, a
     case 'no': {
       const ctx = load(bot, id);
       if (!ctx) return bot.stale(userId);
-      await bot.safeSend(ctx.act.initiator_user_id, { text: 'Один сосед не смог подтвердить акт. Позовите других — пришлю акт каждому, кто отметит отключение.' });
-      return bot.send(userId, { text: 'Понял, не вписываю вас.', buttons: bot.menu() });
+      await bot.safeSend(ctx.act.initiator_user_id, { text: 'Один из соседей не подтвердил акт. Пригласите других: акт будет направлен каждому, кто подтвердит нарушение.' });
+      return bot.send(userId, { text: 'Ваши данные не будут внесены в акт.', buttons: bot.menu() });
     }
     case 'st':
       return showAct(bot, userId, id);
@@ -362,7 +362,7 @@ export async function onActButton(bot: Vernem, userId: number, action: string, a
       if (!ctx || ctx.act.initiator_user_id !== userId) return bot.stale(userId);
       if (!open(ctx)) return showAct(bot, userId, id);
       return bot.send(userId, {
-        text: 'На бумаге подписали вы и хотя бы один сосед?',
+        text: 'Акт на бумаге подписали вы и хотя бы один сосед?',
         buttons: [[cb('✅ Да, и председатель', `ak:chair:${id}:1`)], [cb('✅ Да, без председателя', `ak:chair:${id}:0`)], [cb('Ещё нет', `ak:st:${id}`)]],
       });
     }
@@ -371,7 +371,7 @@ export async function onActButton(bot: Vernem, userId: number, action: string, a
       if (!ctx || !(await markActSigned(bot, userId, id, b === '1'))) return bot.stale(userId);
       const p = bot.db.getParticipantFor(ctx.incident.id, userId);
       return bot.send(userId, {
-        text: `✅ Акт подписан — он попадёт в заявления всех участников. Сфотографируйте его: оригинал понадобится.${b === '1' ? '' : '\n⚠️ Без подписи председателя акт неполный (п. 110(1) Правил): УК может его не принять. Если председатель есть — попросите его подписать и отметьте это.'}`,
+        text: `✅ Акт подписан. Он будет приложен к заявлениям всех участников. Сфотографируйте акт: потребуется оригинал.${b === '1' ? '' : '\n⚠️ Без подписи председателя акт неполный (п. 110(1) Правил). УК может его не принять. Если председатель есть, попросите его подписать акт и отметьте это.'}`,
         // «К делу» — там кнопка «Починили»: после неё заявление с актом в приложениях.
         buttons: [
           [cb('📷 Фото подписанного акта', p ? `phadd:${p.id}:act` : 'menu')],
@@ -386,7 +386,7 @@ export async function onActButton(bot: Vernem, userId: number, action: string, a
       if (!ctx || !markChairLate(bot, userId, id)) return bot.stale(userId);
       const p = bot.db.getParticipantFor(ctx.incident.id, userId);
       return bot.send(userId, {
-        text: '✅ Отметил: председатель подписал акт. Если заявление уже скачано — скачайте новое, в нём будет его подпись.',
+        text: '✅ Подпись председателя отмечена. Если заявление уже скачано, скачайте новый файл PDF: в нём будет указана подпись председателя.',
         buttons: [[p ? cb('⬅️ К делу', `cs:${p.id}`) : cb('⬅️ Меню', 'menu')]],
       });
     }
@@ -417,7 +417,7 @@ export async function remindInspection(bot: Vernem, pid: number) {
   if (!c || c.p.status !== 'tracking' || c.p.inspection === 'executor_act' || c.p.inspection === 'no_show') return;
   // send: не дошло — планировщик повторит.
   return bot.send(c.p.user_id, {
-    text: `Прошло 2 часа. Приходили из УК замерить температуру и составить акт? По правилам — не позднее 2 часов (п. 108 ПП № 354).`,
+    text: `Прошло 2 часа. Представители УК приходили для замера и составления акта? По правилам проверка проводится не позднее 2 часов (п. 108 ПП № 354).`,
     buttons: [[cb('✅ Да, акт есть', `insp:${pid}:act`), cb('❌ Никто', `insp:${pid}:none`)], [cb('Договорились на потом', `insp:${pid}:later`)]],
   });
 }
@@ -429,7 +429,7 @@ export async function onInspection(bot: Vernem, userId: number, pid: number, val
     bot.db.updateParticipant(pid, { inspection: 'executor_act' });
     bot.db.track(userId, 'inspection_act');
     return bot.send(userId, {
-      text: 'Отлично — это сильное доказательство. Возьмите свой экземпляр акта и пришлите фото.',
+      text: 'Это важное доказательство. Получите свой экземпляр акта и направьте его фото.',
       buttons: [[cb('📷 Фото акта', `phadd:${pid}:act`), cb('⬅️ К делу', `cs:${pid}`)]],
     });
   }
@@ -437,14 +437,14 @@ export async function onInspection(bot: Vernem, userId: number, pid: number, val
     bot.db.updateParticipant(pid, { inspection: 'no_show' });
     bot.db.track(userId, 'inspection_no_show');
     return bot.send(userId, {
-      text: 'УК не пришла в срок — значит, акт можно составить с соседями без неё (п. 110(1)). Соберу его сам.',
+      text: 'УК не пришла в установленный срок. Акт можно составить с соседями без представителя УК (п. 110(1)). Я подготовлю его.',
       buttons: [[cb('✍️ Акт с соседями', `ak:new:${pid}`), cb('⬅️ К делу', `cs:${pid}`)]],
     });
   }
   if (value === 'later') {
     bot.db.updateParticipant(pid, { inspection: 'rescheduled' });
     scheduleInspectionCheck(bot, pid, userId, c.house.tz, 3);
-    return bot.send(userId, { text: 'Хорошо, спрошу через 3 часа.', buttons: [[cb('⬅️ К делу', `cs:${pid}`)]] });
+    return bot.send(userId, { text: 'Следующий запрос о проверке будет направлен через 3 часа.', buttons: [[cb('⬅️ К делу', `cs:${pid}`)]] });
   }
   return bot.stale(userId);
 }

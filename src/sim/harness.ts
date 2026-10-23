@@ -154,6 +154,13 @@ export class Harness {
     return this.bot.handle({ kind: 'button', userId, name: this.name(userId), payload: btn.payload });
   }
 
+  /** Нажимает последнюю callback-кнопку с точным payload, не завися от формулировки интерфейса. */
+  async pressPayload(userId: number, payload: string) {
+    const btn = [...this.buttons(userId)].reverse().find((b) => b.type === 'callback' && b.payload === payload);
+    if (!btn || btn.type !== 'callback') throw new Error(`Кнопка с payload «${payload}» не найдена`);
+    return this.bot.handle({ kind: 'button', userId, name: this.name(userId), payload: btn.payload });
+  }
+
   close() {
     if (this.ownDb) this.db.close();
   }

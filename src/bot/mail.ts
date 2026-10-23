@@ -32,7 +32,7 @@ export function canEmailClaim(bot: Vernem, c: CaseBundle): boolean {
 /** Предупреждение перед отправкой: почту УК недавно изменил другой житель. */
 export function emailTargetNote(bot: Vernem, c: CaseBundle, userId: number): string | null {
   const at = ukEmailChangedByOther(bot.db.houseInfo(c.house), userId, bot.now());
-  return at ? `Почту УК изменил сосед ${formatDate(new Date(at), c.house.tz)}. Сверьте её с квитанцией или сайтом УК.` : null;
+  return at ? `Почту УК изменил сосед ${formatDate(new Date(at), c.house.tz)}. Сверьте адрес с квитанцией или сайтом УК.` : null;
 }
 
 /**
@@ -92,12 +92,12 @@ export async function emailClaim(bot: Vernem, userId: number, pid: number, reply
 
 export async function emailClaimFull(bot: Vernem, userId: number, pid: number, replyTo: string | null): Promise<EmailResult> {
   const c = bot.ownCase(userId, pid);
-  if (!c || !c.p.ended_at) return { error: 'Заявление появится, когда услугу восстановят' };
+  if (!c || !c.p.ended_at) return { error: 'Заявление будет доступно после восстановления услуги.' };
   const to = claimEmailTarget(bot, c);
-  if (!bot.cfg.mail) return { error: 'Отправка на почту сейчас не настроена' };
-  if (!to) return { error: 'Почты УК нет в карточке дома — впишите её в «Данные дома»' };
-  if (replyTo && !isEmail(replyTo)) return { error: 'Почта в виде name@example.ru' };
-  if (sending.has(pid)) return { error: 'Письмо уже отправляется — подождите минуту' };
+  if (!bot.cfg.mail) return { error: 'Отправка по электронной почте не настроена.' };
+  if (!to) return { error: 'Электронная почта УК не указана в карточке дома. Внесите её в разделе «Данные дома».' };
+  if (replyTo && !isEmail(replyTo)) return { error: 'Укажите электронную почту в формате name@example.ru.' };
+  if (sending.has(pid)) return { error: 'Письмо уже отправляется. Подождите минуту.' };
   sending.add(pid);
   try {
     bot.markClaimIssued(pid);
@@ -105,18 +105,18 @@ export async function emailClaimFull(bot: Vernem, userId: number, pid: number, r
     const fresh = loadCase(bot.db, pid)!;
     const cl = claimOf(fresh.p);
     // Это заявление уже ушло письмом. Изменилось — refreshClaimIssue сбросил отметку, и новое уйдёт.
-    if (cl.emailedAt) return { error: `Это заявление уже отправлено на ${cl.emailedTo ?? 'почту УК'} ${formatShort(new Date(cl.emailedAt), fresh.house.tz)}` };
+    if (cl.emailedAt) return { error: `Это заявление уже направлено на ${cl.emailedTo ?? 'электронную почту УК'} ${formatShort(new Date(cl.emailedAt), fresh.house.tz)}.` };
     const doc = claimDocFor(bot.db, bot.norms, fresh, bot.now());
     const scan = bot.db.getSignedScan(pid);
     if (!scan?.storage_name || scan.sent_at || scan.issued_snapshot !== cl.issuedSnapshot) {
-      return { error: 'Сначала загрузите актуальный скан заполненного и подписанного заявления' };
+      return { error: 'Сначала загрузите актуальный скан заполненного и подписанного заявления.' };
     }
     const pdf = readSignedScan(bot.cfg.signedScanDir, scan.storage_name);
-    if (!pdf) return { error: 'Скан не найден. Загрузите подписанный PDF ещё раз' };
+    if (!pdf) return { error: 'Скан не найден. Загрузите подписанный файл PDF повторно.' };
     try {
       validateSignedScan(pdf);
     } catch {
-      return { error: 'Скан повреждён. Загрузите подписанный PDF ещё раз' };
+      return { error: 'Скан повреждён. Загрузите подписанный файл PDF повторно.' };
     }
     const photos = await photoAttachments(bot, pid);
     const act = bot.db.getActByIncident(fresh.incident.id);
@@ -153,7 +153,7 @@ export async function emailClaimFull(bot: Vernem, userId: number, pid: number, r
       });
     } catch (e) {
       console.error('[mail] не отправлено', e);
-      return { error: 'Письмо не ушло: почтовый сервер не ответил. Попробуйте ещё раз чуть позже или отнесите заявление лично' };
+      return { error: 'Письмо не отправлено: почтовый сервер не ответил. Повторите попытку позднее или подайте заявление лично.' };
     }
     const now = bot.now().toISOString();
     const latest = claimOf(loadCase(bot.db, pid)!.p);
@@ -182,9 +182,9 @@ export async function askEmailClaim(bot: Vernem, userId: number, pid: number) {
   bot.db.setState(userId, 'await_mail_reply', { pid });
   return bot.send(userId, {
     text: [
-      `📧 Отправлю подписанный вами скан заявления на почту УК **${clean(to)}** и попрошу сообщить входящий номер. Дата отправки станет датой подачи.`,
+      `📧 Подписанный вами скан заявления будет направлен на электронную почту УК **${clean(to)}**. В письме будет запрошен входящий номер. Дата отправки станет датой подачи.`,
       note ? `⚠️ ${note}` : '',
-      'Куда УК прислать ответ? Напишите вашу почту — поставлю её в копию. Или нажмите «Без моей почты».',
+      'Укажите вашу электронную почту для ответа УК. Она будет указана в копии письма. Либо нажмите «Без моей почты».',
     ]
       .filter(Boolean)
       .join('\n'),
@@ -194,7 +194,7 @@ export async function askEmailClaim(bot: Vernem, userId: number, pid: number) {
 
 export async function onEmailReply(bot: Vernem, userId: number, text: string, data: { pid: number }) {
   const email = text.trim().toLowerCase();
-  if (!isEmail(email)) return bot.send(userId, { text: 'Почта в виде name@example.ru. Или нажмите «Без моей почты».', buttons: [[cb('📧 Без моей почты', `mailgo:${data.pid}`)], backRow()] });
+  if (!isEmail(email)) return bot.send(userId, { text: 'Укажите электронную почту в формате name@example.ru. Либо нажмите «Без моей почты».', buttons: [[cb('📧 Без моей почты', `mailgo:${data.pid}`)], backRow()] });
   return finishEmail(bot, userId, data.pid, email);
 }
 
@@ -206,10 +206,10 @@ export async function finishEmail(bot: Vernem, userId: number, pid: number, repl
   const cl = claimOf(c.p);
   return bot.send(userId, {
     text: [
-      `✅ Отправил заявление на ${clean(cl.emailedTo)} в ${formatShort(new Date(cl.emailedAt!), c.house.tz)}${replyTo ? `, копия — на ${replyTo}` : ''}.`,
-      r.photos ? `Фото к делу приложил: ${r.photos} шт.` : '',
-      r.actCopyMissing ? '📎 Копии подписанного акта в письме нет — пришлите УК фото акта ответным письмом или приложите при визите.' : '',
-      'Это и есть подача: дата отправки записана в деле. Через месяц спрошу про квитанцию.',
+      `✅ Заявление направлено на ${clean(cl.emailedTo)}: ${formatShort(new Date(cl.emailedAt!), c.house.tz)}${replyTo ? `, копия направлена на ${replyTo}` : ''}.`,
+      r.photos ? `К обращению приложено фото: ${r.photos} шт.` : '',
+      r.actCopyMissing ? '📎 Копия подписанного акта не приложена к письму. Направьте УК фото акта ответным письмом или приложите при личном обращении.' : '',
+      'Подача зарегистрирована: дата отправки сохранена в обращении. Через месяц будет направлен запрос о квитанции.',
     ]
       .filter(Boolean)
       .join('\n'),

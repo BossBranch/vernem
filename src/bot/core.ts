@@ -142,7 +142,7 @@ export class Vernem {
       if ('userId' in input && input.kind !== 'group_text') {
         this.db.setState(input.userId, 'idle');
         await this.safeSend(input.userId, {
-          text: 'Что-то пошло не так, и я не смог выполнить действие. Данные случаев сохранены — попробуйте ещё раз или вернитесь в начало.',
+          text: 'Не удалось выполнить действие. Данные сохранены. Повторите попытку или вернитесь в главное меню.',
           buttons: [[cb('⬅️ В начало', 'menu'), cb('📋 Мои случаи', 'cases')]],
         });
       }
@@ -161,7 +161,7 @@ export class Vernem {
       case 'photo':
         this.db.ensureUser(input.userId, input.name);
         if (this.db.getState(input.userId).state === 'await_signed_scan') {
-          return this.send(input.userId, { text: 'Для заявления нужен один PDF со сканом всех заполненных и подписанных страниц. Прикрепите его через скрепку → файл.', buttons: [[cb('⬅️ К случаю', `cs:${this.db.getState<{ pid?: number }>(input.userId).data.pid ?? ''}`)]] });
+          return this.send(input.userId, { text: 'Для заявления требуется один файл PDF со сканами всех заполненных и подписанных страниц. Прикрепите его через скрепку в разделе «Файл».', buttons: [[cb('⬅️ К случаю', `cs:${this.db.getState<{ pid?: number }>(input.userId).data.pid ?? ''}`)]] });
         }
         return onPhoto(this, input.userId, input.photos);
       case 'file':
@@ -361,7 +361,7 @@ export class Vernem {
       dispatch?: boolean;
     },
   ): Promise<{ pid: number; outcome: 'new' | 'existing' | 'joined'; numberSaved?: boolean; neighbours?: number; readingSaved?: boolean; since?: string; dispatched?: boolean } | { error: string; field?: string }> {
-    if (r.dispatch && !canDispatch(this, r.houseId)) return { error: 'УК этого дома ещё не подключена к боту — позвоните в аварийную службу' };
+    if (r.dispatch && !canDispatch(this, r.houseId)) return { error: 'УК этого дома ещё не подключена к боту. Обратитесь в аварийную службу' };
     const norm = this.norms.services[r.service];
     const uh = this.db.getUserHouse(userId, r.houseId);
     if (!uh) return { error: 'Этого адреса нет в вашем списке' };
@@ -372,10 +372,10 @@ export class Vernem {
       if (!r.plannedUntil || Number.isNaN(r.plannedUntil.getTime())) return { error: 'Укажите, до какого времени объявили отключение', field: 'plannedUntil' };
       plannedUntil = r.plannedUntil;
       if (plannedUntil.getTime() > this.now().getTime()) {
-        return { error: `Отключение объявлено до ${formatShort(plannedUntil, uh.tz)}. Пока срок не прошёл, снижения платы нет. Не дадут воду в срок — сообщите снова.`, field: 'plannedUntil' };
+        return { error: `Отключение объявлено до ${formatShort(plannedUntil, uh.tz)}. До этого времени снижение платы не применяется. Если воду не восстановят в срок, сообщите о нарушении повторно.`, field: 'plannedUntil' };
       }
       if (!r.dispatch && r.startedAt.getTime() < plannedUntil.getTime() - 60_000) {
-        return { error: `До ${formatShort(plannedUntil, uh.tz)} шли объявленные работы — укажите время не раньше`, field: 'started' };
+        return { error: `До ${formatShort(plannedUntil, uh.tz)} проводились объявленные работы. Укажите более позднее время`, field: 'started' };
       }
     }
     if (norm.kind !== 'interruption') {
@@ -386,17 +386,17 @@ export class Vernem {
             ? (norm.temperature as HeatingTempNorm).corner_norm_c
             : (norm.temperature as HeatingTempNorm).norm_c
           : (norm.temperature as HotWaterTempNorm).norm_c - (norm.temperature as HotWaterTempNorm).day_tolerance_c;
-      if (r.temp >= threshold) return { error: `+${fmtNum(r.temp, 1)} °C — это норма (не ниже +${threshold} °C), снижения платы не положено.` };
+      if (r.temp >= threshold) return { error: `+${fmtNum(r.temp, 1)} °C соответствует норме: не ниже +${threshold} °C. Снижение платы не применяется.` };
     }
     // Не может быть одновременно «воды нет» и «вода еле тёплая» — второе дело только запутает расчёт.
     const RELATED: Partial<Record<ServiceKey, ServiceKey>> = { hot_water_temp: 'hot_water_off', hot_water_off: 'hot_water_temp', heating_temp: 'heating_off', heating_off: 'heating_temp' };
     const related = RELATED[r.service];
     const relatedOpen = related ? this.db.findOpenIncident(r.houseId, related) : undefined;
     if (related && relatedOpen && this.db.getParticipantFor(relatedOpen.id, userId)) {
-      return { error: `У вас уже открыто «${this.norms.services[related].button}» по этому адресу. Сначала отметьте в том деле время окончания — с этого времени начнётся новое дело.` };
+      return { error: `По этому адресу уже открыто дело «${this.norms.services[related].button}». Сначала укажите время окончания в этом деле. После этого можно создать новое дело.` };
     }
     const overlap = relatedOverlap(this.db, this.norms, userId, r.houseId, r.service, r.startedAt, null);
-    if (overlap) return { error: `За это время уже есть дело ${overlap}. Одни и те же часы нельзя оплатить дважды — укажите время позже.` };
+    if (overlap) return { error: `За этот период уже есть дело ${overlap}. Одни и те же часы нельзя учитывать дважды. Укажите более позднее время.` };
     // Ответ про лифт — свойство дома: лимит перерыва света одинаков для всех дел этого дома.
     // «Да» и «Нет» из формы — ответ за весь дом, как в карточке дома; «Не знаю» приходит без варианта и ничего не меняет.
     if (r.service === 'electricity_off' && r.variant) {
@@ -462,7 +462,7 @@ export class Vernem {
   editTimesFromApp(userId: number, pid: number, startedAt: Date | null, endedAt: Date | null): string | null {
     const c = this.ownCase(userId, pid);
     if (!c) return 'Дело не найдено';
-    if (c.p.status === 'refunded') return 'Перерасчёт уже получен — время не меняем';
+    if (c.p.status === 'refunded') return 'Перерасчёт уже отмечен. Изменение времени недоступно';
     // Поле времени в приложении без секунд: то же время до минуты — не изменение, храним прежнее точное.
     const sameMinute = (a: Date, b: Date) => Math.floor(a.getTime() / 60_000) === Math.floor(b.getTime() / 60_000);
     const oldStart = new Date(c.p.started_at);
@@ -472,13 +472,13 @@ export class Vernem {
     if (start === oldStart && end === oldEnd) return null;
     const now = this.now().getTime();
     if (start.getTime() > now + 5 * 60_000) return 'Время начала ещё не наступило';
-    if (now - start.getTime() > 366 * 24 * MS_HOUR) return 'Это было больше года назад — такое проще решать через жилищную инспекцию';
+    if (now - start.getTime() > 366 * 24 * MS_HOUR) return 'Событие произошло более года назад. Рекомендуем обратиться в жилищную инспекцию';
     if (end && end.getTime() <= start.getTime()) return 'Окончание должно быть позже начала';
     if (end && end.getTime() > now + 5 * 60_000) return 'Время окончания ещё не наступило';
     const early = this.db.listReadings(pid).find((r) => new Date(r.at).getTime() < start.getTime() - 60_000);
     if (early) return `Есть замер раньше нового начала (${formatShort(new Date(early.at), c.house.tz)}). Удалите его или укажите начало не позже первого замера.`;
     const overlap = relatedOverlap(this.db, this.norms, userId, c.house.id, c.incident.service_key, start, end, pid);
-    if (overlap) return `За это время уже есть дело ${overlap}. Одни и те же часы нельзя оплатить дважды.`;
+    if (overlap) return `За этот период уже есть дело ${overlap}. Одни и те же часы нельзя учитывать дважды.`;
     // Подписанный на бумаге акт уже не изменить — время в заявлении должно совпадать с ним.
     const act = this.db.getActByIncident(c.incident.id);
     if (act?.status === 'signed' && start.getTime() !== new Date(c.p.started_at).getTime()) {
@@ -509,7 +509,7 @@ export class Vernem {
   reopenFromApp(userId: number, pid: number): string | null {
     const c = this.ownCase(userId, pid);
     if (!c) return 'Дело не найдено';
-    if (c.p.status !== 'ended' && c.p.status !== 'closed') return 'Заявление уже готово — вернуть дело нельзя, но время окончания можно исправить';
+    if (c.p.status !== 'ended' && c.p.status !== 'closed') return 'Заявление уже подготовлено. Открыть дело повторно нельзя, но можно изменить время окончания';
     this.db.updateParticipant(pid, { ended_at: null, status: 'tracking', calc: null });
     // Отключение закрыл этот житель — открываем снова, чтобы соседи могли присоединиться.
     if (c.incident.ended_at && (c.p.role === 'reporter' || c.incident.ended_at === c.p.ended_at)) this.db.reopenIncident(c.incident.id);
@@ -556,7 +556,7 @@ export class Vernem {
     if (!c) return 'Дело не найдено';
     if (this.norms.services[c.incident.service_key].kind === 'interruption') return 'Замер нужен только для температуры';
     if (c.p.status !== 'tracking') return 'Дело уже закрыто для замеров';
-    if (at.getTime() < new Date(c.p.started_at).getTime()) return 'Замер раньше начала — проверьте время';
+    if (at.getTime() < new Date(c.p.started_at).getTime()) return 'Время замера раньше времени начала. Проверьте значение';
     if (at.getTime() > this.now().getTime() + 5 * 60_000) return 'Это время ещё не наступило';
     this.db.addReading(pid, at.toISOString(), temp);
     this.db.track(userId, 'reading', { via: 'app' });
@@ -607,7 +607,7 @@ export class Vernem {
       return `Окончание (${formatShort(incEnd, tz)}) записано в подписанном акте. Чтобы изменить его, снимите отметку «подписан» и подпишите исправленный акт.`;
     }
     if (end.getTime() <= created.getTime()) {
-      return `В подписанном акте записано, что на ${formatShort(created, tz)} услуга ещё не восстановлена — окончание не может быть раньше. Если это ошибка, снимите отметку «подписан» и подпишите исправленный акт.`;
+      return `В подписанном акте указано, что на ${formatShort(created, tz)} услуга ещё не восстановлена. Время окончания не может быть раньше. Если это ошибка, снимите отметку «подписан» и подпишите исправленный акт.`;
     }
     return null;
   }
@@ -620,7 +620,7 @@ export class Vernem {
     if (endedAt.getTime() <= new Date(c.p.started_at).getTime()) return 'Время окончания должно быть позже начала';
     if (endedAt.getTime() > this.now().getTime() + 5 * 60_000) return 'Это время ещё не наступило';
     const overlap = relatedOverlap(this.db, this.norms, userId, c.house.id, c.incident.service_key, new Date(c.p.started_at), endedAt, pid);
-    if (overlap) return `За это время уже есть дело ${overlap}. Одни и те же часы нельзя оплатить дважды — исправьте время.`;
+    if (overlap) return `За этот период уже есть дело ${overlap}. Одни и те же часы нельзя учитывать дважды. Исправьте время.`;
     // Окончание попадёт в акт, только если отключение ещё открыто (первый, кто отметил «починили»).
     const actProblem = c.incident.ended_at ? null : this.actEndProblem(c, endedAt);
     if (actProblem) return actProblem;
@@ -702,7 +702,7 @@ export class Vernem {
 
   welcome(userId: number) {
     return this.send(userId, {
-      text: 'Привет! Я **«Вернём»** 👋\nОтключили воду, свет или в квартире холодно? По закону за это положено снизить плату. Я помогу всё записать, посчитать и получить деньги — по шагам.',
+      text: 'Добро пожаловать в **«Вернём»**.\nЕсли коммунальная услуга не предоставляется или её качество нарушено, сервис поможет зафиксировать обстоятельства, рассчитать снижение платы и подготовить заявление.',
       buttons: this.menu(),
     });
   }
@@ -754,12 +754,12 @@ export class Vernem {
       case 'await_dispatch_number':
         return onDispatchNumber(this, userId, text, data);
       case 'await_photo':
-        return this.send(userId, { text: 'Жду фото: прикрепите его к сообщению (скрепка → фото).', buttons: [[cb('⬅️ К случаю', `cs:${data.pid}`)]] });
+        return this.send(userId, { text: 'Прикрепите фото к сообщению через скрепку в разделе «Фото».', buttons: [[cb('⬅️ К случаю', `cs:${data.pid}`)]] });
       case 'await_signed_scan':
-        return this.send(userId, { text: 'Жду один PDF: распечатайте заявление, заполните пустые поля, подпишите и прикрепите скан через скрепку → файл.', buttons: [[cb('⬅️ К случаю', `cs:${data.pid}`)]] });
+        return this.send(userId, { text: 'Прикрепите один файл PDF: распечатайте заявление, заполните пустые поля, подпишите его и отсканируйте все страницы.', buttons: [[cb('⬅️ К случаю', `cs:${data.pid}`)]] });
       default:
         return this.send(userId, {
-          text: 'Я работаю через кнопки. Выберите, что случилось, или откройте свои случаи.',
+          text: 'Для продолжения используйте кнопки. Выберите тип нарушения или откройте список дел.',
           buttons: this.menu(),
         });
     }
@@ -790,7 +790,7 @@ export class Vernem {
         if (!this.cfg.adminIds.includes(userId)) break;
         return this.send(userId, { text: this.statsText() });
     }
-    return this.send(userId, { text: 'Такой команды нет. Вот что я умею:', buttons: this.menu() });
+    return this.send(userId, { text: 'Команда не распознана. Доступные действия указаны в меню.', buttons: this.menu() });
   }
 
   private statsText() {
@@ -833,10 +833,10 @@ export class Vernem {
         this.db.setState(userId, 'idle');
         return this.welcome(userId);
       case 'how':
-        return this.send(userId, { text: howItWorks(this.norms), buttons: [[cb('🚨 Что-то сломалось', 'new')], backRow()] });
+        return this.send(userId, { text: howItWorks(this.norms), buttons: [[cb('🚨 Сообщить о проблеме', 'new')], backRow()] });
       case 'new':
         this.db.setState(userId, 'idle');
-        return this.send(userId, { text: 'Что случилось? Выберите ближайший вариант.', buttons: serviceMenu(this.norms) });
+        return this.send(userId, { text: 'Выберите тип нарушения.', buttons: serviceMenu(this.norms) });
       case 'svc': {
         if (!SERVICE_ORDER.includes(a as ServiceKey)) return this.stale(userId);
         this.db.track(userId, 'report_started', { service: a });
@@ -988,11 +988,11 @@ export class Vernem {
       case 'dspsend': {
         const err = await dispatchCase(this, userId, pid);
         if (err) return this.send(userId, { text: err, buttons: [[cb('📋 К делу', `cs:${pid}`)]] });
-        return this.sendTracking(userId, pid, false, '📨 Отправил заявку в УК. Как только её примут — пришлю номер.');
+        return this.sendTracking(userId, pid, false, '📨 Заявка направлена в УК. Номер будет направлен после её принятия.');
       }
       case 'delme':
         this.deleteUser(userId);
-        return this.send(userId, { text: 'Готово: все ваши данные удалены. Если понадоблюсь — нажмите /start.' });
+        return this.send(userId, { text: 'Все ваши данные удалены. Чтобы начать новый сценарий, используйте команду /start.' });
       default:
         return this.stale(userId);
     }
@@ -1062,7 +1062,7 @@ export class Vernem {
         this.saveDraft(userId, 'draft', draft);
         // Два независимых ввода — свойство дома из техпаспорта, по лифту или этажности его не угадать.
         return this.send(userId, {
-          text: 'У дома два независимых ввода электричества? Это записано в техпаспорте дома, точно скажет УК. Не знаете — посчитаю по строгой норме: 24 ч в месяц.',
+          text: 'У дома два независимых ввода электричества? Эти сведения указаны в техническом паспорте дома. При отсутствии данных применяется строгая норма: 24 ч в месяц.',
           buttons: [[cb('Два независимых', 'el:two_sources'), cb('Один / не знаю', 'el:one_source')], backRow()],
         });
       }
@@ -1114,8 +1114,8 @@ export class Vernem {
         // В объявленный срок плата не снижается. Воду не дали в срок — с этого момента перерыв, как при аварии.
         this.saveDraft(userId, 'await_planned_end', draft);
         return this.send(userId, {
-          text: 'Плановое отключение в объявленный срок плату не снижает. А если воду не дали в срок — с этого момента считается перерыв.\nДо какого времени объявили отключение? Например: 21.10 18:00.',
-          buttons: [[cb('Объявления не было — внезапно', 'hw:sudden')], backRow()],
+          text: 'Плановое отключение в объявленный срок не уменьшает плату. Если водоснабжение не восстановлено в срок, с этого момента учитывается перерыв.\nУкажите объявленный срок окончания работ, например: 21.10 18:00.',
+          buttons: [[cb('Объявления не было', 'hw:sudden')], backRow()],
         });
       }
       return this.continueDraft(userId, { ...draft, hwChecked: true, plannedUntil: undefined });
@@ -1157,13 +1157,13 @@ export class Vernem {
     this.saveDraft(userId, 'draft', draft);
     const uk = !!house && canDispatch(this, house.id);
     const lines = [
-      uk ? `🏢 УК этого дома принимает заявки в боте (${dispatcherNames(this, house!.id)}). Отправьте заявку — номер придёт сюда.` : '',
-      uk ? `📞 Или позвоните в аварийную службу${phone ? `: ${phone}` : ''}.` : `📞 **Позвоните в аварийную службу**${phone ? `: ${phone}` : ' — телефон есть в квитанции'}.`,
-      'Скажите адрес и что случилось. **Запишите номер заявки** и кто её принял — диспетчер обязан назвать себя (п. 106 ПП № 354). Номер — главное доказательство.',
+      uk ? `🏢 УК этого дома принимает заявки в боте (${dispatcherNames(this, house!.id)}). Направьте заявку. Номер поступит в это дело.` : '',
+      uk ? `📞 Или обратитесь в аварийную службу${phone ? `: ${phone}` : ''}.` : `📞 **Обратитесь в аварийную службу**${phone ? `: ${phone}` : '. Телефон указан в квитанции.'}`,
+      'Сообщите адрес и характер нарушения. Запишите номер заявки и сведения о диспетчере. Диспетчер обязан сообщить свои данные согласно п. 106 ПП № 354.',
     ];
-    if (norm.kind !== 'interruption') lines.push('Попросите прийти и замерить — по правилам не позднее чем через 2 часа.');
+    if (norm.kind !== 'interruption') lines.push('Попросите провести проверку и измерение. Срок проверки по правилам составляет не более двух часов.');
     if (norm.executor_hint) lines.push(norm.executor_hint);
-    const rows: Btn[][] = [[cb('📞 Позвонил — ввести номер', 'fx:called')], [cb('Не дозвонился', 'fx:fail')], [cb('📍 Другой адрес', 'addr'), cb('⬅️ Меню', 'menu')]];
+    const rows: Btn[][] = [[cb('📞 Указать номер заявки', 'fx:called')], [cb('Не удалось дозвониться', 'fx:fail')], [cb('📍 Другой адрес', 'addr'), cb('⬅️ Меню', 'menu')]];
     if (uk) rows.unshift([cb('📨 Отправить заявку в УК', 'fx:dsp')]);
     return this.send(userId, { text: lines.filter(Boolean).join('\n'), buttons: rows });
   }
@@ -1172,13 +1172,13 @@ export class Vernem {
     this.saveDraft(userId, 'draft', draft);
     return this.send(userId, {
       text: [
-        'Сделайте скриншот журнала звонков — он докажет, что вы звонили. Аварийная служба обязана ответить за 5 минут или перезвонить за 10 (п. 13 ПП № 416).',
+        'Сохраните снимок экрана с журналом звонков. Он подтверждает попытку обращения. Аварийная служба обязана ответить в течение 5 минут или перезвонить в течение 10 минут согласно п. 13 ПП № 416.',
         '',
-        'Без номера заявки УК может сказать «не было». Докажите иначе:',
-        '• напишите в «Госуслуги Дом» или ГИС ЖКХ — обращение получит номер;',
-        '• или запишите время — сделаю акт, его подпишут соседи.',
+        'При отсутствии номера заявки используйте один из способов фиксации:',
+        '• направьте обращение исполнителю через ГИС ЖКХ и сохраните его номер;',
+        '• укажите время нарушения и составьте акт с соседями.',
       ].join('\n'),
-      buttons: [[cb('✍️ Написал, есть номер', 'fb:written')], [cb('Записать время → акт', 'fb:self')], backRow()],
+      buttons: [[cb('✍️ Указать номер обращения', 'fb:written')], [cb('Составить акт', 'fb:self')], backRow()],
     });
   }
 
@@ -1187,7 +1187,7 @@ export class Vernem {
     // В номере всегда есть цифры: «не назвали» — не номер, в заявлении он выглядел бы как «№ не назвали».
     if (!number || !/\d/.test(number)) {
       return this.send(userId, {
-        text: 'В номере должны быть цифры, например 4512 или А-17. Номера не дали — нажмите «Номера нет».',
+        text: 'Номер должен содержать цифры, например 4512 или А-17. Если номер не сообщён, выберите «Номера нет».',
         buttons: [[cb('Номера нет', 'fb:nonum')], backRow()],
       });
     }
@@ -1205,12 +1205,12 @@ export class Vernem {
         : draft.evidence === 'written'
           ? 'Когда отправили обращение?'
           : planned
-            ? `С какого времени считать перерыв? Работы объявили до ${formatShort(planned, tz)} — раньше нельзя.`
+            ? `С какого времени учитывать перерыв? Работы были объявлены до ${formatShort(planned, tz)}. Более раннее время указать нельзя.`
             : norm.kind === 'interruption'
               ? `Когда пропала ${norm.genitive.startsWith('горяч') || norm.genitive.startsWith('холодн') ? 'вода' : 'услуга'}?`
               : 'Когда измерили температуру?';
     const rows = [...timeButtons('ts', 'start'), backRow()];
-    if (planned && draft.evidence !== 'ads' && draft.evidence !== 'written') rows.unshift([cb(`С ${formatShort(planned, tz)} — когда обещали дать воду`, 'ts:planned')]);
+    if (planned && draft.evidence !== 'ads' && draft.evidence !== 'written') rows.unshift([cb(`С ${formatShort(planned, tz)}: срок восстановления воды`, 'ts:planned')]);
     return this.send(userId, { text: q, buttons: rows });
   }
 
@@ -1219,11 +1219,11 @@ export class Vernem {
     if (!draft) return this.stale(userId);
     const tz = this.tz(draft.houseId);
     const r = parseLocalInput(text, this.now(), tz, { future: true });
-    if (!r.ok) return this.send(userId, { text: r.error, buttons: [[cb('Объявления не было — внезапно', 'hw:sudden')], backRow()] });
+    if (!r.ok) return this.send(userId, { text: r.error, buttons: [[cb('Объявления не было', 'hw:sudden')], backRow()] });
     if (r.date.getTime() > this.now().getTime()) {
       this.db.setState(userId, 'idle');
       return this.send(userId, {
-        text: `Срок работ — до ${formatShort(r.date, tz)}. Пока он не прошёл, снижения платы нет. Если воду не дадут к этому времени — нажмите «Что-то сломалось» ещё раз.`,
+        text: `Срок работ установлен до ${formatShort(r.date, tz)}. До этого времени снижение платы не применяется. Если услугу не восстановят в срок, создайте новое сообщение о проблеме.`,
         buttons: this.menu(),
       });
     }
@@ -1255,7 +1255,7 @@ export class Vernem {
     if (draft.plannedUntil && startedAt.getTime() < new Date(draft.plannedUntil).getTime() - 60_000) {
       this.saveDraft(userId, 'draft', draft);
       return this.send(userId, {
-        text: `До ${formatShort(new Date(draft.plannedUntil), house.tz)} шли объявленные работы — время начала не может быть раньше. Выберите другое время.`,
+        text: `До ${formatShort(new Date(draft.plannedUntil), house.tz)} проводились объявленные работы. Время начала не может быть раньше. Выберите другое время.`,
         buttons: [[cb(`С ${formatShort(new Date(draft.plannedUntil), house.tz)}`, 'ts:planned')], ...timeButtons('ts', 'start'), backRow()],
       });
     }
@@ -1288,7 +1288,7 @@ export class Vernem {
     const night = this.quietShift(this.now(), house.tz).getTime() > this.now().getTime();
     const sent = !!draft.dispatch && !(await dispatchCase(this, userId, p.id));
     const extra = [
-      sent ? '📨 Отправил заявку в УК. Как только её примут — пришлю номер.' : '',
+      sent ? '📨 Заявка направлена в УК. Номер будет направлен после её принятия.' : '',
       n ? `📣 Сообщил ${n} ${plural(n, ['соседу', 'соседям', 'соседям'])}${night ? ' (утром в 08:00)' : ''}.` : '',
     ].filter(Boolean);
     return this.sendTracking(userId, p.id, true, extra.length ? extra.join('\n') : undefined);
@@ -1330,13 +1330,13 @@ export class Vernem {
 
   private restoredWord(service: ServiceKey) {
     const map: Partial<Record<ServiceKey, string>> = {
-      electricity_off: 'Свет дали',
-      gas_off: 'Газ дали',
-      heating_off: 'Отопление дали',
-      sewerage_off: 'Канализацию починили',
-      waste_off: 'Мусор вывезли',
+      electricity_off: 'Электроснабжение восстановлено',
+      gas_off: 'Газоснабжение восстановлено',
+      heating_off: 'Отопление восстановлено',
+      sewerage_off: 'Водоотведение восстановлено',
+      waste_off: 'Отходы вывезены',
     };
-    return map[service] ?? 'Воду дали';
+    return map[service] ?? 'Водоснабжение восстановлено';
   }
 
   private async sendTracking(userId: number, pid: number, fresh: boolean, extra?: string) {
@@ -1351,16 +1351,16 @@ export class Vernem {
           : 'без номера заявки';
     const readings = this.db.listReadings(pid);
     const lines = [
-      `${fresh ? '✅ **Записал.**' : '👀 **Слежу.**'} ${ICON[c.incident.service_key]} ${norm.title}`,
+      `${fresh ? '✅ **Обращение зарегистрировано.**' : '👀 **Ведётся контроль.**'} ${ICON[c.incident.service_key]} ${norm.title}`,
       `${c.house.address}, с ${formatShort(new Date(c.p.started_at), tz)}, ${evidenceLine}.`,
     ];
     if (readings.length) lines.push(`Последний замер: +${fmtNum(readings[readings.length - 1].temp_c, 1)} °C.`);
     const dispatch = this.db.dispatchFor(c.incident.id);
     if (dispatch) lines.push(dispatchLine(dispatch, tz));
     const waiting = dispatch?.status === 'sent' && !dispatch.timeout_at;
-    if (c.incident.evidence === 'self' && !c.p.own_ads_number && !waiting && !this.db.getActByIncident(c.incident.id)) lines.push('Без номера заявки нужен акт с соседями — доказательство, что услуги не было.');
+    if (c.incident.evidence === 'self' && !c.p.own_ads_number && !waiting && !this.db.getActByIncident(c.incident.id)) lines.push('При отсутствии номера заявки составьте акт с соседями. Он подтвердит факт нарушения.');
     if (extra) lines.push(extra);
-    lines.push(`Каждые ${this.cfg.restoreCheckHours} ч спрошу, починили ли. Починят раньше — нажмите ✅.`);
+    lines.push(`Напоминание о восстановлении услуги поступит через ${this.cfg.restoreCheckHours} ч. Если услугу восстановят раньше, нажмите ✅.`);
     return this.send(userId, { text: lines.join('\n'), buttons: this.trackingButtons(c) });
   }
 
@@ -1375,14 +1375,14 @@ export class Vernem {
     if (hours > 24 * 21) {
       this.db.updateParticipant(pid, { status: 'closed' });
       return this.safeSend(c.p.user_id, {
-        text: `Случай «${norm.title}» с ${formatShort(started, tz)} длится больше трёх недель без отметки о восстановлении. Я перестал напоминать — откройте его в «Мои случаи», когда будет что отметить.`,
+        text: `По случаю «${norm.title}» с ${formatShort(started, tz)} более трёх недель нет отметки о восстановлении. Напоминания остановлены. Откройте дело в разделе «Мои дела», когда услуга будет восстановлена.`,
         buttons: [[cb('📋 Мои случаи', 'cases')]],
       });
     }
     const q =
       norm.kind === 'interruption'
-        ? `${ICON[c.incident.service_key]} Починили? ${norm.title}, ${c.house.address} — уже ${formatDuration(hours)}.`
-        : `${ICON[c.incident.service_key]} Стало тепло? ${c.house.address} — уже ${formatDuration(hours)}. Если нет, пришлите новый замер: каждый замер я учитываю не дольше суток.`;
+        ? `${ICON[c.incident.service_key]} Услуга восстановлена? ${norm.title}, ${c.house.address}. Продолжительность нарушения: ${formatDuration(hours)}.`
+        : `${ICON[c.incident.service_key]} Температура восстановилась? ${c.house.address}. Продолжительность нарушения: ${formatDuration(hours)}. Если нет, направьте новый замер. Каждый замер учитывается не более суток.`;
     const buttons: Btn[][] = [[cb(norm.kind === 'interruption' ? '✅ Да, восстановили' : '✅ Да, тепло', `rest:${pid}:y`), cb('Ещё нет', `rest:${pid}:n`)]];
     if (norm.kind !== 'interruption') buttons.push([cb('🌡 Новый замер', `tmp:${pid}`)]);
     // send, а не safeSend: не дошло — планировщик повторит напоминание.
@@ -1397,7 +1397,7 @@ export class Vernem {
     if (answer === 'n') {
       this.scheduleRestoredCheck(c.p, c.house.tz);
       return this.send(userId, {
-        text: this.cfg.fastReminders ? 'Понял, спрошу через пару минут (демо-режим).' : `Понял, спрошу через ${this.cfg.restoreCheckHours} ч. Ночью не беспокою.`,
+        text: this.cfg.fastReminders ? 'Следующее напоминание поступит через несколько минут в демо-режиме.' : `Следующее напоминание поступит через ${this.cfg.restoreCheckHours} ч. В ночное время уведомления не направляются.`,
         buttons: [[cb('👥 Позвать соседей', `nb:${pid}`), cb('⬅️ Меню', 'menu')]],
       });
     }
@@ -1446,8 +1446,8 @@ export class Vernem {
       ukTold = await tellDispatchersRestored(this, c.incident.id, endedAt);
     }
     const viaUk = ukTold || this.db.dispatchFor(c.incident.id)?.status === 'fixed';
-    const tail = viaUk ? ' УК об этом знает.' : c.incident.evidence === 'self' ? '' : ' Скажите об этом аварийной службе — так фиксируется конец (п. 112 ПП № 354).';
-    await this.send(userId, { text: `✅ Записал: починили в ${formatShort(endedAt, c.house.tz)}.${tail}` });
+    const tail = viaUk ? ' УК уведомлена.' : c.incident.evidence === 'self' ? '' : ' Сообщите об этом в аварийную службу. Так фиксируется окончание нарушения согласно п. 112 ПП № 354.';
+    await this.send(userId, { text: `✅ Восстановление услуги зафиксировано: ${formatShort(endedAt, c.house.tz)}.${tail}` });
     return this.resumeCalculation(userId, c.p.id);
   }
 
@@ -1456,7 +1456,7 @@ export class Vernem {
     for (const other of this.db.listParticipants(c.incident.id)) {
       if (other.id === c.p.id || other.status !== 'tracking') continue;
       await this.safeSend(other.user_id, {
-        text: `${ICON[c.incident.service_key]} Сосед отметил: починили в ${formatShort(endedAt, c.house.tz)}. У вас тоже?`,
+        text: `${ICON[c.incident.service_key]} Сосед указал, что услуга восстановлена ${formatShort(endedAt, c.house.tz)}. У вас услуга также восстановлена?`,
         buttons: [[cb('✅ Да', `same:${other.id}:y`), cb('Ещё нет', `same:${other.id}:n`)]],
       });
     }
@@ -1466,7 +1466,7 @@ export class Vernem {
     const c = this.ownCase(userId, pid);
     if (!c || c.p.status !== 'tracking') return this.stale(userId);
     if (answer === 'y' && c.incident.ended_at) return this.setEnded(userId, c, new Date(c.incident.ended_at));
-    return this.send(userId, { text: 'Хорошо, слежу за вами отдельно.', buttons: this.trackingButtons(c) });
+    return this.send(userId, { text: 'Дело будет отслеживаться отдельно.', buttons: this.trackingButtons(c) });
   }
 
   // =====================================================================
@@ -1523,7 +1523,7 @@ export class Vernem {
     if (t >= threshold) {
       // Состояние не сбрасываем: житель может перемерить в другой комнате и ввести новое число.
       return this.send(userId, {
-        text: `+${fmtNum(t, 1)} °C — это норма (${normText}), снижения платы не положено. Если в другой комнате холоднее или стало хуже — напишите новый замер.`,
+        text: `+${fmtNum(t, 1)} °C соответствует норме (${normText}). Снижение платы не применяется. Если в другой комнате температура ниже или ситуация изменилась, направьте новый замер.`,
         buttons: [[cb('⬅️ Меню', 'menu')]],
       });
     }
@@ -1591,12 +1591,12 @@ export class Vernem {
     }
 
     if (incident.ended_at && temp === null) {
-      await this.send(userId, { text: '✅ Вы в деле. Отключение уже закончилось — сразу считаю.' });
+      await this.send(userId, { text: '✅ Вы присоединились к делу. Отключение уже завершено. Выполняется расчёт.' });
       await inviteToAct(this, incident.id, userId);
       return this.setEnded(userId, loadCase(this.db, p.id)!, new Date(incident.ended_at));
     }
     this.scheduleRestoredCheck(p, house.tz);
-    await this.sendTracking(userId, p.id, false, 'Есть свой номер заявки? С ним заявление сильнее. Нет — укажу номер соседа.');
+    await this.sendTracking(userId, p.id, false, 'Есть собственный номер заявки? Укажите его. При отсутствии номера будет указан номер соседа.');
     // Если соседи уже собирают акт — новый участник сразу получает его на подтверждение.
     return inviteToAct(this, incident.id, userId);
   }
@@ -1617,8 +1617,8 @@ export class Vernem {
     const tz = c.house.tz;
     const n = norm.interruption;
     const rule = n
-      ? `За каждый ${n.unit_hours === 1 ? 'час' : `${n.unit_hours} ч`} сверх допустимого положено снижение платы на ${fmtPercent(n.rate_percent)} — ПП РФ № 354.`
-      : 'За каждый час низкой температуры положено снижение платы — ПП РФ № 354.';
+      ? `За каждый ${n.unit_hours === 1 ? 'час' : `${n.unit_hours} ч`} сверх допустимого применяется снижение платы на ${fmtPercent(n.rate_percent)} согласно ПП РФ № 354.`
+      : 'За каждый час низкой температуры применяется снижение платы согласно ПП РФ № 354.';
     const what = norm.kind === 'interruption' ? `нет ${norm.genitive}` : `низкая температура ${norm.genitive}`;
     const url = this.deepLink(c.incident.code);
     return {
@@ -1639,7 +1639,7 @@ export class Vernem {
     const chat = this.db.houseChat(c.house.id);
     await this.send(userId, {
       text: chat
-        ? 'Карточка ниже. Могу сам опубликовать её в чате дома — там будет работать кнопка.'
+        ? 'Карточка представлена ниже. Её можно опубликовать в чате дома с рабочей кнопкой.'
         : 'Перешлите карточку ниже в домовой чат. При пересылке кнопка пропадёт, но ссылка в тексте работает. Кнопки видны, только если бот сам публикует в группе: добавьте его в чат и отправьте там /dom.',
     });
     const sent = await this.send(userId, this.cardMessage(c));
@@ -1680,7 +1680,7 @@ export class Vernem {
     if (!hasMoney(calc)) {
       this.db.updateParticipant(pid, { status: 'closed' });
       return this.send(userId, {
-        text: ['**Снижения платы не положено:** перерыв в пределах нормы.', ...calc.months.flatMap((m) => m.lines), 'Лимит — на весь месяц: отключат ещё раз в этом месяце — сообщите, я сложу перерывы.'].join('\n'),
+        text: ['**Снижение платы не применяется:** перерыв не превышает норматив.', ...calc.months.flatMap((m) => m.lines), 'Лимит установлен на весь месяц. При повторном отключении в этом месяце сообщите о нём, чтобы учесть все перерывы.'].join('\n'),
         buttons: this.menu(),
       });
     }
@@ -1695,8 +1695,8 @@ export class Vernem {
     const norm = this.norms.services[c.incident.service_key];
     this.db.setState(userId, 'await_bill', { pid, months, idx });
     return this.send(userId, {
-      text: `Сколько начислено за «${norm.title.toLowerCase()}» за ${monthTitle(months[idx])}? Строка этой услуги в квитанции, не итог. Квитанции ещё нет — возьмите прошлую. Например: 1200`,
-      buttons: [[cb('Не знаю — посчитать в процентах', 'billskip')], backRow()],
+        text: `Сколько начислено за «${norm.title.toLowerCase()}» за ${monthTitle(months[idx])}? Укажите сумму по этой услуге, а не итоговую сумму квитанции. Если новой квитанции нет, используйте предыдущую. Например: 1200`,
+        buttons: [[cb('Не знаю. Рассчитать в процентах', 'billskip')], backRow()],
     });
   }
 
@@ -1753,7 +1753,7 @@ export class Vernem {
     const known = executorFromHouse(this.db.houseInfo(c.house), c.incident.service_key);
     if (known) {
       return this.send(userId, {
-        text: `Заявление — в «${known.name}» (из карточки дома). Верно?`,
+        text: `Направить заявление в «${known.name}» из карточки дома?`,
         buttons: [[cb('✅ Да', `ex:${pid}:${known.type}:h`), cb('Другой получатель', `ex:${pid}:ask`)]],
       });
     }
@@ -1767,7 +1767,7 @@ export class Vernem {
     if (c.incident.service_key === 'waste_off') rows.push([cb('Региональному оператору ТКО', `ex:${pid}:rop`)]);
     rows.push([cb('Не знаю', `ex:${pid}:unknown`)]);
     return this.send(userId, {
-      text: `Кому вы платите за «${norm.title.toLowerCase()}»? Смотрите получателя в квитанции — он и делает перерасчёт.`,
+        text: `Кому направить заявление по услуге «${norm.title.toLowerCase()}»? Проверьте получателя платежа в квитанции. Он рассматривает вопрос о перерасчёте.`,
       buttons: rows,
     });
   }
@@ -1793,7 +1793,7 @@ export class Vernem {
     const person = this.claimPerson(userId, c);
     if (person.fio && person.flat) {
       return this.send(userId, {
-        text: `Заявление от: ${clean(person.fio)}, кв. ${clean(person.flat)}${person.account ? `, л/с ${clean(person.account)}` : ''}?`,
+        text: `Использовать данные для заявления: ${clean(person.fio)}, квартира ${clean(person.flat)}${person.account ? `, лицевой счёт ${clean(person.account)}` : ''}?`,
         buttons: [[cb('✅ Да', `pd:${pid}:reuse`), cb('Другие данные', `pd:${pid}:new`)]],
       });
     }
@@ -1824,9 +1824,9 @@ export class Vernem {
   private askPersonal(userId: number, pid: number, state: string) {
     this.db.setState(userId, state, { pid });
     const prompts: Record<string, { text: string; skip: boolean }> = {
-      await_fio: { text: 'Ваши ФИО полностью — заявление подаётся от вашего имени:', skip: false },
-      await_flat: { text: 'Номер квартиры?', skip: false },
-      await_account: { text: 'Лицевой счёт из квитанции — ускорит перерасчёт:', skip: true },
+      await_fio: { text: 'Укажите фамилию, имя и отчество. Заявление будет подано от вашего имени.', skip: false },
+      await_flat: { text: 'Укажите номер квартиры.', skip: false },
+      await_account: { text: 'Укажите лицевой счёт из квитанции. Это поможет идентифицировать лицевой счёт.', skip: true },
       await_executor: { text: 'Название получателя платежа из квитанции, например «ООО "УК Пример"»:', skip: true },
     };
     const p = prompts[state];
@@ -1870,7 +1870,7 @@ export class Vernem {
     const user = this.db.getUser(userId)!;
     if (user.save_personal) return this.issueClaim(userId, pid, true);
     return this.send(userId, {
-      text: 'Запомнить ФИО и квартиру для следующих заявлений?',
+      text: 'Сохранить фамилию, имя, отчество и номер квартиры для следующих заявлений?',
       buttons: [[cb('Запомнить', `sv:${pid}:1`), cb('Не сохранять', `sv:${pid}:0`)]],
     });
   }
@@ -1886,7 +1886,7 @@ export class Vernem {
     const fresh = loadCase(this.db, pid)!;
     const doc = claimDocFor(this.db, this.norms, fresh, this.now());
     // Текстом заявление не дублируем: PDF удобнее распечатать, отправить или переписать от руки.
-    const pdf = await this.sendDocPdf(userId, doc, `📄 **Заявление готово**${doc.total ? ` — на ≈ ${fmtRub(doc.total)}` : ''}.`);
+    const pdf = await this.sendDocPdf(userId, doc, `📄 **Заявление подготовлено**${doc.total ? `. Ориентировочная сумма: ${fmtRub(doc.total)}` : ''}.`);
     if (pdf) rememberClaimPdf(pid, pdf);
     this.db.track(userId, 'claim_created', { service: c.incident.service_key, sum: doc.total });
 
@@ -1903,18 +1903,18 @@ export class Vernem {
     const rows: Btn[][] = weak || lateNumber ? actButtons(this, fresh) : [];
     // Для электронной подачи нужен именно скан заполненного и подписанного заявления.
     rows.unshift([cb('📎 Прислать подписанный скан', `scan:${pid}`)]);
-    rows.push([cb('✅ Я подал(а) заявление', `sub:${pid}`)]);
+    rows.push([cb('✅ Заявление подано', `sub:${pid}`)]);
     rows.push([cb('👥 Позвать соседей', `nb:${pid}`), cb('⬅️ Меню', 'menu')]);
     return this.send(userId, {
       text: [
-        weak ? '⚠️ В заявлении нет доказательства — ни номера заявки, ни акта. Подпишите акт с соседями и приложите его.' : '',
+        weak ? '⚠️ В заявлении нет номера заявки или акта. Составьте акт с соседями и приложите его.' : '',
         lateNumber ? '⚠️ Номер заявки получен позже начала: время до звонка подтвердит только акт с соседями.' : '',
-        act?.status === 'signed' ? '📎 Акт указан в приложениях — приложите его копию.' : '',
-        act?.status === 'signed' && act.chair_signed === 0 ? '⚠️ В акте нет подписи председателя совета дома, а по правилам она нужна. Если председатель есть — попросите его подписать.' : '',
-        '📎 Для почты или «Госуслуг Дом»: распечатайте заявление, заполните и подпишите его, затем пришлите мне один PDF со сканом всех страниц.',
+        act?.status === 'signed' ? '📎 Акт указан в приложениях. Приложите его копию к заявлению.' : '',
+        act?.status === 'signed' && act.chair_signed === 0 ? '⚠️ В акте нет подписи председателя совета дома. Если председатель есть, попросите его подписать акт.' : '',
+        '📎 Для отправки по электронной почте или через ГИС ЖКХ распечатайте заявление, заполните и подпишите его. Затем прикрепите один файл PDF со сканами всех страниц.',
         SEND_HOWTO,
-        'Подадите — нажмите «Я подал(а) заявление»: с этой даты я жду квитанцию с перерасчётом.',
-        save ? '' : 'ФИО и квартиру из базы удалил — они остались только в PDF.',
+        'После подачи выберите «Заявление подано». С этой даты будет отслеживаться квитанция с перерасчётом.',
+        save ? '' : 'Фамилия, имя, отчество и номер квартиры удалены из базы. Они сохранены только в файле PDF.',
       ]
         .filter(Boolean)
         .join('\n'),
@@ -1923,7 +1923,7 @@ export class Vernem {
   }
 
   private async sendPdf(userId: number, c: CaseBundle) {
-    const pdf = await this.sendDocPdf(userId, claimDocFor(this.db, this.norms, c, this.now()), 'PDF для печати или отправки:');
+    const pdf = await this.sendDocPdf(userId, claimDocFor(this.db, this.norms, c, this.now()), 'Файл PDF для печати или отправки:');
     if (pdf) rememberClaimPdf(c.p.id, pdf);
     return pdf;
   }
@@ -1944,7 +1944,7 @@ export class Vernem {
       return pdf;
     } catch (e) {
       console.error('[bot] не удалось отправить PDF', e);
-      await this.safeSend(userId, { text: 'PDF сейчас не получилось отправить. Попробуйте ещё раз чуть позже.' });
+      await this.safeSend(userId, { text: 'Не удалось отправить файл PDF. Повторите попытку позже.' });
       return null;
     } finally {
       if (dir) rmSync(dir, { recursive: true, force: true });
@@ -1967,7 +1967,7 @@ export class Vernem {
     if (!c || c.p.status !== 'claim_ready' || !claimOf(c.p).submittedAt) return;
     const norm = this.norms.services[c.incident.service_key];
     return this.send(c.p.user_id, {
-      text: `🧾 Пришла новая квитанция? Есть перерасчёт за «${norm.title.toLowerCase()}» (${formatShort(new Date(c.p.started_at), c.house.tz)})? Сфотографируйте квитанцию — пригодится, если перерасчёта нет.`,
+      text: `Получена новая квитанция? Проверьте перерасчёт за «${norm.title.toLowerCase()}» (${formatShort(new Date(c.p.started_at), c.house.tz)}). Если перерасчёта нет, направьте фото квитанции.`,
       buttons: [
         [cb('✅ Да, вернули', `rc:${pid}:y`), cb('❌ Нет', `rc:${pid}:n`)],
         [cb('📷 Фото квитанции', `phadd:${pid}:receipt`), cb('Ещё не пришла', `rc:${pid}:w`)],
@@ -2030,7 +2030,7 @@ export class Vernem {
       lines.push('', `По расчёту положено ≈ ${fmtRub(expected.sum)}, а вернули ${fmtRub(amount!)}. Можно потребовать остальное и штраф 50% за нарушение порядка расчёта.`);
       return this.send(userId, { text: lines.join('\n'), buttons: [[cb('⚖️ Потребовать остальное', `escm:${pid}`)], ...this.menu()] });
     }
-    lines.push('', 'Расскажите соседям — им положено столько же.');
+    lines.push('', 'Сообщите соседям о результате. Они могут проверить своё право на перерасчёт.');
     return this.send(userId, { text: lines.join('\n'), buttons: this.menu() });
   }
 
@@ -2100,7 +2100,7 @@ export class Vernem {
     const day = (d: Date) => d.toLocaleDateString('sv-SE', { timeZone: c.house.tz });
     if (day(date) > day(this.now())) return 'Эта дата ещё не наступила.';
     const created = claimOf(c.p).createdAt;
-    if (created && day(date) < day(new Date(created))) return `Заявление датировано ${formatDate(new Date(created), c.house.tz)} — подать его раньше нельзя.`;
+    if (created && day(date) < day(new Date(created))) return `Заявление датировано ${formatDate(new Date(created), c.house.tz)}. Его нельзя подать раньше этой даты.`;
     return null;
   }
 
@@ -2115,7 +2115,7 @@ export class Vernem {
     const [y, mo] = monthKey(new Date(at), c.house.tz).split('-').map(Number);
     const next = `${mo === 12 ? y + 1 : y}-${String(mo === 12 ? 1 : mo + 1).padStart(2, '0')}`;
     return this.send(userId, {
-      text: `✅ Записал: подано ${formatDate(new Date(at), c.house.tz)}${incoming ? `, вх. № ${incoming}` : ''}. Перерасчёт появится в квитанции, которая придёт в начале ${monthGenitive(next)}, — тогда спрошу.`,
+      text: `✅ Подача заявления зафиксирована: ${formatDate(new Date(at), c.house.tz)}${incoming ? `, входящий № ${incoming}` : ''}. Проверьте квитанцию в начале ${monthGenitive(next)}.`,
       buttons: [[cb('📋 К делу', `cs:${pid}`), cb('⬅️ Меню', 'menu')]],
     });
   }
@@ -2128,7 +2128,7 @@ export class Vernem {
     this.db.setState(userId, 'idle');
     const list = this.db.listUserParticipants(userId).slice(0, 10);
     if (!list.length) {
-      return this.send(userId, { text: 'Дел пока нет. Что-то сломается — нажмите «Что-то сломалось».', buttons: this.menu() });
+      return this.send(userId, { text: 'Дел пока нет. Чтобы зафиксировать нарушение, выберите «Сообщить о проблеме».', buttons: this.menu() });
     }
     const rows: Btn[][] = list.map((p) => {
       const c = loadCase(this.db, p.id)!;
@@ -2175,8 +2175,8 @@ export class Vernem {
     else if (c.p.status === 'claim_ready' && !c.incident.demo) rows.push([cb('📎 Прислать подписанный скан', `scan:${pid}`)]);
     if (cl.submittedAt && !cl.emailedAt) lines.push(`Подано ${formatDate(new Date(cl.submittedAt), tz)}${cl.incomingNumber ? `, вх. № ${clean(cl.incomingNumber)}` : ''}.`);
     // «Не сделали» — только после подачи: от неё считаются сроки, дата нужна в требовании.
-    if (c.p.status === 'claim_ready' && !cl.submittedAt) rows.push([cb('✅ Я подал(а) заявление', `sub:${pid}`)], [cb('✅ Перерасчёт уже пришёл', `rc:${pid}:y`)]);
-    else if (c.p.status === 'claim_ready') rows.push([cb('✅ Перерасчёт пришёл', `rc:${pid}:y`), cb('❌ Не сделали', `rc:${pid}:n`)]);
+    if (c.p.status === 'claim_ready' && !cl.submittedAt) rows.push([cb('✅ Заявление подано', `sub:${pid}`)], [cb('✅ Перерасчёт получен', `rc:${pid}:y`)]);
+    else if (c.p.status === 'claim_ready') rows.push([cb('✅ Перерасчёт получен', `rc:${pid}:y`), cb('❌ Перерасчёт не выполнен', `rc:${pid}:n`)]);
     if (c.p.status === 'refused') rows.push([cb('⚖️ Что делать дальше', `escm:${pid}`)]);
     rows.push(...actButtons(this, c));
     if (c.p.status !== 'closed') rows.push([cb('📷 Добавить фото', `phadd:${pid}:evidence`)]);
@@ -2205,8 +2205,8 @@ export class Vernem {
     return this.send(userId, {
       text: [
         '🧪 **Демо на тестовых данных.** Какой случай показать?',
-        '1. Дозвонились в аварийную службу — есть номер заявки.',
-        '2. Не дозвонились — номера нет. Доказательство — акт с соседями. Это самый сложный случай.',
+        '1. Обращение в аварийную службу зарегистрировано, номер заявки получен.',
+        '2. Связаться с аварийной службой не удалось, номера заявки нет. Для подтверждения нарушения используется акт с соседями.',
       ].join('\n'),
       buttons: [[cb('📞 1. Есть номер заявки', 'demo:ads')], [cb('📵 2. Не дозвонились', 'demo:act')], [cb('🔄 Все демо-дела заново', 'demo:reset')], [cb('⬅️ Меню', 'menu')]],
     });
@@ -2217,7 +2217,7 @@ export class Vernem {
     const n = await resetDemoCases(this.db, userId, this.now());
     this.db.track(userId, 'demo_reset');
     return this.send(userId, {
-      text: `🧪 Готово: ${n} демо-дела заново — «демо 1» (есть номер заявки), «демо 2» (акт с соседями) и «демо 3» (вернули меньше положенного). Ваши настоящие дела не тронуты.`,
+      text: `🧪 Создано демо-дел: ${n}. Демо 1 содержит номер заявки, демо 2 содержит акт с соседями, демо 3 показывает неполный перерасчёт. Ваши реальные дела не изменены.`,
       buttons: [[cb('📋 Мои дела', 'cases')], [cb('⬅️ Меню', 'menu')]],
     });
   }
@@ -2244,13 +2244,13 @@ export class Vernem {
     this.db.track(userId, 'demo_started', { kind });
     await this.send(userId, {
       text: ads
-        ? `🧪 **Демо 1: есть номер заявки** (данные тестовые). Три дня назад отключили горячую воду, вы дозвонились в аварийную службу — заявка ${demoNo}. Нажмите «Воду дали» → «Только что», введите 1200 — и дойдите до заявления.`
+        ? `🧪 **Демо 1: есть номер заявки**. Используются тестовые данные. Три дня назад было отключено горячее водоснабжение. Обращение в аварийную службу зарегистрировано под № ${demoNo}. Выберите «Водоснабжение восстановлено», затем «Только что» и укажите 1200, чтобы перейти к заявлению.`
         : [
             '🧪 **Демо 2: номера заявки нет** (данные тестовые). Позавчера пропала холодная вода, в аварийную службу не дозвонились.',
-            'Без номера УК может сказать «не знаем, воды не было?». Доказательство — акт, который подписывают соседи (п. 110(1) ПП № 354).',
-            '1) «📄 Акт с соседями» — впишу вас, два соседа (демо) подтвердят сами.',
+            'При отсутствии номера заявки нарушение подтверждается актом, который подписывают соседи согласно п. 110(1) ПП № 354.',
+            '1) Выберите «📄 Акт с соседями». Ваши данные будут внесены в акт, два демонстрационных соседа подтвердят его.',
             '2) «✅ Акт подписан».',
-            '3) «Воду дали» → впишите 600 — акт попадёт в заявление.',
+            '3) Выберите «Водоснабжение восстановлено» и укажите 600. Акт будет приложен к заявлению.',
           ].join('\n'),
     });
     return this.sendTracking(userId, p.id, false);
@@ -2263,8 +2263,8 @@ export class Vernem {
   private groupIntro(): OutMessage {
     return {
       text: [
-        'Привет, соседи! Я **«Вернём»** — помогаю вернуть деньги за отключения воды, света и тепла по ПП РФ № 354.',
-        'Если что-то отключили — напишите мне в личные сообщения: помогу зафиксировать нарушение, посчитать сумму и подготовить заявление.',
+        'Здравствуйте. **«Вернём»** помогает подготовить обращение о нарушении предоставления коммунальных услуг и рассчитать снижение платы по ПП РФ № 354.',
+        'При отключении коммунальной услуги напишите в личные сообщения. Сервис поможет зафиксировать нарушение, выполнить расчёт и подготовить заявление.',
         '',
         'Чтобы я публиковал сюда карточки отключений, любой житель может отправить в этом чате команду /dom.',
       ].join('\n'),
@@ -2285,7 +2285,7 @@ export class Vernem {
     const houses = this.db.getUser(userId) ? this.db.listUserHouses(userId) : [];
     if (!houses.length) {
       return this.out.toChat(chatId, {
-        text: 'Сначала напишите боту в личные сообщения и укажите адрес дома — тогда смогу привязать этот чат.',
+        text: 'Сначала напишите боту в личные сообщения и укажите адрес дома. После этого чат можно будет привязать к дому.',
         buttons: [[link('💬 Написать боту', `https://max.ru/${this.cfg.botUsername}`)]],
       });
     }
@@ -2296,7 +2296,7 @@ export class Vernem {
       text: `К какому дому привязать чат${title ? ` «${clean(title)}»` : ''}? Туда будут уходить карточки отключений только этого дома.`,
       buttons: houses.map((h) => [cb(`🏠 ${h.address}`.slice(0, 64), `dom:${chatId}:${h.id}`)]),
     });
-    return this.out.toChat(chatId, { text: 'У вас несколько адресов — выберите дом в личных сообщениях с ботом.' });
+    return this.out.toChat(chatId, { text: 'У вас несколько адресов. Выберите дом в личных сообщениях с ботом.' });
   }
 
   private linkHouseChat(chatId: number, houseId: number, userId: number) {
