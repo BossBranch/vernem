@@ -67,6 +67,12 @@
     heating_off: 'Отопление восстановлено', sewerage_off: 'Неисправность канализации устранена', waste_off: 'Мусор вывезен',
     heating_temp: 'Температура в помещении восстановлена', hot_water_temp: 'Температура воды восстановлена'
   };
+  /** Короткие подписи второго этапа: в шкале на телефоне нет места для полного названия кнопки. */
+  var STEPPER_END_NAME = {
+    hot_water_off: 'Воду дали', cold_water_off: 'Воду дали', electricity_off: 'Свет дали', gas_off: 'Газ дали',
+    heating_off: 'Тепло дали', sewerage_off: 'Засор устранили', waste_off: 'Мусор вывезли',
+    heating_temp: 'Стало тепло', hot_water_temp: 'Вода нагрелась'
+  };
   var END_TITLE = {
     hot_water_off: 'Когда восстановлено водоснабжение. Отметьте здесь', cold_water_off: 'Когда восстановлено водоснабжение. Отметьте здесь',
     electricity_off: 'Когда восстановлено электроснабжение. Отметьте здесь', gas_off: 'Когда восстановлено газоснабжение. Отметьте здесь',
@@ -75,6 +81,7 @@
     hot_water_temp: 'Когда восстановлена температура воды. Отметьте здесь'
   };
   function endName(c) { return END_NAME[c.service] || 'Неисправность устранена'; }
+  function stepperEndName(c) { return STEPPER_END_NAME[c.service] || 'Устранили'; }
   /** «света не было» — для фраз в середине предложения. */
   function lackNow(c) { var t = LACK_NOW[c.service]; return t ? t.charAt(0).toLowerCase() + t.slice(1) : 'услуги нет'; }
   function lackWas(c) { var t = LACK_WAS[c.service]; return t ? t.charAt(0).toLowerCase() + t.slice(1) : 'услуги не было'; }
@@ -1296,11 +1303,12 @@
     return '<div class="note warn">' + icon('alert') + '<div><p>' + text + '</p>' + (extra || '') + '</div></div>';
   }
 
-  /** Путь дела: «Сообщили → Воду дали → Заявление → Квитанция». */
+  /** Путь дела: «Записали → Воду дали → Заявление → Квитанция». */
   function stepper(c, st) {
-    // Пока воду не дали, шаг — вопрос: «Воду дали» рядом с «воды нет» сбивает с толку.
+    // Пока услугу не восстановили, второй шаг — вопрос.
     // «Записали», а не «Сообщили»: без номера заявки сообщить никуда не удалось.
-    var names = ['Записали', st.done >= 2 ? endName(c) : endName(c) + '?', 'Заявление', 'Квитанция'];
+    var ended = stepperEndName(c);
+    var names = ['Записали', st.done >= 2 ? ended : ended + '?', 'Заявление', 'Квитанция'];
     return '<ol class="stepper">' + names.map(function (n, i) {
       var k = i + 1;
       // Сейчас главное — акт (его нет среди 4 шагов): текущий шаг не подсвечиваем, чтобы не спорил с блоком «Сейчас».
